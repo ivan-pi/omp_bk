@@ -27,15 +27,15 @@ void SumFactorization(
     using nm_view  = ndview<T, nm, nm, nm>;
     using nq_cview = ndview<const T, nq, nq, nq>;
 
-    // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
-    const ndview<const T, nm, nq> B{basis};
-
     #pragma omp target \
         map(to: basis[:nm*nq]) \
         map(to: JxW[:nelmt*nq*nq*nq], in[:nelmt*nm*nm*nm]) \
         map(from: out[:nelmt*nm*nm*nm])
     #pragma omp teams loop
     for (std::size_t e = 0; e < nelmt; ++e) {
+
+        // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
+        const ndview<const T, nm, nq> B{basis};
 
     	// Work arrays: two nq^3 boxes; steps address sub-slices of each box.
     	// Every step assigns its full output sub-slice, so no zeroing is needed.
