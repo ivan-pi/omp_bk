@@ -168,6 +168,9 @@ void run_test(const std::size_t nelmt, const int ntests, const bool show_norm = 
         std::cout << "# OpenMP kernel norm = "
                   << norm2(out.data(), out.size()) << "\n";
     }
+
+    std::cout << "Serial norm = " << norm2(out.data(), out.size()) << "\n";
+
 }
 
 // Default element count. Note: the historical literal was `2 << 18`, which
@@ -194,9 +197,9 @@ int main(int argc, char** argv)
         case 3: run_test<float, 3>(nelmt, ntests, show_norm); break;
         case 4: run_test<float, 4>(nelmt, ntests, show_norm); break;
         case 5: run_test<float, 5>(nelmt, ntests, show_norm); break;
-//      case 6: run_test<float, 6>(nelmt, ntests, show_norm); break;
-//      case 7: run_test<float, 7>(nelmt, ntests, show_norm); break;
-//      case 8: run_test<float, 8>(nelmt, ntests, show_norm); break;
+        case 6: run_test<float, 6>(nelmt, ntests, show_norm); break;
+        case 7: run_test<float, 7>(nelmt, ntests, show_norm); break;
+        case 8: run_test<float, 8>(nelmt, ntests, show_norm); break;
         default:
             std::cerr << "unsupported nq = " << nq << " (supported: 2..5)\n";
             return 1;
