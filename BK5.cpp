@@ -3,8 +3,6 @@
 #include <array>
 #include <vector>
 #include <cstdlib>
-#include <optional>
-#include <string>
 #include <chrono>
 #include <limits>
 #include <algorithm>
@@ -18,6 +16,8 @@
 // G holds six symmetric metric factors per point, interleaved as
 // G(i, j, factor, k) within each element.
 // ---------------------------------------------------------------------------
+namespace bk {
+
 template <typename T, int nq, typename index_t = int>
 void SumFactorization(
     const std::size_t nelmt,
@@ -109,12 +109,16 @@ void SumFactorization(
     }
 }
 
+} // namespace bk
+
+using namespace bk;
+
 // ---------------------------------------------------------------------------
 // Test driver
 // ---------------------------------------------------------------------------
 
 template <typename T, int nq>
-void run_test(const std::size_t nelmt, const int ntests, const bool show_norm = false)
+void run_test(const std::size_t nelmt, const int ntests)
 {
     // Allocation of arrays
     const std::array<T, nq * nq> dbasis = make_test_basis<T, nq, nq>();
@@ -164,13 +168,7 @@ void run_test(const std::size_t nelmt, const int ntests, const bool show_norm = 
               << " GDoF/s = " << dof_rate(elapsed)
               << " GB/s = "   << byte_rate(elapsed) << "\n";
 
-    if (show_norm) {
-        std::cout << "# OpenMP kernel norm = "
-                  << norm2(out.data(), out.size()) << "\n";
-    }
-
-    std::cout << "Serial norm = " << norm2(out.data(), out.size()) << "\n";
-
+    std::cout << "norm = " << norm2(out.data(), out.size()) << "\n";
 }
 
 // Default element count. Note: the historical literal was `2 << 18`, which
@@ -185,23 +183,19 @@ int main(int argc, char** argv)
         (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
     const int ntests = (argc > 3) ? std::atoi(argv[3]) : 5;
 
-    // optional<string> compares against the literal directly: an unset
-    // variable is nullopt and compares unequal, so this is the whole parse.
-    const bool show_norm = (get_env("SHOW_NORM") == "1");
-
     // Runtime nq -> compile-time nq: one kernel instantiation per supported
     // order (each case label must pair with its own literal).
     // Note: adding more cases can increase the compilation time.
     switch (nq) {
-        case 2: run_test<float, 2>(nelmt, ntests, show_norm); break;
-        case 3: run_test<float, 3>(nelmt, ntests, show_norm); break;
-        case 4: run_test<float, 4>(nelmt, ntests, show_norm); break;
-        case 5: run_test<float, 5>(nelmt, ntests, show_norm); break;
-        case 6: run_test<float, 6>(nelmt, ntests, show_norm); break;
-        case 7: run_test<float, 7>(nelmt, ntests, show_norm); break;
-        case 8: run_test<float, 8>(nelmt, ntests, show_norm); break;
+        case 2: run_test<float, 2>(nelmt, ntests); break;
+        case 3: run_test<float, 3>(nelmt, ntests); break;
+        case 4: run_test<float, 4>(nelmt, ntests); break;
+        case 5: run_test<float, 5>(nelmt, ntests); break;
+        case 6: run_test<float, 6>(nelmt, ntests); break;
+        case 7: run_test<float, 7>(nelmt, ntests); break;
+        case 8: run_test<float, 8>(nelmt, ntests); break;
         default:
-            std::cerr << "unsupported nq = " << nq << " (supported: 2..5)\n";
+            std::cerr << "unsupported nq = " << nq << " (supported: 2..8)\n";
             return 1;
     }
 
