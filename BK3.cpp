@@ -106,9 +106,10 @@ void SumFactorization(
                     wsp1(p, q, r) = tmp;
                 }
 
-        // steps 5-7 : load geometric factors, multiply by D, apply chain rule
-        // (note: the qr/qt pairing in the chain rule is kept exactly as in
-        //  the reference and the CUDA variant)
+        // steps 5-7 : load geometric factors, multiply by D, apply chain rule.
+        // The symmetric metric G is applied so that the diagonal factor pairs
+        // with the same-direction derivative (Grr*qr, Gss*qs, Gtt*qt), matching
+        // BK5. qr/qs/qt are the derivatives along directions 0/1/2.
         for (index_t p = 0; p < nq; ++p) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t r = 0; r < nq; ++r) {
@@ -131,9 +132,9 @@ void SumFactorization(
                     for (index_t n = 0; n < nq; ++n)
                         qt += wsp1(p, q, n) * D(n, r);
 
-                    rqr(p, q, r) = Grr * qt + Grs * qs + Grt * qr;
-                    rqs(p, q, r) = Grs * qt + Gss * qs + Gst * qr;
-                    rqt(p, q, r) = Grt * qt + Gst * qs + Gtt * qr;
+                    rqr(p, q, r) = Grr * qr + Grs * qs + Grt * qt;
+                    rqs(p, q, r) = Grs * qr + Gss * qs + Gst * qt;
+                    rqt(p, q, r) = Grt * qr + Gst * qs + Gtt * qt;
                 }
             }
         }
