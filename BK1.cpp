@@ -10,8 +10,7 @@
 
 #include "bk_common.h"
 
-namespace BK1 {
-namespace Serial {
+namespace bk {
 
 template <typename T, int nq, typename index_t = int>
 void SumFactorization(
@@ -129,8 +128,9 @@ void SumFactorization(
     }
 }
 
-} // namespace Serial
-} // namespace BK1
+} // namespace bk
+
+using namespace bk;
 
 // ---------------------------------------------------------------------------
 // Test driver
@@ -141,7 +141,7 @@ void run_test(const std::size_t nelmt, const int ntests)
 {
     constexpr int nm = nq - 1;
 
-    const std::array<T, nm * nq> basis = make_test_basis<T, nq>();
+    const std::array<T, nm * nq> basis = make_test_basis<T, nm, nq>();
     const std::vector<T> JxW(nelmt * nq * nq * nq, T(1.0));
     const std::vector<T> in (nelmt * nm * nm * nm, T(3.0));
     std::vector<T>       out(nelmt * nm * nm * nm);
@@ -168,8 +168,7 @@ void run_test(const std::size_t nelmt, const int ntests)
         map(tofrom: d_out[:size_inout])
     for (int t = 0; t < ntests; ++t) {
         auto start = high_resolution_clock::now();
-        BK1::Serial::SumFactorization<T, nq>(nelmt, d_basis, d_JxW,
-                                             d_in, d_out);
+        SumFactorization<T, nq>(nelmt, d_basis, d_JxW, d_in, d_out);
         auto stop = high_resolution_clock::now();
         duration<double> rep_time = stop - start;
         elapsed = std::min(elapsed, rep_time.count());
@@ -188,7 +187,7 @@ void run_test(const std::size_t nelmt, const int ntests)
               << " GDoF/s = " << dof_rate(elapsed)
               << " GB/s = "   << byte_rate(elapsed) << "\n";
 
-    std::cout << "Serial norm = " << norm2(out.data(), out.size()) << "\n";
+    std::cout << "norm = " << norm2(out.data(), out.size()) << "\n";
 }
 
 // Default element count. Note: the historical literal was `2 << 18`, which
@@ -206,14 +205,14 @@ int main(int argc, char** argv)
     // Runtime p -> compile-time nq: one kernel instantiation per supported
     // order, nq = p + 2 (each case label must pair with its literal + 2).
     switch (p) {
-        case 1: run_test<double,  3>(nelmt, ntests); break;
-        case 2: run_test<double,  4>(nelmt, ntests); break;
-        case 3: run_test<double,  5>(nelmt, ntests); break;
-        case 4: run_test<double,  6>(nelmt, ntests); break;
-        case 5: run_test<double,  7>(nelmt, ntests); break;
-        case 6: run_test<double,  8>(nelmt, ntests); break;
-        case 7: run_test<double,  9>(nelmt, ntests); break;
-        case 8: run_test<double, 10>(nelmt, ntests); break;
+        case 1: run_test<float,  3>(nelmt, ntests); break;
+        case 2: run_test<float,  4>(nelmt, ntests); break;
+        case 3: run_test<float,  5>(nelmt, ntests); break;
+        case 4: run_test<float,  6>(nelmt, ntests); break;
+        case 5: run_test<float,  7>(nelmt, ntests); break;
+        case 6: run_test<float,  8>(nelmt, ntests); break;
+        case 7: run_test<float,  9>(nelmt, ntests); break;
+        case 8: run_test<float, 10>(nelmt, ntests); break;
         default:
             std::cerr << "unsupported polynomial order p = " << p
                       << " (supported: 1..8)\n";

@@ -1,6 +1,15 @@
-#pragma once
+#ifndef BK_COMMON_H
+#define BK_COMMON_H
 
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdlib>
 #include <optional>
+#include <string>
+#include <vector>
+
+namespace bk {
 
 // ---------------------------------------------------------------------------
 // ndview: zero-overhead multi-dimensional accessor, compile-time extents.
@@ -45,19 +54,6 @@ AccumT norm2(const std::vector<T>& v)
 }
 
 
-// Test-harness basis data: B(i, p) = cos(i * nq + p), stored mode-major as
-// basis[i * nq + p] -- the layout the kernel's B view expects.
-template <typename T, int nq>
-std::array<T, (nq - 1) * nq> make_test_basis()
-{
-    constexpr int nm = nq - 1;
-    std::array<T, nm * nq> basis{};
-    for (int i = 0; i < nm; i++)
-        for (int p = 0; p < nq; p++)
-            basis[i * nq + p] = std::cos(T(i * nq + p));
-    return basis;
-}
-
 // Test-harness basis data: M(a, b) = cos(a * cols + b), stored row-major --
 // covers both the (nm x nq) interpolation basis and the (nq x nq) derivative
 // matrix used here.
@@ -71,9 +67,13 @@ std::array<T, rows * cols> make_test_basis()
     return m;
 }
 
-std::optional<std::string> get_env(const char* name)
+inline std::optional<std::string> get_env(const char* name)
 {
     if (const char* val = std::getenv(name))
         return std::string(val);
     return std::nullopt;
 }
+
+} // namespace bk
+
+#endif // BK_COMMON_H

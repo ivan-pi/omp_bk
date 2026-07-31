@@ -10,8 +10,7 @@
 
 #include "bk_common.h"
 
-namespace BK3 {
-namespace Serial {
+namespace bk {
 
 template <typename T, int nq, int nm = nq - 1, typename index_t = int>
 void SumFactorization(
@@ -25,11 +24,6 @@ void SumFactorization(
     using nm_cview = ndview<const T, nm, nm, nm>;
     using nm_view  = ndview<T, nm, nm, nm>;
 
-    // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
-    const ndview<const T, nm, nq> B{basis};
-    // D(row, col) == dbasis[row * nq + col], shared by all directions
-    const ndview<const T, nq, nq> D{dbasis};
-
     #pragma omp target \
         map(to: basis[:nm*nq]) \
         map(to: dbasis[:nq*nq]) \
@@ -37,6 +31,23 @@ void SumFactorization(
         map(from: out[:nelmt*nm*nm*nm])
     #pragma omp teams loop
     for (std::size_t e = 0; e < nelmt; ++e) {
+
+        // Views onto the mapped basis matrices. Constructed *inside* the
+        // target region: a view built outside would capture the host pointer
+        // (firstprivate/implicitly-mapped structs get no pointer translation),
+        // so B(i,p)/D(n,p) would dereference host memory on the device.
+        // This is the portable form used by BK1 and BK5.
+        //
+        // An alternative is to build B/D on the host and add `map(to: B, D)`
+        // to the target clause. Both g++ 13 and clang++ 18 compile that and it
+        // runs correctly under host fallback, but whether the runtime attaches
+        // the struct's pointer member to the mapped basis on a real device is
+        // implementation-defined (reported valid for the Intel runtime); it
+        // was not validated on a GPU here, so the construct-inside form is kept.
+        // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
+        const ndview<const T, nm, nq> B{basis};
+        // D(row, col) == dbasis[row * nq + col], shared by all directions
+        const ndview<const T, nq, nq> D{dbasis};
 
         // Work arrays: five nq^3 boxes; steps address sub-slices of each box.
         // Every step assigns its full output sub-slice, so no zeroing is needed.
@@ -95,9 +106,10 @@ void SumFactorization(
                     wsp1(p, q, r) = tmp;
                 }
 
-        // steps 5-7 : load geometric factors, multiply by D, apply chain rule
-        // (note: the qr/qt pairing in the chain rule is kept exactly as in
-        //  the reference and the CUDA variant)
+        // steps 5-7 : load geometric factors, multiply by D, apply chain rule.
+        // The symmetric metric G is applied so that the diagonal factor pairs
+        // with the same-direction derivative (Grr*qr, Gss*qs, Gtt*qt), matching
+        // BK5. qr/qs/qt are the derivatives along directions 0/1/2.
         for (index_t p = 0; p < nq; ++p) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t r = 0; r < nq; ++r) {
@@ -120,9 +132,9 @@ void SumFactorization(
                     for (index_t n = 0; n < nq; ++n)
                         qt += wsp1(p, q, n) * D(n, r);
 
-                    rqr(p, q, r) = Grr * qt + Grs * qs + Grt * qr;
-                    rqs(p, q, r) = Grs * qt + Gss * qs + Gst * qr;
-                    rqt(p, q, r) = Grt * qt + Gst * qs + Gtt * qr;
+                    rqr(p, q, r) = Grr * qr + Grs * qs + Grt * qt;
+                    rqs(p, q, r) = Grs * qr + Gss * qs + Gst * qt;
+                    rqt(p, q, r) = Grt * qr + Gst * qs + Gtt * qt;
                 }
             }
         }
@@ -189,8 +201,9 @@ void SumFactorization(
     }
 }
 
-} // namespace Serial
-} // namespace BK3
+} // namespace bk
+
+using namespace bk;
 
 // ---------------------------------------------------------------------------
 // Test driver
@@ -233,8 +246,7 @@ void run_test(const std::size_t nelmt, const int ntests)
     for (int t = 0; t < ntests; ++t) {
         auto start = high_resolution_clock::now();
 
-        BK3::Serial::SumFactorization<T, nq>(nelmt, basis.data(), dbasis.data(),
-                                             G.data(), in.data(), out.data());
+        SumFactorization<T, nq>(nelmt, d_basis, d_dbasis, d_G, d_in, d_out);
 
         auto stop = high_resolution_clock::now();
         duration<double> rep_time = stop - start;
@@ -254,7 +266,7 @@ void run_test(const std::size_t nelmt, const int ntests)
               << " GDoF/s = " << dof_rate(elapsed)
               << " GB/s = "   << byte_rate(elapsed) << "\n";
 
-    std::cout << "Serial norm = " << norm2(out.data(), out.size()) << "\n";
+    std::cout << "norm = " << norm2(out.data(), out.size()) << "\n";
 }
 
 // Default element count. Note: the historical literal was `2 << 18`, which
@@ -272,14 +284,14 @@ int main(int argc, char** argv)
     // Runtime p -> compile-time nq: one kernel instantiation per supported
     // order, nq = p + 2 (each case label must pair with its literal + 2).
     switch (p) {
-        case 1: run_test<double,  3>(nelmt, ntests); break;
-        case 2: run_test<double,  4>(nelmt, ntests); break;
-        case 3: run_test<double,  5>(nelmt, ntests); break;
-        case 4: run_test<double,  6>(nelmt, ntests); break;
-        case 5: run_test<double,  7>(nelmt, ntests); break;
-        case 6: run_test<double,  8>(nelmt, ntests); break;
-        case 7: run_test<double,  9>(nelmt, ntests); break;
-        case 8: run_test<double, 10>(nelmt, ntests); break;
+        case 1: run_test<float,  3>(nelmt, ntests); break;
+        case 2: run_test<float,  4>(nelmt, ntests); break;
+        case 3: run_test<float,  5>(nelmt, ntests); break;
+        case 4: run_test<float,  6>(nelmt, ntests); break;
+        case 5: run_test<float,  7>(nelmt, ntests); break;
+        case 6: run_test<float,  8>(nelmt, ntests); break;
+        case 7: run_test<float,  9>(nelmt, ntests); break;
+        case 8: run_test<float, 10>(nelmt, ntests); break;
         default:
             std::cerr << "unsupported polynomial order p = " << p
                       << " (supported: 1..8)\n";
