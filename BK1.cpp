@@ -47,37 +47,37 @@ void SumFactorization(
         const nq_cview e_JxW{JxW + e * nq_cview::size};
 
         // step-1 : copy in -> wsp0 (nm^3 sub-block of the nq^3 box)
-        for (index_t i = 0; i < nm; i++)
-            for (index_t j = 0; j < nm; j++)
-                for (index_t k = 0; k < nm; k++)
+        for (index_t i = 0; i < nm; ++i)
+            for (index_t j = 0; j < nm; ++j)
+                for (index_t k = 0; k < nm; ++k)
                     wsp0(i, j, k) = e_in(i, j, k);
 
         // step-2 : direction 0
-        for (index_t p = 0; p < nq; p++)
-            for (index_t k = 0; k < nm; k++)
-                for (index_t j = 0; j < nm; j++) {
+        for (index_t p = 0; p < nq; ++p)
+            for (index_t k = 0; k < nm; ++k)
+                for (index_t j = 0; j < nm; ++j) {
                     T tmp = 0;
-                    for (index_t i = 0; i < nm; i++)
+                    for (index_t i = 0; i < nm; ++i)
                         tmp += wsp0(i, j, k) * B(i, p);
                     wsp1(p, j, k) = tmp;
                 }
 
         // step-3 : direction 1
-        for (index_t q = 0; q < nq; q++)
-            for (index_t p = 0; p < nq; p++)
-                for (index_t k = 0; k < nm; k++) {
+        for (index_t q = 0; q < nq; ++q)
+            for (index_t p = 0; p < nq; ++p)
+                for (index_t k = 0; k < nm; ++k) {
                     T tmp = 0;
-                    for (index_t j = 0; j < nm; j++)
+                    for (index_t j = 0; j < nm; ++j)
                         tmp += wsp1(p, j, k) * B(j, q);
                     wsp0(q, p, k) = tmp;
                 }
 
         // step-4 : direction 2
-        for (index_t r = 0; r < nq; r++)
-            for (index_t q = 0; q < nq; q++)
-                for (index_t p = 0; p < nq; p++) {
+        for (index_t r = 0; r < nq; ++r)
+            for (index_t q = 0; q < nq; ++q)
+                for (index_t p = 0; p < nq; ++p) {
                     T tmp = 0;
-                    for (index_t k = 0; k < nm; k++)
+                    for (index_t k = 0; k < nm; ++k)
                         tmp += wsp0(q, p, k) * B(k, r);
                     wsp1(p, q, r) = tmp;
                 }
@@ -85,45 +85,45 @@ void SumFactorization(
         // Reverse operations
 
         // step-5 : multiply with weights and determinant of Jacobi
-        for (index_t r = 0; r < nq; r++)
-            for (index_t q = 0; q < nq; q++)
-                for (index_t p = 0; p < nq; p++)
+        for (index_t r = 0; r < nq; ++r)
+            for (index_t q = 0; q < nq; ++q)
+                for (index_t p = 0; p < nq; ++p)
                     wsp1(p, q, r) *= e_JxW(p, q, r);
 
         // step-6 : direction 2
-        for (index_t k = 0; k < nm; k++)
-            for (index_t q = 0; q < nq; q++)
-                for (index_t p = 0; p < nq; p++) {
+        for (index_t k = 0; k < nm; ++k)
+            for (index_t q = 0; q < nq; ++q)
+                for (index_t p = 0; p < nq; ++p) {
                     T tmp = 0;
-                    for (index_t r = 0; r < nq; r++)
+                    for (index_t r = 0; r < nq; ++r)
                         tmp += wsp1(p, q, r) * B(k, r);
                     wsp0(q, p, k) = tmp;
                 }
 
         // step-7 : direction 1
-        for (index_t j = 0; j < nm; j++)
-            for (index_t k = 0; k < nm; k++)
-                for (index_t p = 0; p < nq; p++) {
+        for (index_t j = 0; j < nm; ++j)
+            for (index_t k = 0; k < nm; ++k)
+                for (index_t p = 0; p < nq; ++p) {
                     T tmp = 0;
-                    for (index_t q = 0; q < nq; q++)
+                    for (index_t q = 0; q < nq; ++q)
                         tmp += wsp0(q, p, k) * B(j, q);
                     wsp1(p, j, k) = tmp;
                 }
 
         // step-8 : direction 0
-        for (index_t i = 0; i < nm; i++)
-            for (index_t j = 0; j < nm; j++)
-                for (index_t k = 0; k < nm; k++) {
+        for (index_t i = 0; i < nm; ++i)
+            for (index_t j = 0; j < nm; ++j)
+                for (index_t k = 0; k < nm; ++k) {
                     T tmp = 0;
-                    for (index_t p = 0; p < nq; p++)
+                    for (index_t p = 0; p < nq; ++p)
                         tmp += wsp1(p, j, k) * B(i, p);
                     wsp0(i, j, k) = tmp;
                 }
 
         // step-9 : copy wsp0 -> out
-        for (index_t i = 0; i < nm; i++)
-            for (index_t j = 0; j < nm; j++)
-                for (index_t k = 0; k < nm; k++)
+        for (index_t i = 0; i < nm; ++i)
+            for (index_t j = 0; j < nm; ++j)
+                for (index_t k = 0; k < nm; ++k)
                     e_out(i, j, k) = wsp0(i, j, k);
     }
 }
