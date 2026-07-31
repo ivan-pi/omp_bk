@@ -43,3 +43,17 @@ make CXX=clang++
 
 Each run prints the achieved `GDoF/s` and effective `GB/s`, followed by the
 solution norm (useful as a quick correctness check).
+
+## Benchmark sweeps
+
+`scripts/run_benchmarks.sh` sweeps a kernel over a logarithmic range of DoF
+counts (default `1e4 .. 1e8`) and `scripts/plot_results.sh` turns the results
+into `GDoF/s`- and `GB/s`-vs-DoF figures with awk and gnuplot:
+
+```sh
+scripts/run_benchmarks.sh -p ./BK5          # sweep all degrees, then plot
+scripts/run_benchmarks.sh ./BK1 1e4 1e8 3   # single polynomial order
+```
+
+See [`scripts/README.md`](scripts/README.md) for the full options and the
+per-kernel argument conventions.

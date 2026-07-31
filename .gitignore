@@ -3,3 +3,9 @@ BK1
 BK3
 BK5
 *.o
+
+# Benchmark sweep output (scripts/run_benchmarks.sh, plot_results.sh)
+results/
+*.dat
+*.files
+
