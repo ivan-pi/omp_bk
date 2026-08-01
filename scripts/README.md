@@ -6,9 +6,10 @@ are deliberately kept as two independent steps.
 
 | File                | Role                                                          |
 |---------------------|---------------------------------------------------------------|
-| `run_benchmarks.sh` | Launcher: sweep a kernel over a log-spaced range of DoFs, writing a column data file. |
+| `run_benchmarks.sh` | Launcher: sweep a BK kernel over a log-spaced range of DoFs, writing a column data file. |
 | `plot_bk.gp`        | gnuplot script: render `GDoF/s`- and `GB/s`-vs-DoF figures from that data file. |
-| `bk_style.gp`       | Shared gnuplot axis/key styling, loaded by `plot_bk.gp`.       |
+| `plot_stream.gp`    | gnuplot script: render bandwidth-vs-array-size figures from `bkstream` output. |
+| `bk_style.gp`       | Shared gnuplot axis/key styling, loaded by the plotting scripts. |
 
 Build the kernels first (`make` from the repository root).
 
@@ -89,6 +90,26 @@ gnuplot -c scripts/plot_bk.gp results/BK5.dat svg   # SVG instead
 ```
 
 Requires `gnuplot` (e.g. `apt-get install gnuplot-nox`).
+
+## Plot — `plot_stream.gp`
+
+Companion to the `bkstream` executable, which sweeps per-array sizes itself and
+writes its own gnuplot data file (one `index` block per streaming kernel). This
+script renders effective bandwidth against array size (log x-axis), one curve
+per kernel:
+
+```
+gnuplot -c scripts/plot_stream.gp <datafile> [format] [outdir]
+```
+
+```sh
+./bkstream -r 1K:256M -n 16 all > results/bkstream.dat
+gnuplot -c scripts/plot_stream.gp results/bkstream.dat   # -> results/bkstream_bw.png
+```
+
+The `bkstream` data file uses the same header/`index`-block convention; its
+columns are `nelmt  ndof  bytes  time_s  gbytes_per_s`, and the header lists the
+kernels (`# kernels = init copy triad striad`) for the legend.
 
 ### `bk_style.gp` and the gnuplot search path
 

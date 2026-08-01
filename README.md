@@ -9,6 +9,10 @@ OpenMP `target`-offload implementations of the CEED "bake-off" kernels
 | `BK3`   | Poisson (stiffness) matrix                 |
 | `BK5`   | Collocated Laplacian at quadrature points  |
 
+A companion program, `bkstream`, provides STREAM-style bandwidth
+micro-benchmarks (init/copy/triad/Schönauer-triad) over the same DoF data
+layout and `target teams loop` harness, as a peak-bandwidth reference.
+
 ## Requirements
 
 - A C++17 compiler with OpenMP support (e.g. GCC or Clang).
@@ -63,3 +67,24 @@ scripts/run_benchmarks.sh -n 20 ./BK1 1e4 1e8 3 # single order, 20 sample points
 
 See [`scripts/README.md`](scripts/README.md) for the full options and the
 per-kernel argument conventions.
+
+## Streaming bandwidth reference (`bkstream`)
+
+`bkstream` measures achievable memory bandwidth with STREAM-style kernels laid
+out and timed exactly like the BK operators (a flat `std::vector` of shape
+`nelmt*nm*nm*nm` with `nm = p + 1`, the same `target teams loop`, and the same
+min-over-repetitions timing). It sweeps a logarithmic range of per-array sizes
+itself and writes a gnuplot data file — one `index` block per kernel:
+
+```sh
+./bkstream copy                                   # one kernel, default 1K..64M range
+./bkstream -r 1K:256M -n 16 all > results/bkstream.dat   # init, copy, triad, striad
+gnuplot -c scripts/plot_stream.gp results/bkstream.dat   # -> results/bkstream_bw.png
+```
+
+Kernels: `init` (`Y = a`), `copy` (`Y = X`), `triad` (`Y = X + a*Z`), and
+`striad` (Schönauer, `Y = X + Z*W`). Sizes accept `B`/`K`/`M`/`G` suffixes
+(base 1024). Run `./bkstream -h` for all options. Unlike the BK operators these
+kernels do not stream a geometric-factor array, so the numbers form an upper
+reference for the BK effective bandwidth. Columns of the data file are
+`nelmt  ndof  bytes  time_s  gbytes_per_s`.

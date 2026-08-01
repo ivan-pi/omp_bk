@@ -2,6 +2,7 @@
 BK1
 BK3
 BK5
+bkstream
 *.o
 
 # Benchmark sweep output (scripts/run_benchmarks.sh, scripts/plot_bk.gp)
