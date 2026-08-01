@@ -43,3 +43,25 @@ make CXX=clang++
 
 Each run prints the achieved `GDoF/s` and effective `GB/s`, followed by the
 solution norm (useful as a quick correctness check).
+
+## Arithmetic intensity
+
+The kernel bodies live in headers (`bk1_kernel.h`, `bk3_kernel.h`,
+`bk5_kernel.h`) so their flop count can be measured directly rather than
+estimated. `arith_intensity` instantiates each kernel with an
+operation-counting scalar type (`flop_counter.h`) and runs it for a single
+element: every `+`/`*` the kernel executes bumps a counter, giving the exact
+flops. Bytes are the streaming DRAM traffic per element (read `in`, write
+`out`, read the geometric factors), matching the effective `GB/s` the timing
+drivers report.
+
+```sh
+make arith_intensity
+./arith_intensity          # flops, bytes, flop/byte and byte/flop per order
+```
+
+The measured counts are asserted against closed-form formulas, so the tool
+also self-checks; it exits non-zero on any mismatch. `arith_intensity.py`
+reproduces the same formulas without compiling and includes an experiment
+showing that the contraction order is irrelevant when the order `p` is equal
+in all three directions, but not otherwise.

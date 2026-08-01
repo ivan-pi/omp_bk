@@ -2,4 +2,6 @@
 BK1
 BK3
 BK5
+arith_intensity
 *.o
+__pycache__/
