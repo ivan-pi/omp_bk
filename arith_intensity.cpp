@@ -130,14 +130,12 @@ void print_header()
     std::cout << std::right
               << std::setw(4)  << "nq"    << std::setw(4)  << "p"
               << std::setw(12) << "adds"  << std::setw(12) << "muls"
-              << std::setw(12) << "flops" << std::setw(9)  << "bytes"
-              << std::setw(11) << "flop/DoF"
+              << std::setw(12) << "flop/elem" << std::setw(9) << "bytes"
               << std::setw(12) << "flop/byte"
               << std::setw(12) << "byte/flop" << "\n";
 }
 
-void print_row(int nq, int p, Counts meas, Counts pred,
-               long long bytes, long long dofs)
+void print_row(int nq, int p, Counts meas, Counts pred, long long bytes)
 {
     if (meas.adds != pred.adds || meas.muls != pred.muls) {
         g_ok = false;
@@ -146,7 +144,7 @@ void print_row(int nq, int p, Counts meas, Counts pred,
                   << ") formula(add=" << pred.adds << ",mul=" << pred.muls
                   << ")]\n";
     }
-    const long long flops = meas.adds + meas.muls;
+    const long long flops = meas.adds + meas.muls;   // per element (nelmt = 1)
     std::cout << std::right << std::fixed << std::setprecision(3)
               << std::setw(4)  << nq
               << std::setw(4)  << (p >= 0 ? std::to_string(p) : std::string("-"))
@@ -154,7 +152,6 @@ void print_row(int nq, int p, Counts meas, Counts pred,
               << std::setw(12) << meas.muls
               << std::setw(12) << flops
               << std::setw(9)  << bytes
-              << std::setw(11) << double(flops) / double(dofs)
               << std::setw(12) << double(flops) / double(bytes)
               << std::setw(12) << double(bytes) / double(flops) << "\n";
 }
@@ -180,31 +177,31 @@ int main()
     using orders_pp1 = std::integer_sequence<int,
         2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17>;     // nq = p+1, p = 1..16
 
-    std::cout << "\nBK1  (mass matrix; nq = p+2, DoF = nm^3, bytes = 2*nm^3 + nq^3)\n";
+    std::cout << "\nBK1  (mass matrix; nq = p+2, bytes = 2*nm^3 + nq^3)\n";
     print_header();
     for_orders([](auto ic) {
         constexpr int nq = ic.value, nm = nq - 1;
         const Counts meas = measure_bk1<nq>();
         const long long bytes = BYTES_PER_SCALAR * (2*ipow(nm,3) + ipow(nq,3));
-        print_row(nq, nq - 2, meas, formula_bk1(nq), bytes, ipow(nm,3));
+        print_row(nq, nq - 2, meas, formula_bk1(nq), bytes);
     }, orders_pp2{});
 
-    std::cout << "\nBK3  (Poisson; nq = p+2, DoF = nm^3, bytes = 2*nm^3 + 6*nq^3)\n";
+    std::cout << "\nBK3  (Poisson; nq = p+2, bytes = 2*nm^3 + 6*nq^3)\n";
     print_header();
     for_orders([](auto ic) {
         constexpr int nq = ic.value, nm = nq - 1;
         const Counts meas = measure_bk3<nq>();
         const long long bytes = BYTES_PER_SCALAR * (2*ipow(nm,3) + 6*ipow(nq,3));
-        print_row(nq, nq - 2, meas, formula_bk3(nq), bytes, ipow(nm,3));
+        print_row(nq, nq - 2, meas, formula_bk3(nq), bytes);
     }, orders_pp2{});
 
-    std::cout << "\nBK5  (collocated Laplacian; nq = p+1, DoF = nq^3, bytes = 8*nq^3)\n";
+    std::cout << "\nBK5  (collocated Laplacian; nq = p+1, bytes = 8*nq^3)\n";
     print_header();
     for_orders([](auto ic) {
         constexpr int nq = ic.value;
         const Counts meas = measure_bk5<nq>();
         const long long bytes = BYTES_PER_SCALAR * (8*ipow(nq,3));
-        print_row(nq, nq - 1, meas, formula_bk5(nq), bytes, ipow(nq,3));
+        print_row(nq, nq - 1, meas, formula_bk5(nq), bytes);
     }, orders_pp1{});
 
     std::cout << "\n" << (g_ok
