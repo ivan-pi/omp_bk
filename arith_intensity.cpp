@@ -173,32 +173,39 @@ int main()
               << "(bytes = streaming DRAM traffic, sizeof(float) = "
               << BYTES_PER_SCALAR << "; a*b counted as 2 flops)\n";
 
-    std::cout << "\nBK1  (mass matrix; DoF = nm^3, bytes = 2*nm^3 + nq^3)\n";
+    // Order axis: p = 1..16. BK1/BK3 over-integrate with nq = p+2 (nm = p+1
+    // modes); BK5 collocates at the p+1 GLL nodes, so nq = p+1.
+    using orders_pp2 = std::integer_sequence<int,
+        3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18>;   // nq = p+2, p = 1..16
+    using orders_pp1 = std::integer_sequence<int,
+        2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17>;     // nq = p+1, p = 1..16
+
+    std::cout << "\nBK1  (mass matrix; nq = p+2, DoF = nm^3, bytes = 2*nm^3 + nq^3)\n";
     print_header();
     for_orders([](auto ic) {
         constexpr int nq = ic.value, nm = nq - 1;
         const Counts meas = measure_bk1<nq>();
         const long long bytes = BYTES_PER_SCALAR * (2*ipow(nm,3) + ipow(nq,3));
         print_row(nq, nq - 2, meas, formula_bk1(nq), bytes, ipow(nm,3));
-    }, std::integer_sequence<int, 3,4,5,6,7,8,9,10>{});
+    }, orders_pp2{});
 
-    std::cout << "\nBK3  (Poisson; DoF = nm^3, bytes = 2*nm^3 + 6*nq^3)\n";
+    std::cout << "\nBK3  (Poisson; nq = p+2, DoF = nm^3, bytes = 2*nm^3 + 6*nq^3)\n";
     print_header();
     for_orders([](auto ic) {
         constexpr int nq = ic.value, nm = nq - 1;
         const Counts meas = measure_bk3<nq>();
         const long long bytes = BYTES_PER_SCALAR * (2*ipow(nm,3) + 6*ipow(nq,3));
         print_row(nq, nq - 2, meas, formula_bk3(nq), bytes, ipow(nm,3));
-    }, std::integer_sequence<int, 3,4,5,6,7,8,9,10>{});
+    }, orders_pp2{});
 
-    std::cout << "\nBK5  (collocated Laplacian; DoF = nq^3, bytes = 8*nq^3)\n";
+    std::cout << "\nBK5  (collocated Laplacian; nq = p+1, DoF = nq^3, bytes = 8*nq^3)\n";
     print_header();
     for_orders([](auto ic) {
         constexpr int nq = ic.value;
         const Counts meas = measure_bk5<nq>();
         const long long bytes = BYTES_PER_SCALAR * (8*ipow(nq,3));
-        print_row(nq, -1, meas, formula_bk5(nq), bytes, ipow(nq,3));
-    }, std::integer_sequence<int, 2,3,4,5,6,7,8>{});
+        print_row(nq, nq - 1, meas, formula_bk5(nq), bytes, ipow(nq,3));
+    }, orders_pp1{});
 
     std::cout << "\n" << (g_ok
         ? "All measured counts match the closed-form formulas.\n"

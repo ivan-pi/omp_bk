@@ -70,25 +70,26 @@ def bk5_dofs(nq):
     return nq**3
 
 
+# Order axis p = 1..16. BK1/BK3 over-integrate with nq = p+2; BK5 collocates
+# at the p+1 GLL nodes, so nq = p+1.
 KERNELS = {
-    "BK1": (bk1_counts, bk1_bytes, bk1_dofs, range(3, 11)),
-    "BK3": (bk3_counts, bk3_bytes, bk3_dofs, range(3, 11)),
-    "BK5": (bk5_counts, bk5_bytes, bk5_dofs, range(2, 9)),
+    "BK1": (bk1_counts, bk1_bytes, bk1_dofs, range(3, 19), 2),  # nq = p+2
+    "BK3": (bk3_counts, bk3_bytes, bk3_dofs, range(3, 19), 2),  # nq = p+2
+    "BK5": (bk5_counts, bk5_bytes, bk5_dofs, range(2, 18), 1),  # nq = p+1
 }
 
 
 def print_tables():
-    for name, (counts, nbytes, ndofs, nq_range) in KERNELS.items():
-        print(f"\n{name}")
-        print(f"{'nq':>4}{'p':>4}{'flops':>12}{'bytes':>9}"
+    for name, (counts, nbytes, ndofs, nq_range, p_off) in KERNELS.items():
+        print(f"\n{name}  (nq = p+{p_off})")
+        print(f"{'p':>4}{'nq':>4}{'flops':>12}{'bytes':>9}"
               f"{'flop/DoF':>11}{'flop/byte':>12}{'byte/flop':>12}")
         for nq in nq_range:
             a, mul = counts(nq)
             flops = a + mul
             b = nbytes(nq)
             d = ndofs(nq)
-            p = nq - 2 if name != "BK5" else None
-            print(f"{nq:>4}{('-' if p is None else p):>4}{flops:>12}{b:>9}"
+            print(f"{nq - p_off:>4}{nq:>4}{flops:>12}{b:>9}"
                   f"{flops / d:>11.3f}{flops / b:>12.3f}{b / flops:>12.3f}")
 
 
