@@ -24,14 +24,14 @@ across `[dof_min, dof_max]` (default `1e4 .. 1e8`). For every sample it runs the
 kernel, parses the reported `GDoF/s` and `GB/s`, and appends a row to a single
 per-kernel data file `results/<kernel>.dat`.
 
-If `degree` is given, only that degree is run; otherwise **all supported degrees
-are scanned**. The per-kernel argument convention is detected from the
-executable name:
+If `degree` is given, only that order is run; otherwise **all supported orders
+are scanned**. Every kernel takes the polynomial order `p` (1..8) as its first
+argument and carries `(p+1)^3` DoFs per element:
 
-| Kernel      | First CLI argument   | Supported | DoFs / element |
-|-------------|----------------------|-----------|----------------|
-| `BK1`,`BK3` | polynomial order `p` | 1..8      | `(p+1)^3`      |
-| `BK5`       | `nq` directly        | 2..8      | `nq^3`         |
+| Kernel      | First CLI argument   | Supported | Quadrature points | DoFs / element |
+|-------------|----------------------|-----------|-------------------|----------------|
+| `BK1`,`BK3` | polynomial order `p` | 1..8      | `nq = p + 2`      | `(p+1)^3`      |
+| `BK5`       | polynomial order `p` | 1..8      | `nq = p + 1`      | `(p+1)^3`      |
 
 Options:
 
@@ -77,7 +77,7 @@ gnuplot -c scripts/plot_bk.gp <datafile> [format] [outdir]
 | `outdir`   | directory for the figures                          | the datafile's folder  |
 
 It writes two figures against the number of DoFs (logarithmic x-axis), one curve
-per degree, labelled with the kernel's own convention (`p =` / `nq =`):
+per polynomial order (labelled `p = ...`):
 
 - `<kernel>_gdofs.<ext>` — throughput, **GDoF/s** vs `ndof`
 - `<kernel>_gbs.<ext>`   — effective bandwidth, **GB/s** vs `ndof`
@@ -111,19 +111,19 @@ by two blank lines:
 
 ```
 # kernel = BK5
-# key = nq
-# degrees = 2 3 4 5 6 7 8
+# key = p
+# degrees = 1 2 3 4 5 6 7 8
 # columns: ndof  nelmt  gdof_per_s  gbytes_per_s
 
-# nq = 2  (dofs_per_element=8)
+# p = 1  (dofs_per_element=8)
 1000 125 0.00522952 0.167345
 ...
 
 
-# nq = 3  (dofs_per_element=27)
+# p = 2  (dofs_per_element=27)
 999 37 0.00504739 0.161517
 ...
 ```
 
 Because the datasets are `index`-separated, they can also be plotted by hand,
-e.g. `plot for [i=0:6] 'results/BK5.dat' index i using 1:3 with linespoints`.
+e.g. `plot for [i=0:7] 'results/BK5.dat' index i using 1:3 with linespoints`.

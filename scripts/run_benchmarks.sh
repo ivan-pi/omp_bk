@@ -17,12 +17,9 @@
 # gnuplot can address them directly via `index` (see scripts/plot_bk.gp). This
 # script only *collects* data; plotting is a separate step.
 #
-# Argument conventions differ between kernels (see README):
-#   BK1, BK3 : first CLI argument is the polynomial order p, supported 1..8,
-#              and dofs_per_element = (p+1)^3.
-#   BK5      : first CLI argument is nq directly, supported 2..8, and
-#              dofs_per_element = nq^3.
-# The correct convention is chosen from the executable's basename.
+# Every kernel takes the polynomial order p (1..8) as its first CLI argument
+# and carries (p+1)^3 DoFs per element: BK1/BK3 use nq = p + 2 quadrature
+# points (nm = p + 1 modes), and BK5 is collocated with nq = p + 1.
 #
 # Usage:
 #   scripts/run_benchmarks.sh [options] <executable> [dof_min] [dof_max] [degree]
@@ -31,8 +28,8 @@
 #   executable   Path to the benchmark binary (e.g. ./BK1, ./BK5).
 #   dof_min      Lower bound of the DoF sweep      (default 1e4).
 #   dof_max      Upper bound of the DoF sweep      (default 1e8).
-#   degree       Polynomial order (BK1/BK3) or nq (BK5). When omitted the
-#                full range of supported degrees is scanned.
+#   degree       Polynomial order p (1..8). When omitted the full supported
+#                range p = 1..8 is scanned.
 #
 # Options:
 #   -n N         Number of log-spaced DoF sample points   (default 12).
@@ -52,7 +49,7 @@ ntests=5
 outdir="results"
 
 usage() {
-    sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
+    sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -84,30 +81,18 @@ if [[ ! -x "$exe" ]]; then
     exit 1
 fi
 
-# --- kernel-specific conventions --------------------------------------------
-# Map the executable basename to:
-#   mode        -- 'p'  : CLI arg is polynomial order, dpe = (arg+1)^3
-#                  'nq' : CLI arg is nq,               dpe = arg^3
-#   deg_lo/deg_hi -- inclusive range of supported degrees.
+# --- argument convention ----------------------------------------------------
+# All three kernels take the polynomial order p as their first argument, over
+# p = 1..8, and carry (p+1)^3 DoFs per element (see the header above).
 base="$(basename "$exe")"
-base_uc="$(printf '%s' "$base" | tr '[:lower:]' '[:upper:]')"
-case "$base_uc" in
-    *BK5*)          mode="nq"; deg_lo=2; deg_hi=8 ;;
-    *BK1*|*BK3*)    mode="p";  deg_lo=1; deg_hi=8 ;;
-    *)
-        echo "warning: unrecognised kernel '$base'; assuming BK1/BK3 argument" \
-             "convention (polynomial order, degrees 1..8)" >&2
-        mode="p"; deg_lo=1; deg_hi=8 ;;
-esac
+mode="p"        # legend key recorded in the data file
+deg_lo=1
+deg_hi=8
 
-# dofs_per_element for a given degree under the active convention.
+# dofs_per_element for polynomial order p.
 dpe() {
     local d="$1"
-    if [[ "$mode" == "nq" ]]; then
-        echo $(( d * d * d ))
-    else
-        echo $(( (d + 1) * (d + 1) * (d + 1) ))
-    fi
+    echo $(( (d + 1) * (d + 1) * (d + 1) ))
 }
 
 # --- degree list ------------------------------------------------------------
@@ -148,7 +133,7 @@ log_targets() {
     }'
 }
 
-echo "# kernel      : $base (mode=$mode, first arg is $mode)"
+echo "# kernel      : $base (first arg = polynomial order p)"
 echo "# DoF range   : $dof_min .. $dof_max  ($npoints log-spaced points)"
 echo "# degrees     : ${degrees[*]}"
 echo "# repetitions : $ntests"

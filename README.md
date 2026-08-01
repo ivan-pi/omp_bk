@@ -33,10 +33,12 @@ make CXX=clang++
 ## Run
 
 ```
-./BK1 <p> [nelmt] [ntests]      # BK1/BK3: p is the polynomial order, nq = p + 2
-./BK3 <p> [nelmt] [ntests]
-./BK5 <nq> [nelmt] [ntests]     # BK5: first argument is nq directly
+./BK1 <p> [nelmt] [ntests]      # p is the polynomial order (1..8)
+./BK3 <p> [nelmt] [ntests]      #   BK1/BK3: nq = p + 2 quadrature points
+./BK5 <p> [nelmt] [ntests]      #   BK5 is collocated: nq = p + 1
 ```
+
+All three take the polynomial order `p` and carry `(p+1)^3` DoFs per element.
 
 - `nelmt`  — number of elements (default 524288).
 - `ntests` — timing repetitions; the minimum wall time is reported (default 5).
