@@ -46,13 +46,17 @@ solution norm (useful as a quick correctness check).
 
 ## Benchmark sweeps
 
+Collecting and plotting are two separate steps.
 `scripts/run_benchmarks.sh` sweeps a kernel over a logarithmic range of DoF
-counts (default `1e4 .. 1e8`) and `scripts/plot_results.sh` turns the results
-into `GDoF/s`- and `GB/s`-vs-DoF figures with awk and gnuplot:
+counts (default `1e4 .. 1e8`) into a per-kernel data file, and the gnuplot
+script `scripts/plot_bk.gp` turns that file into `GDoF/s`- and `GB/s`-vs-DoF
+figures:
 
 ```sh
-scripts/run_benchmarks.sh -p ./BK5          # sweep all degrees, then plot
-scripts/run_benchmarks.sh ./BK1 1e4 1e8 3   # single polynomial order
+scripts/run_benchmarks.sh ./BK5                 # sweep all degrees -> results/BK5.dat
+gnuplot -c scripts/plot_bk.gp results/BK5.dat   # -> results/BK5_gdofs.png, results/BK5_gbs.png
+
+scripts/run_benchmarks.sh -n 20 ./BK1 1e4 1e8 3 # single order, 20 sample points
 ```
 
 See [`scripts/README.md`](scripts/README.md) for the full options and the

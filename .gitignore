@@ -4,8 +4,7 @@ BK3
 BK5
 *.o
 
-# Benchmark sweep output (scripts/run_benchmarks.sh, plot_results.sh)
+# Benchmark sweep output (scripts/run_benchmarks.sh, scripts/plot_bk.gp)
 results/
 *.dat
-*.files
 

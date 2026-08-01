@@ -9,9 +9,13 @@
 #
 #     ndof = nelmt * dofs_per_element(degree)
 #
-# lands as close as possible to the target DoF count. The achieved GDoF/s and
-# GB/s reported by the kernel are parsed with awk and written, one row per run,
-# to a per-degree data file that plot_results.sh turns into figures.
+# lands as close as possible to the target DoF count.
+#
+# Results for one kernel go into a single column-format data file,
+#   <outdir>/<kernel>.dat
+# with one dataset per degree, datasets separated by two blank lines so that
+# gnuplot can address them directly via `index` (see scripts/plot_bk.gp). This
+# script only *collects* data; plotting is a separate step.
 #
 # Argument conventions differ between kernels (see README):
 #   BK1, BK3 : first CLI argument is the polynomial order p, supported 1..8,
@@ -33,8 +37,7 @@
 # Options:
 #   -n N         Number of log-spaced DoF sample points   (default 12).
 #   -t NTESTS    Timing repetitions handed to the kernel  (default 5).
-#   -o DIR       Directory for the .dat result files      (default results).
-#   -p           Run scripts/plot_results.sh on the output when the sweep ends.
+#   -o DIR       Directory for the .dat result file        (default results).
 #   -h           Show this help and exit.
 #
 # Development tip: the full 1e4..1e8 sweep at large degrees allocates several
@@ -47,22 +50,18 @@ set -euo pipefail
 npoints=12
 ntests=5
 outdir="results"
-do_plot=0
-
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-    sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
+    sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
     exit "${1:-0}"
 }
 
 # --- option parsing ---------------------------------------------------------
-while getopts ':n:t:o:ph' opt; do
+while getopts ':n:t:o:h' opt; do
     case "$opt" in
         n) npoints="$OPTARG" ;;
         t) ntests="$OPTARG" ;;
         o) outdir="$OPTARG" ;;
-        p) do_plot=1 ;;
         h) usage 0 ;;
         :) echo "error: option -$OPTARG requires an argument" >&2; usage 1 ;;
         \?) echo "error: unknown option -$OPTARG" >&2; usage 1 ;;
@@ -128,8 +127,14 @@ fi
 
 mkdir -p "$outdir"
 
+# Scratch space for per-degree data blocks; assembled into the final file only
+# once each block is known to be non-empty.
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
 # --- log-spaced target DoFs -------------------------------------------------
 # Emit `npoints` values spaced evenly in log10 between dof_min and dof_max.
+# (mawk lacks the ** operator, so exponentiate via exp/log.)
 log_targets() {
     awk -v lo="$dof_min" -v hi="$dof_max" -v n="$npoints" 'BEGIN {
         if (n < 1) { print "awk: need at least one point" > "/dev/stderr"; exit 1 }
@@ -143,26 +148,23 @@ log_targets() {
     }'
 }
 
-echo "# kernel      : $base (mode=$mode, arg is ${mode})"
+echo "# kernel      : $base (mode=$mode, first arg is $mode)"
 echo "# DoF range   : $dof_min .. $dof_max  ($npoints log-spaced points)"
 echo "# degrees     : ${degrees[*]}"
 echo "# repetitions : $ntests"
 echo "# output dir  : $outdir"
 echo
 
-manifest="$outdir/${base}.files"
-: > "$manifest"
+# --- run the sweep, one block per degree ------------------------------------
+committed_degs=()   # degrees that produced at least one data row
+committed_dpe=()
 
 for deg in "${degrees[@]}"; do
     d_pe="$(dpe "$deg")"
-    datafile="$outdir/${base}_deg$(printf '%02d' "$deg").dat"
+    block="$tmpdir/block_$deg"
+    : > "$block"
 
-    {
-        echo "# kernel=$base  mode=$mode  degree=$deg  dofs_per_element=$d_pe"
-        echo "# ndof  nelmt  gdof_per_s  gbytes_per_s"
-    } > "$datafile"
-
-    echo ">> $base degree $deg (dofs/element = $d_pe) -> $datafile"
+    echo ">> $base $mode=$deg (dofs/element = $d_pe)"
 
     prev_nelmt=-1
     while read -r target; do
@@ -174,7 +176,7 @@ for deg in "${degrees[@]}"; do
         (( nelmt == prev_nelmt )) && continue
         prev_nelmt=$nelmt
 
-        # Run the kernel and pull the two rates out of its report with awk.
+        # Run the kernel and pull nelmt + the two rates out of its report.
         out="$("$exe" "$deg" "$nelmt" "$ntests")"
         parsed="$(printf '%s\n' "$out" | awk '
             /GDoF\/s/ {
@@ -193,18 +195,45 @@ for deg in "${degrees[@]}"; do
 
         read -r r_nelmt r_gdof r_gbs <<< "$parsed"
         ndof=$(( r_nelmt * d_pe ))
-        printf '%d %d %s %s\n' "$ndof" "$r_nelmt" "$r_gdof" "$r_gbs" >> "$datafile"
+        printf '%d %d %s %s\n' "$ndof" "$r_nelmt" "$r_gdof" "$r_gbs" >> "$block"
         printf '   nelmt=%-10d ndof=%-12d GDoF/s=%-10s GB/s=%s\n' \
             "$r_nelmt" "$ndof" "$r_gdof" "$r_gbs"
     done < <(log_targets)
 
-    echo "$datafile" >> "$manifest"
+    if [[ -s "$block" ]]; then
+        committed_degs+=("$deg")
+        committed_dpe+=("$d_pe")
+    else
+        echo "   warning: no data collected for $mode=$deg; omitting" >&2
+    fi
 done
 
-echo
-echo "Wrote data files listed in $manifest"
-
-if [[ "$do_plot" == "1" ]]; then
-    echo
-    "$script_dir/plot_results.sh" -o "$outdir" "$exe"
+if [[ ${#committed_degs[@]} -eq 0 ]]; then
+    echo "error: no data collected for any degree" >&2
+    exit 1
 fi
+
+# --- assemble the single per-kernel data file -------------------------------
+# Column format with one gnuplot `index` block per degree, blocks separated by
+# two blank lines. A short metadata header lets the plotting script recover the
+# legend labels with a one-line awk call.
+datafile="$outdir/${base}.dat"
+{
+    echo "# kernel = $base"
+    echo "# key = $mode"
+    echo "# degrees = ${committed_degs[*]}"
+    echo "# columns: ndof  nelmt  gdof_per_s  gbytes_per_s"
+
+    for i in "${!committed_degs[@]}"; do
+        deg="${committed_degs[$i]}"
+        d_pe="${committed_dpe[$i]}"
+        # Two blank lines separate datasets (gnuplot `index` boundary).
+        (( i > 0 )) && printf '\n\n'
+        printf '\n# %s = %s  (dofs_per_element=%s)\n' "$mode" "$deg" "$d_pe"
+        cat "$tmpdir/block_$deg"
+    done
+} > "$datafile"
+
+echo
+echo "Wrote $datafile (${#committed_degs[@]} degree dataset(s))"
+echo "Plot it with:  gnuplot -c scripts/plot_bk.gp $datafile"
