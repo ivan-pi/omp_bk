@@ -1,12 +1,12 @@
 // logspace -- print N values spaced evenly in log10 over [lo, hi], inclusive,
-// each rounded to the nearest integer, one per line.
+// each rounded to the nearest integer, as a space-separated list on one line.
 //
 // Used by run_benchmarks.sh to pick logarithmically spaced DoF targets. It is
 // deliberately plain ISO C++ (no OpenMP, no target offload, no awk dialect
 // quirks) so it compiles portably wherever a C++ compiler exists.
 //
 //   usage: logspace <lo> <hi> <n>
-//   e.g.:  logspace 1e4 1e8 5   ->   10000 / 100000 / 1000000 / 10000000 / 100000000
+//   e.g.:  logspace 1e4 1e8 5   ->   10000 100000 1000000 10000000 100000000
 
 #include <cmath>
 #include <cstdio>
@@ -37,7 +37,8 @@ int main(int argc, char** argv)
 
     for (int i = 0; i < n; ++i) {
         const double e = (n == 1) ? llo : llo + (lhi - llo) * i / (n - 1);
-        std::printf("%.0f\n", std::pow(10.0, e));
+        std::printf(i ? " %.0f" : "%.0f", std::pow(10.0, e));
     }
+    std::printf("\n");
     return 0;
 }

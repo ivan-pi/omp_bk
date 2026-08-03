@@ -75,6 +75,9 @@ mkdir -p "$outdir"
 datafile="$outdir/${base}.dat"
 echo "# $base: p = ${degrees[*]} | DoFs $dof_min..$dof_max ($npoints pts) | $ntests reps -> $datafile"
 
+# Log-spaced DoF targets (same for every degree), as a space-separated list.
+targets="$("$logspace" "$dof_min" "$dof_max" "$npoints")"
+
 # Data-file header (metadata consumed by plot_bk.gp).
 {
     echo "# kernel = $base"
@@ -94,7 +97,7 @@ for deg in "${degrees[@]}"; do
     first=0
 
     prev=-1
-    while read -r target; do
+    for target in $targets; do
         nelmt=$(( (target + d_pe / 2) / d_pe ))   # nearest element count
         (( nelmt < 1 )) && nelmt=1
         (( nelmt == prev )) && continue           # skip duplicates (low end / high p)
@@ -116,7 +119,7 @@ for deg in "${degrees[@]}"; do
         printf '%d %d %s %s\n' "$ndof" "$r_nelmt" "$r_gdof" "$r_gbs" >> "$datafile"
         printf '   nelmt=%-10d ndof=%-12d GDoF/s=%-10s GB/s=%s\n' \
             "$r_nelmt" "$ndof" "$r_gdof" "$r_gbs"
-    done < <("$logspace" "$dof_min" "$dof_max" "$npoints")
+    done
 done
 
 echo "Wrote $datafile"
