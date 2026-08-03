@@ -1,22 +1,21 @@
 # Benchmark launcher & plotting scripts
 
-Helpers for sweeping the bake-off kernels (`BK1`, `BK3`, `BK5`) across a range
-of problem sizes and turning the results into figures. Collecting and plotting
-are deliberately kept as two independent steps.
+Helpers for sweeping the bake-off kernels (`BK1`, `BK3`, `BK5`) over a range of
+problem sizes and plotting the results. Collecting and plotting are separate
+steps.
 
 | File                | Role                                                          |
 |---------------------|---------------------------------------------------------------|
-| `run_benchmarks.sh` | Launcher: sweep a BK kernel over a log-spaced range of DoFs, writing a column data file. |
-| `logspace.cpp`      | Tiny portable C++ helper (built to `scripts/logspace`) that emits the log-spaced DoF targets for the launcher. |
-| `plot_bk.gp`        | gnuplot script: render `GDoF/s`- and `GB/s`-vs-DoF figures from that data file. |
-| `plot_stream.gp`    | gnuplot script: render bandwidth-vs-array-size figures from `bkstream` output. |
-| `bk_style.gp`       | Shared gnuplot axis/key styling, loaded by the plotting scripts. |
+| `run_benchmarks.sh` | Sweep a BK kernel over a log-spaced DoF range into a data file. |
+| `logspace.cpp`      | Portable C++ helper (`scripts/logspace`) emitting the log-spaced DoF targets. |
+| `plot_bk.gp`        | gnuplot: `GDoF/s`- and `GB/s`-vs-DoF figures from that data file. |
+| `plot_stream.gp`    | gnuplot: bandwidth-vs-array-size figures from `bkstream` output. |
+| `bk_style.gp`       | Shared gnuplot styling, loaded by the plotting scripts.       |
 
-Build first with `make` from the repository root — this compiles the kernels
-and `scripts/logspace`, which `run_benchmarks.sh` needs. `logspace` is plain
-ISO C++ (no OpenMP / `-march=native`), so it builds even where the offload
-toolchain for the kernels is unavailable; you can also build it alone with
-`make scripts/logspace`.
+`make` (from the repo root) builds the kernels and `scripts/logspace`, which
+`run_benchmarks.sh` needs. `logspace` is plain ISO C++ (no OpenMP /
+`-march=native`), so `make scripts/logspace` works without the kernels' offload
+toolchain.
 
 ## 1. Collect — `run_benchmarks.sh`
 
@@ -24,22 +23,16 @@ toolchain for the kernels is unavailable; you can also build it alone with
 scripts/run_benchmarks.sh [options] <executable> [dof_min] [dof_max] [degree]
 ```
 
-The launcher picks a set of problem sizes so that the **total number of degrees
-of freedom** (`ndof = nelmt * dofs_per_element`) is spaced logarithmically
-across `[dof_min, dof_max]` (default `1e4 .. 1e8`). For every sample it runs the
-kernel, parses the reported `GDoF/s` and `GB/s`, and appends a row to a single
-per-kernel data file `results/<kernel>.dat`.
-
-If `degree` is given, only that order is run; otherwise **all supported orders
-are scanned**. Every kernel takes the polynomial order `p` (1..8) as its first
-argument and carries `(p+1)^3` DoFs per element:
+Picks problem sizes so the total DoF count (`ndof = nelmt * dofs_per_element`)
+is log-spaced across `[dof_min, dof_max]` (default `1e4 .. 1e8`), runs the kernel
+at each, and appends a row to `results/<kernel>.dat`. With `degree` set, only
+that order runs; otherwise all supported orders are scanned. Each kernel takes
+the polynomial order `p` (1..8) and carries `(p+1)^3` DoFs per element:
 
 | Kernel      | First CLI argument   | Supported | Quadrature points | DoFs / element |
 |-------------|----------------------|-----------|-------------------|----------------|
 | `BK1`,`BK3` | polynomial order `p` | 1..8      | `nq = p + 2`      | `(p+1)^3`      |
 | `BK5`       | polynomial order `p` | 1..8      | `nq = p + 1`      | `(p+1)^3`      |
-
-Options:
 
 | Flag        | Meaning                                            | Default   |
 |-------------|----------------------------------------------------|-----------|
@@ -48,29 +41,19 @@ Options:
 | `-o DIR`    | output directory for the `.dat` file               | `results` |
 | `-h`        | help                                               |           |
 
-### Examples
-
 ```sh
-# Full production sweep of BK5, all nq, DoFs 1e4..1e8:
-scripts/run_benchmarks.sh ./BK5
-
-# BK1 at polynomial order 3 only, 20 sample points:
-scripts/run_benchmarks.sh -n 20 ./BK1 1e4 1e8 3
-
-# Quick development run: small range, few points, few repetitions:
-scripts/run_benchmarks.sh -n 5 -t 2 ./BK5 1e3 1e5 4
+scripts/run_benchmarks.sh ./BK5                        # all orders, DoFs 1e4..1e8
+scripts/run_benchmarks.sh -n 20 ./BK1 1e4 1e8 3        # order 3 only, 20 points
+scripts/run_benchmarks.sh -n 5 -t 2 ./BK5 1e3 1e5 4    # quick dev run
 ```
 
-> **Development note.** The full `1e4 .. 1e8` sweep allocates several GB per run
-> at the larger degrees and takes a while. While developing, pass a smaller DoF
-> range and a small `-n`/`-t` (as in the last example above) to keep runs fast
-> and memory-light.
+The full `1e4 .. 1e8` sweep allocates several GB per run at the larger orders;
+use a smaller range and `-n`/`-t` while developing.
 
 ## 2. Plot — `plot_bk.gp`
 
-Plotting is a standalone gnuplot script driven with command-line arguments
-(`gnuplot -c`); it does not shell out except for a one-line inline `awk` call to
-read the legend metadata out of the data-file header.
+A standalone gnuplot script driven by command-line arguments (`gnuplot -c`); its
+only shell-out is a one-line `awk` reading the legend metadata from the header.
 
 ```
 gnuplot -c scripts/plot_bk.gp <datafile> [format] [outdir]
@@ -82,47 +65,39 @@ gnuplot -c scripts/plot_bk.gp <datafile> [format] [outdir]
 | `format`   | `pngcairo` or `svg`                                | `pngcairo`             |
 | `outdir`   | directory for the figures                          | the datafile's folder  |
 
-It writes two figures against the number of DoFs (logarithmic x-axis), one curve
-per polynomial order (labelled `p = ...`):
+It writes two figures vs number of DoFs (log x-axis), one curve per order
+(labelled `p = ...`):
 
 - `<kernel>_gdofs.<ext>` — throughput, **GDoF/s** vs `ndof`
 - `<kernel>_gbs.<ext>`   — effective bandwidth, **GB/s** vs `ndof`
 
 ```sh
-scripts/run_benchmarks.sh ./BK5                     # -> results/BK5.dat
-gnuplot -c scripts/plot_bk.gp results/BK5.dat       # -> results/BK5_gdofs.png, results/BK5_gbs.png
+gnuplot -c scripts/plot_bk.gp results/BK5.dat       # -> results/BK5_gdofs.png, _gbs.png
 gnuplot -c scripts/plot_bk.gp results/BK5.dat svg   # SVG instead
 ```
 
 Requires `gnuplot` (e.g. `apt-get install gnuplot-nox`).
 
-## Plot — `plot_stream.gp`
+## 3. Plot — `plot_stream.gp`
 
-Companion to the `bkstream` executable, which sweeps per-array sizes itself and
-writes its own gnuplot data file (one `index` block per streaming kernel). This
-script renders effective bandwidth against array size (log x-axis), one curve
-per kernel:
-
-```
-gnuplot -c scripts/plot_stream.gp <datafile> [format] [outdir]
-```
+Companion to `bkstream`, which sweeps per-array sizes itself and writes one
+`index` block per streaming kernel. Renders effective bandwidth vs array size
+(log x-axis), one curve per kernel:
 
 ```sh
 ./bkstream -r 1K:256M -n 16 all > results/bkstream.dat
 gnuplot -c scripts/plot_stream.gp results/bkstream.dat   # -> results/bkstream_bw.png
 ```
 
-The `bkstream` data file uses the same header/`index`-block convention; its
-columns are `nelmt  ndof  bytes  time_s  gbytes_per_s`, and the header lists the
-kernels (`# kernels = init copy triad striad`) for the legend.
+Its columns are `nelmt  ndof  bytes  time_s  gbytes_per_s`, and the header lists
+the kernels (`# kernels = init copy triad striad`) for the legend.
 
 ### `bk_style.gp` and the gnuplot search path
 
-`plot_bk.gp` factors its axis/key styling into `bk_style.gp` and finds it by
-prepending its own directory to the gnuplot loadpath, so the invocations above
-work from any current directory. gnuplot also searches `$GNUPLOT_LIB` for
-`load`ed files, so you can reuse the style from your own scripts by putting this
-folder on that path:
+`plot_bk.gp` keeps its axis/key styling in `bk_style.gp`, found by prepending its
+own directory to the gnuplot loadpath, so the calls above work from any
+directory. gnuplot also searches `$GNUPLOT_LIB` for `load`ed files, so you can
+reuse the style elsewhere:
 
 ```sh
 export GNUPLOT_LIB=/path/to/omp_bk/scripts
@@ -131,9 +106,9 @@ gnuplot -e "load 'bk_style.gp'; plot ..."
 
 ## Data file format
 
-One file per kernel. A short comment header carries the metadata the plotting
-script needs; each degree is a separate gnuplot `index` block, blocks separated
-by two blank lines:
+One file per kernel: a comment header with the metadata the plotting script
+needs, then each degree as a gnuplot `index` block, blocks separated by two
+blank lines:
 
 ```
 # kernel = BK5
@@ -144,12 +119,7 @@ by two blank lines:
 # p = 1  (dofs_per_element=8)
 1000 125 0.00522952 0.167345
 ...
-
-
-# p = 2  (dofs_per_element=27)
-999 37 0.00504739 0.161517
-...
 ```
 
-Because the datasets are `index`-separated, they can also be plotted by hand,
-e.g. `plot for [i=0:7] 'results/BK5.dat' index i using 1:3 with linespoints`.
+Being `index`-separated, they also plot by hand, e.g.
+`plot for [i=0:7] 'results/BK5.dat' index i using 1:3 with linespoints`.

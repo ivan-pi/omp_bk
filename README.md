@@ -23,12 +23,12 @@ layout and `target teams loop` harness, as a peak-bandwidth reference.
 ## Build
 
 ```sh
-make            # builds BK1, BK3, BK5
-make clean      # removes the executables
+make            # builds BK1, BK3, BK5, bkstream, scripts/logspace
+make clean      # removes them
 ```
 
-The default flags live in `Makefile` (`CXX`, `CXXFLAGS`). Override them from
-the command line, e.g. to use Clang:
+Override the `Makefile` defaults (`CXX`, `CXXFLAGS`) on the command line, e.g.
+for Clang:
 
 ```sh
 make CXX=clang++
@@ -52,10 +52,9 @@ solution norm (useful as a quick correctness check).
 
 ## Benchmark sweeps
 
-Collecting and plotting are two separate steps.
-`scripts/run_benchmarks.sh` sweeps a kernel over a logarithmic range of DoF
-counts (default `1e4 .. 1e8`) into a per-kernel data file, and the gnuplot
-script `scripts/plot_bk.gp` turns that file into `GDoF/s`- and `GB/s`-vs-DoF
+Collecting and plotting are separate steps. `scripts/run_benchmarks.sh` sweeps a
+kernel over a logarithmic DoF range (default `1e4 .. 1e8`) into a per-kernel data
+file, and `scripts/plot_bk.gp` turns that file into `GDoF/s`- and `GB/s`-vs-DoF
 figures:
 
 ```sh
@@ -71,10 +70,10 @@ per-kernel argument conventions.
 ## Streaming bandwidth reference (`bkstream`)
 
 `bkstream` measures achievable memory bandwidth with STREAM-style kernels laid
-out and timed exactly like the BK operators (a flat `std::vector` of shape
-`nelmt*nm*nm*nm` with `nm = p + 1`, the same `target teams loop`, and the same
+out and timed like the BK operators (a flat `std::vector` of shape
+`nelmt*nm*nm*nm` with `nm = p + 1`, the same `target teams loop` and
 min-over-repetitions timing). It sweeps a logarithmic range of per-array sizes
-itself and writes a gnuplot data file — one `index` block per kernel:
+and writes a gnuplot data file — one `index` block per kernel:
 
 ```sh
 ./bkstream copy                                   # one kernel, default 1K..64M range

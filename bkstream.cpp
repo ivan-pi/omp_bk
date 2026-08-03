@@ -72,23 +72,32 @@ using hrc = std::chrono::high_resolution_clock;
 // present (no transfer) exactly as in the BK kernels. The minimum wall time
 // over the repetitions is returned.
 
+// Time `launch` over ntests repetitions and return the minimum wall time (s).
+template <typename Launch>
+double timed_min(int ntests, Launch&& launch)
+{
+    double best = std::numeric_limits<double>::max();
+    for (int t = 0; t < ntests; ++t) {
+        auto s = hrc::now();
+        launch();
+        best = std::min(best, std::chrono::duration<double>(hrc::now() - s).count());
+    }
+    return best;
+}
+
 template <typename T>
 double run_init(std::size_t nelmt, int ND, T* Y, T a, int ntests)
 {
     const std::size_t n = nelmt * std::size_t(ND);
-    double best = std::numeric_limits<double>::max();
+    double best;
     #pragma omp target data map(from: Y[:n])
-    for (int t = 0; t < ntests; ++t) {
-        auto s = hrc::now();
-        #pragma omp target \
-            map(from: Y[:n])
+    best = timed_min(ntests, [&] {
+        #pragma omp target map(from: Y[:n])
         #pragma omp teams loop
         for (std::size_t e = 0; e < nelmt; ++e)
             for (int i = 0; i < ND; ++i)
                 Y[e * ND + i] = a;
-        auto f = hrc::now();
-        best = std::min(best, std::chrono::duration<double>(f - s).count());
-    }
+    });
     return best;
 }
 
@@ -96,19 +105,15 @@ template <typename T>
 double run_copy(std::size_t nelmt, int ND, const T* X, T* Y, int ntests)
 {
     const std::size_t n = nelmt * std::size_t(ND);
-    double best = std::numeric_limits<double>::max();
+    double best;
     #pragma omp target data map(to: X[:n]) map(from: Y[:n])
-    for (int t = 0; t < ntests; ++t) {
-        auto s = hrc::now();
-        #pragma omp target \
-            map(to: X[:n]) map(from: Y[:n])
+    best = timed_min(ntests, [&] {
+        #pragma omp target map(to: X[:n]) map(from: Y[:n])
         #pragma omp teams loop
         for (std::size_t e = 0; e < nelmt; ++e)
             for (int i = 0; i < ND; ++i)
                 Y[e * ND + i] = X[e * ND + i];
-        auto f = hrc::now();
-        best = std::min(best, std::chrono::duration<double>(f - s).count());
-    }
+    });
     return best;
 }
 
@@ -117,19 +122,15 @@ double run_triad(std::size_t nelmt, int ND, const T* X, const T* Z, T* Y,
                  T a, int ntests)
 {
     const std::size_t n = nelmt * std::size_t(ND);
-    double best = std::numeric_limits<double>::max();
+    double best;
     #pragma omp target data map(to: X[:n], Z[:n]) map(from: Y[:n])
-    for (int t = 0; t < ntests; ++t) {
-        auto s = hrc::now();
-        #pragma omp target \
-            map(to: X[:n], Z[:n]) map(from: Y[:n])
+    best = timed_min(ntests, [&] {
+        #pragma omp target map(to: X[:n], Z[:n]) map(from: Y[:n])
         #pragma omp teams loop
         for (std::size_t e = 0; e < nelmt; ++e)
             for (int i = 0; i < ND; ++i)
                 Y[e * ND + i] = X[e * ND + i] + a * Z[e * ND + i];
-        auto f = hrc::now();
-        best = std::min(best, std::chrono::duration<double>(f - s).count());
-    }
+    });
     return best;
 }
 
@@ -138,19 +139,15 @@ double run_striad(std::size_t nelmt, int ND, const T* X, const T* Z,
                   const T* W, T* Y, int ntests)
 {
     const std::size_t n = nelmt * std::size_t(ND);
-    double best = std::numeric_limits<double>::max();
+    double best;
     #pragma omp target data map(to: X[:n], Z[:n], W[:n]) map(from: Y[:n])
-    for (int t = 0; t < ntests; ++t) {
-        auto s = hrc::now();
-        #pragma omp target \
-            map(to: X[:n], Z[:n], W[:n]) map(from: Y[:n])
+    best = timed_min(ntests, [&] {
+        #pragma omp target map(to: X[:n], Z[:n], W[:n]) map(from: Y[:n])
         #pragma omp teams loop
         for (std::size_t e = 0; e < nelmt; ++e)
             for (int i = 0; i < ND; ++i)
                 Y[e * ND + i] = X[e * ND + i] + Z[e * ND + i] * W[e * ND + i];
-        auto f = hrc::now();
-        best = std::min(best, std::chrono::duration<double>(f - s).count());
-    }
+    });
     return best;
 }
 
