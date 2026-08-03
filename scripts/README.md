@@ -7,11 +7,16 @@ are deliberately kept as two independent steps.
 | File                | Role                                                          |
 |---------------------|---------------------------------------------------------------|
 | `run_benchmarks.sh` | Launcher: sweep a BK kernel over a log-spaced range of DoFs, writing a column data file. |
+| `logspace.cpp`      | Tiny portable C++ helper (built to `scripts/logspace`) that emits the log-spaced DoF targets for the launcher. |
 | `plot_bk.gp`        | gnuplot script: render `GDoF/s`- and `GB/s`-vs-DoF figures from that data file. |
 | `plot_stream.gp`    | gnuplot script: render bandwidth-vs-array-size figures from `bkstream` output. |
 | `bk_style.gp`       | Shared gnuplot axis/key styling, loaded by the plotting scripts. |
 
-Build the kernels first (`make` from the repository root).
+Build first with `make` from the repository root — this compiles the kernels
+and `scripts/logspace`, which `run_benchmarks.sh` needs. `logspace` is plain
+ISO C++ (no OpenMP / `-march=native`), so it builds even where the offload
+toolchain for the kernels is unavailable; you can also build it alone with
+`make scripts/logspace`.
 
 ## 1. Collect — `run_benchmarks.sh`
 
