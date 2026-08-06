@@ -11,7 +11,9 @@
 #include "bk_common.h"
 
 // ---------------------------------------------------------------------------
-// BK5 kernel: scalar Laplace operator at quadrature points.
+// BK5 kernel: scalar Laplace operator at quadrature points. Collocated, so
+// the number of quadrature points per direction is nq = p + 1 for polynomial
+// order p, and there are nq^3 = (p+1)^3 DoFs per element.
 // D(i, n) is the 1-D derivative matrix, shared by all three directions;
 // G holds six symmetric metric factors per point, interleaved as
 // G(i, j, factor, k) within each element.
@@ -178,24 +180,28 @@ constexpr std::size_t default_nelmt = std::size_t(1) << 19;   // = 524288
 
 int main(int argc, char** argv)
 {
-    const int nq = (argc > 1) ? std::atoi(argv[1]) : 4;
+    const int p = (argc > 1) ? std::atoi(argv[1]) : 2;
     const std::size_t nelmt =
         (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
     const int ntests = (argc > 3) ? std::atoi(argv[3]) : 5;
 
-    // Runtime nq -> compile-time nq: one kernel instantiation per supported
-    // order (each case label must pair with its own literal).
+    // Runtime p -> compile-time nq: this operator is collocated, so
+    // nq = p + 1 (each case label must pair with its literal + 1). p = 1
+    // (nq = 2, the linear element) is the smallest meaningful order; p = 0
+    // would give nq = 1, a single point with no differentiation.
     // Note: adding more cases can increase the compilation time.
-    switch (nq) {
-        case 2: run_test<float, 2>(nelmt, ntests); break;
-        case 3: run_test<float, 3>(nelmt, ntests); break;
-        case 4: run_test<float, 4>(nelmt, ntests); break;
-        case 5: run_test<float, 5>(nelmt, ntests); break;
-        case 6: run_test<float, 6>(nelmt, ntests); break;
-        case 7: run_test<float, 7>(nelmt, ntests); break;
-        case 8: run_test<float, 8>(nelmt, ntests); break;
+    switch (p) {
+        case 1: run_test<float, 2>(nelmt, ntests); break;
+        case 2: run_test<float, 3>(nelmt, ntests); break;
+        case 3: run_test<float, 4>(nelmt, ntests); break;
+        case 4: run_test<float, 5>(nelmt, ntests); break;
+        case 5: run_test<float, 6>(nelmt, ntests); break;
+        case 6: run_test<float, 7>(nelmt, ntests); break;
+        case 7: run_test<float, 8>(nelmt, ntests); break;
+        case 8: run_test<float, 9>(nelmt, ntests); break;
         default:
-            std::cerr << "unsupported nq = " << nq << " (supported: 2..8)\n";
+            std::cerr << "unsupported polynomial order p = " << p
+                      << " (supported: 1..8)\n";
             return 1;
     }
 
