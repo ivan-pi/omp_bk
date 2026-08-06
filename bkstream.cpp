@@ -216,11 +216,11 @@ std::size_t parse_size(const std::string& s)
 }
 
 // Element counts for `npoints` per-array byte sizes spaced logarithmically over
-// [smin, smax]: each size maps to nelmt = round(size / sizeof(T) / ND), clamped
-// to >= 1, with consecutive duplicates removed.
-template <typename T>
+// [smin, smax]: each size maps to nelmt = round(size / elem_size / ND), clamped
+// to >= 1, with consecutive duplicates removed. `elem_size` is the size in bytes
+// of one DoF (sizeof(T)); `ND` is the number of DoFs per element.
 std::vector<std::size_t> logspace_nelems(std::size_t smin, std::size_t smax,
-                                         int npoints, int ND)
+                                         int npoints, int ND, std::size_t elem_size)
 {
     const double lmin = std::log10(double(smin));
     const double lmax = std::log10(double(smax));
@@ -230,7 +230,7 @@ std::vector<std::size_t> logspace_nelems(std::size_t smin, std::size_t smax,
         const double e = (npoints == 1) ? lmin
                                         : lmin + (lmax - lmin) * i / (npoints - 1);
         const double bytes = std::pow(10.0, e);
-        long nel = std::lround(bytes / double(sizeof(T)) / double(ND));
+        long nel = std::lround(bytes / double(elem_size) / double(ND));
         if (nel < 1) nel = 1;
         if (nel == prev) continue;
         prev = nel;
@@ -332,7 +332,7 @@ int main(int argc, char** argv)
 
     // Log-spaced per-array byte targets -> element counts (deduplicated).
     const std::vector<std::size_t> nelems =
-        logspace_nelems<T>(smin, smax, npoints, ND);
+        logspace_nelems(smin, smax, npoints, ND, sizeof(T));
 
     // --- gnuplot data-file header ------------------------------------------
     std::cout << "# benchmark = bkstream (BK DoF layout, T=float)\n"
