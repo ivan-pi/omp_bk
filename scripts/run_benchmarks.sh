@@ -103,6 +103,9 @@ for deg in "${degrees[@]}"; do
         (( nelmt == prev )) && continue           # skip duplicates (low end / high p)
         prev=$nelmt
 
+        # awk extracts the (floating-point) rate fields; the ndof integer
+        # arithmetic below stays in the shell, whose 64-bit ints avoid the
+        # overflow mawk's 32-bit %d would hit on large sweeps.
         out="$("$exe" "$deg" "$nelmt" "$ntests")"
         parsed="$(printf '%s\n' "$out" | awk '/GDoF\/s/{
             for (i=1;i<=NF;++i) {

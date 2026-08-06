@@ -179,6 +179,16 @@ double run_kernel(Kernel k, std::size_t nelmt, int ND, int ntests)
     return 0.0;
 }
 
+// Upper-case a string with all spaces removed (used to normalise size suffixes).
+std::string normalize_suffix(const std::string& s)
+{
+    std::string out;
+    for (unsigned char c : s)
+        if (!std::isspace(c))
+            out.push_back(static_cast<char>(std::toupper(c)));
+    return out;
+}
+
 // Parse a size string: a number with an optional binary suffix (B, K/KB,
 // M/MB, G/GB; base 1024, case-insensitive). A bare number is bytes; scientific
 // notation is accepted (e.g. "1e6").
@@ -191,12 +201,7 @@ std::size_t parse_size(const std::string& s)
     } catch (const std::exception&) {
         throw std::runtime_error("cannot parse size '" + s + "'");
     }
-    std::string suf = s.substr(pos);
-    // strip spaces and upper-case
-    std::string u;
-    for (char c : suf)
-        if (!std::isspace(static_cast<unsigned char>(c)))
-            u += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    const std::string u = normalize_suffix(s.substr(pos));
 
     double mult;
     if (u.empty() || u == "B")        mult = 1.0;
@@ -208,6 +213,30 @@ std::size_t parse_size(const std::string& s)
     if (val <= 0.0)
         throw std::runtime_error("size must be positive: '" + s + "'");
     return static_cast<std::size_t>(std::llround(val * mult));
+}
+
+// Element counts for `npoints` per-array byte sizes spaced logarithmically over
+// [smin, smax]: each size maps to nelmt = round(size / sizeof(T) / ND), clamped
+// to >= 1, with consecutive duplicates removed.
+template <typename T>
+std::vector<std::size_t> logspace_nelems(std::size_t smin, std::size_t smax,
+                                         int npoints, int ND)
+{
+    const double lmin = std::log10(double(smin));
+    const double lmax = std::log10(double(smax));
+    std::vector<std::size_t> nelems;
+    long prev = -1;
+    for (int i = 0; i < npoints; ++i) {
+        const double e = (npoints == 1) ? lmin
+                                        : lmin + (lmax - lmin) * i / (npoints - 1);
+        const double bytes = std::pow(10.0, e);
+        long nel = std::lround(bytes / double(sizeof(T)) / double(ND));
+        if (nel < 1) nel = 1;
+        if (nel == prev) continue;
+        prev = nel;
+        nelems.push_back(std::size_t(nel));
+    }
+    return nelems;
 }
 
 } // namespace bk
@@ -262,15 +291,17 @@ int main(int argc, char** argv)
 
     const std::string kern = (optind < argc) ? argv[optind] : "all";
 
-    // Select kernels (one block per kernel in the output).
-    std::vector<Kernel> kernels;
-    if      (kern == "all")    kernels = {Kernel::Init, Kernel::Copy,
-                                          Kernel::Triad, Kernel::Striad};
-    else if (kern == "init")   kernels = {Kernel::Init};
-    else if (kern == "copy")   kernels = {Kernel::Copy};
-    else if (kern == "triad")  kernels = {Kernel::Triad};
-    else if (kern == "striad") kernels = {Kernel::Striad};
-    else {
+    // Select kernels (one block per kernel in the output); {} means unknown.
+    const std::vector<Kernel> kernels = [&kern]() -> std::vector<Kernel> {
+        if (kern == "all")    return {Kernel::Init, Kernel::Copy,
+                                      Kernel::Triad, Kernel::Striad};
+        if (kern == "init")   return {Kernel::Init};
+        if (kern == "copy")   return {Kernel::Copy};
+        if (kern == "triad")  return {Kernel::Triad};
+        if (kern == "striad") return {Kernel::Striad};
+        return {};
+    }();
+    if (kernels.empty()) {
         std::cerr << "error: unknown kernel '" << kern
                   << "' (init|copy|triad|striad|all)\n";
         return 1;
@@ -300,21 +331,8 @@ int main(int argc, char** argv)
     const int ND = nm * nm * nm;
 
     // Log-spaced per-array byte targets -> element counts (deduplicated).
-    const double lmin = std::log10(double(smin));
-    const double lmax = std::log10(double(smax));
-    std::vector<std::size_t> nelems;
-    long prev = -1;
-    for (int i = 0; i < npoints; ++i) {
-        const double e = (npoints == 1) ? lmin
-                                        : lmin + (lmax - lmin) * i / (npoints - 1);
-        const double bytes = std::pow(10.0, e);
-        const double ndof  = bytes / double(sizeof(T));
-        long nel = std::lround(ndof / double(ND));
-        if (nel < 1) nel = 1;
-        if (nel == prev) continue;
-        prev = nel;
-        nelems.push_back(std::size_t(nel));
-    }
+    const std::vector<std::size_t> nelems =
+        logspace_nelems<T>(smin, smax, npoints, ND);
 
     // --- gnuplot data-file header ------------------------------------------
     std::cout << "# benchmark = bkstream (BK DoF layout, T=float)\n"
