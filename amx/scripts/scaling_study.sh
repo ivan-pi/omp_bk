@@ -1,0 +1,1 @@
+for t in 1 2 3 4 5 6 7 8 9 10; do printf "threads=%d  " $t; OMP_NUM_THREADS=$t BK_BATCH=16 ./bk1_amx 8 100000 3 | sed -n 's/.*GDoF\/s = \([0-9.e-]*\).*/\1/p'; done
