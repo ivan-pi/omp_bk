@@ -69,3 +69,14 @@ make BK1 BK1_amx
 amx/scripts/validate.sh          # every kernel against the reference, random data
 amx/scripts/throughput.sh        # CEED-style throughput sweep to results.csv
 ```
+
+`amx/bench/` holds the micro-benchmarks that give the roofs for those
+results: `bw_test` (STREAM-style bandwidth, NEON and AMX FMA peaks),
+`amx_pipe` (the AMX unit's load/store pipeline) and `accel_gemm`
+(Accelerate's sgemm as a calibration point, macOS only).
+
+```sh
+make bw_test amx_pipe
+./bw_test > bw.csv
+amx/scripts/plot_roofline.py results.csv bw.csv     # plateaus against the roofs
+```
