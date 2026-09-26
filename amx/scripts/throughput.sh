@@ -10,6 +10,7 @@
 #         KERNELS="serial omp omp_v neon_aos neon_soa amx_aos amx_soa"
 #           serial = the reference kernel on one thread (BK_KERNEL=ref
 #                    BK_PARALLEL=0 in the AMX binary)
+#           omp    = BK1 from the Makefile (OpenMP target, host fallback)
 #           omp_v  = the reference loops interchanged for unit-stride inner
 #                    loops (BK_KERNEL=refv in the AMX binary, OpenMP over elements)
 #         SERIAL_MAX=1e7             cap for the serial kernel (it is slow)
@@ -42,7 +43,7 @@ run() {   # run <kernel> <p> <nelmt>  -> "gdofs gbs"
   local k=$1 p=$2 n=$3 out
   case $k in
     serial)  out=$(BK_KERNEL=ref BK_PARALLEL=0 $BK1_AMX $p $n $NTESTS) ;;
-    omp)     out=$($BK1_OMP $p $n $NTESTS) ;;
+    omp)     out=$($BK1     $p $n $NTESTS) ;;
     omp_v)    out=$(BK_KERNEL=refv $BK1_AMX $p $n $NTESTS) ;;
     neon_aos) out=$(BK_KERNEL=neon BK_LAYOUT=aos $BK1_AMX $p $n $NTESTS) ;;
     neon_soa) out=$(BK_KERNEL=neon BK_LAYOUT=soa $BK1_AMX $p $n $NTESTS) ;;

@@ -1,10 +1,11 @@
 # common.sh -- shared by the scripts in this directory; source it with
 #   . "$(dirname "$0")/common.sh"
 #
-# Binaries (all overridable from the environment, paths relative to the cwd):
-BK1_AMX=${BK1_AMX:-./bk1_amx}     # amx/BK1_amx.cpp
-BK1=${BK1:-./bk1}                 # BK1.cpp built without OpenMP (serial reference)
-BK1_OMP=${BK1_OMP:-./bk1_omp}     # BK1.cpp built with -fopenmp (host fallback)
+# Binaries: the Makefile's outputs in the repository root (make BK1 BK1_amx),
+# overridable from the environment.
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+BK1_AMX=${BK1_AMX:-$ROOT/BK1_amx}   # amx/BK1_amx.cpp: AMX, NEON and reference kernels
+BK1=${BK1:-$ROOT/BK1}               # BK1.cpp with -fopenmp (OpenMP target, host fallback)
 
 # Parse the driver's "... GDoF/s = <g> GB/s = <b>" line from stdin.
 rates() { sed -n 's/.*GDoF\/s = \([0-9.e+-]*\) GB\/s = \([0-9.e+-]*\).*/\1 \2/p'; }   # "<g> <b>"

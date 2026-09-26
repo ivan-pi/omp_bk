@@ -61,4 +61,11 @@ elements of a batch, and `BK_KERNEL=refv` is the reference with its loops
 interchanged for unit-stride inner loops. The header of `amx/BK1_amx.cpp`
 lists all environment variables (kernel, layout, dense path, batch size,
 random test data) and `amx/scripts/` holds the validation, tuning and
-throughput-sweep scripts.
+throughput-sweep scripts, which run the `BK1` and `BK1_amx` executables
+built by `make` in the repository root:
+
+```sh
+make BK1 BK1_amx
+amx/scripts/validate.sh          # every kernel against the reference, random data
+amx/scripts/throughput.sh        # CEED-style throughput sweep to results.csv
+```

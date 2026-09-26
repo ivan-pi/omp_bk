@@ -1,6 +1,6 @@
 #!/bin/bash
 # ab.sh -- interleaved A/B of two builds of the AMX driver, median of R runs each
-# usage:  A=./bk1_amx_before [B=./bk1_amx] [R=5] [ORDERS="4 8 14"] ./ab.sh
+# usage:  A=./BK1_amx_before [B=<repo>/BK1_amx] [R=5] [ORDERS="4 8 14"] ./ab.sh
 . "$(dirname "$0")/common.sh"
 A=${A:?set A to the baseline binary}; B=${B:-$BK1_AMX}; R=${R:-5}
 export BK_NOREF=1 BK_LAYOUT=${BK_LAYOUT:-soa}

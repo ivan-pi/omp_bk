@@ -1,10 +1,10 @@
 #!/bin/bash
-# validate.sh -- run bk1_amx over orders / paths / layouts and check every run
+# validate.sh -- run BK1_amx over orders / paths / layouts and check every run
 # against (a) its own serial-reference comparison on random data and (b) the
-# norm printed by the plain bk1 executable on constant data.  Exit status is
+# norm printed by the plain BK1 executable on constant data.  Exit status is
 # non-zero on any failure.
 #
-# usage: ./validate.sh [nelmt=1234] [tol=1e-5]
+# usage: make BK1 BK1_amx && amx/scripts/validate.sh [nelmt=1234] [tol=1e-5]
 #
 # The random-data check is the one with discriminating power (an index bug
 # fails it; constant data cannot detect transpositions).  The constant-data
@@ -27,7 +27,7 @@ check() {   # check <label> <env assignments...>   (uses P, N, n_ref)
   local rel
   rel=$(env "$@" BK_RANDOM=1 $BK1_AMX $P $N 1 | sed -n 's/.*relative = \([0-9.e+-]*\).*/\1/p')
 
-  # 2) constant data: norm must match the standalone bk1 executable
+  # 2) constant data: norm must match the standalone BK1 executable
   local n_amx
   n_amx=$(env "$@" BK_NOREF=1 $BK1_AMX $P $N 1 | sed -n '2s/norm = //p')
 
@@ -46,7 +46,7 @@ check() {   # check <label> <env assignments...>   (uses P, N, n_ref)
   case $verdict in
     ok*) printf "%-18s p=%d %-26s rel=%-11s norm=%s\n" "$verdict" $P "$label" "$rel" "$n_amx"
          pass=$((pass+1));;
-    *)   printf "%-18s p=%d %-26s rel=%-11s norm=%s (bk1: %s)\n" "FAIL" $P "$label" "$rel" "$n_amx" "$n_ref"
+    *)   printf "%-18s p=%d %-26s rel=%-11s norm=%s (BK1: %s)\n" "FAIL" $P "$label" "$rel" "$n_amx" "$n_ref"
          fail=$((fail+1));;
   esac
 }
