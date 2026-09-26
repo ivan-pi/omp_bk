@@ -14,22 +14,22 @@
 #
 # Threads: whatever OMP_NUM_THREADS says, else the binary's default (cores - 1).
 # Batch size: the binary's default of 16, plus one explicit batch=32 line.
+. "$(dirname "$0")/common.sh"
 N=${1:-1234}          # not a multiple of 16, so partial lane chunks are exercised
 TOL=${2:-1e-5}
 
 pass=0; fail=0
 
-check() {   # check <label> <env assignments...>
+check() {   # check <label> <env assignments...>   (uses P, N, n_ref)
   local label=$1; shift
 
   # 1) random data: relative error against the serial reference inside the driver
   local rel
-  rel=$(env "$@" BK_RANDOM=1 ./bk1_amx $P $N 1 | sed -n 's/.*relative = \([0-9.e+-]*\).*/\1/p')
+  rel=$(env "$@" BK_RANDOM=1 $BK1_AMX $P $N 1 | sed -n 's/.*relative = \([0-9.e+-]*\).*/\1/p')
 
   # 2) constant data: norm must match the standalone bk1 executable
-  local n_amx n_ref
-  n_amx=$(env "$@" ./bk1_amx $P $N 1 | sed -n '2s/norm = //p')
-  n_ref=$(./bk1 $P $N 1 | sed -n '2s/norm = //p')
+  local n_amx
+  n_amx=$(env "$@" BK_NOREF=1 $BK1_AMX $P $N 1 | sed -n '2s/norm = //p')
 
   # per-DoF output magnitude relative to the constant input (3.0); below 1e-2
   # the constant-data test cancels catastrophically -> norm check informational
@@ -52,6 +52,7 @@ check() {   # check <label> <env assignments...>
 }
 
 for P in 1 2 3 5 8; do
+  n_ref=$($BK1 $P $N 1 | sed -n '2s/norm = //p')     # constant-data norm, once per order
   for layout in aos soa; do
     check "sumfact $layout"        BK_DENSE=0 BK_LAYOUT=$layout
     if [ $P -le 3 ]; then

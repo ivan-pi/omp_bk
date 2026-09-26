@@ -1,7 +1,8 @@
 // BK1_amx.cpp -- BK1 mass-operator sum factorization on the Apple AMX units.
 //
-// Needs amx.h (instruction layer) and bk_common.h next to this file.
-// Build (Apple Silicon):
+// Needs amx.h (instruction layer) next to this file and bk_common.h in the
+// parent directory.  From the repository root:  make BK1_amx
+// Build by hand (Apple Silicon):
 //   clang++ -O2 -std=c++17 BK1_amx.cpp -o bk1_amx
 //   clang++ -O2 -std=c++17 -fopenmp BK1_amx.cpp -o bk1_amx      (libomp)
 //   clang++ -O2 -std=c++17 -DAMX_EMULATE BK1_amx.cpp ...        (emulated, for A/B checks)
@@ -11,16 +12,14 @@
 // Run:  ./bk1_amx [p=2] [nelmt=524288] [ntests=5]
 //   BK_RANDOM=1  use pseudo-random in/JxW instead of the constant 3.0/1.0
 //                (constant data cannot detect index-transposition bugs).
-//   BK_BATCH=E   elements per AMX batch, in lane chunks of 16 (default 16,
-//                which is the measured optimum; forced to 16 by the dense
-//                path and the SoA layout)
+//   BK_BATCH=E   elements per AMX batch, rounded up to a multiple of 16
+//                (default 16, the measured optimum; the dense path and the
+//                SoA layout always use 16)
 //   OMP_NUM_THREADS  default: number of cores minus one
 //   BK_DENSE=0/1 dense element-matrix path (default: on for p <= 2)
 //   BK_LAYOUT=soa  store in/JxW/out elements-on-lanes (chunks of 16) so the
 //                kernel runs without any layout conversion
 //   BK_NOREF=1   skip the serial reference comparison (throughput sweeps)
-//   BK_NT=1      non-temporal stores of `out` (element-major layout, clang on
-//                arm64 only; default off -- measured no effect on M2 Pro)
 //
 // Mapping onto AMX (fma32, matrix mode):   z[row][col] += y[row] * x[col]
 //   X  = 16 consecutive ELEMENTS of one field entry (elements on the lanes)
@@ -34,6 +33,7 @@
 #include <cmath>
 #include <array>
 #include <vector>
+#include <memory>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
@@ -41,8 +41,9 @@
 #include <limits>
 #include <algorithm>
 #include <cstddef>
+#include <new>
 
-#include "bk_common.h"
+#include "../bk_common.h"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -56,6 +57,8 @@ namespace amx {
 using ::amx::op::ldxy;
 using ::amx::op::stz;
 using ::amx::op::fma;
+
+constexpr int LANES = 16;                       // elements per 64-byte line
 
 // ---------------------------------------------------------------------------
 // Elements-on-lanes layout.  A batch of E elements (padded to EP, a multiple
@@ -100,7 +103,7 @@ inline void contract_dim(const int d, const int A0, const int A1, const int A2,
     const int ny = std::min(S, 8);
     for (int s = 0; s < ny; ++s) AMX_LDY(ldxy(s, coef[s]));
 
-    for (int e0 = 0; e0 < EP; e0 += 16) {
+    for (int e0 = 0; e0 < EP; e0 += LANES) {
         for (int f0 = 0; f0 < F; f0 += TILES) {
             const int nt = std::min(TILES, F - f0);
             int base_in[TILES], base_out[TILES];
@@ -150,6 +153,7 @@ struct Coef {
 // padded to a multiple of 4, and the batch is one lane chunk (EP = 16), so four
 // consecutive s-planes of both operands are contiguous 256-byte blocks and are
 // brought in with quad loads (M2+): per four planes, 1 ldx + C ldy + 4C fma.
+// Pair and quad loads need 128-byte aligned addresses (corsix/amx, ldst.md).
 // ---------------------------------------------------------------------------
 template <int nq>
 struct DenseCoef {
@@ -199,7 +203,7 @@ inline void dense_step(const int S, const float* __restrict__ in, float* __restr
     }
 }
 
-inline int round16(int e) { return (e + 15) & ~15; }
+inline int round_up(int x, int m) { return (x + m - 1) / m * m; }
 
 // ---------------------------------------------------------------------------
 // Element-major <-> elements-on-lanes conversions (steps 1, 5, 9), done as
@@ -213,21 +217,6 @@ typedef float v4f __attribute__((vector_size(16)));
 inline v4f v4_load(const float* p)          { v4f v; std::memcpy(&v, p, 16); return v; }
 inline void v4_store(float* p, v4f v)       { std::memcpy(p, &v, 16); }
 
-// Streaming (non-temporal) 16-byte store for the `out` array: STNP on arm64
-// with clang, a plain store elsewhere.  Off unless BK_NT=1 (no effect measured on M2 Pro).
-typedef float v4f_u __attribute__((vector_size(16), aligned(4)));
-#if defined(__aarch64__) && defined(__clang__) && __has_builtin(__builtin_nontemporal_store)
-inline void v4_store_stream(float* p, v4f v) { __builtin_nontemporal_store((v4f_u)v, reinterpret_cast<v4f_u*>(p)); }
-constexpr bool HAVE_NT_STORE = true;
-#else
-inline void v4_store_stream(float* p, v4f v) { v4_store(p, v); }
-constexpr bool HAVE_NT_STORE = false;
-#endif
-inline bool use_nt_store() {
-    static const bool on = [] { auto v = get_env("BK_NT"); return v ? std::atoi(v->c_str()) != 0 : false; }();
-    return HAVE_NT_STORE && on;
-}
-
 // (a0 a1 a2 a3 | b0.. | c0.. | d0..) -> (a0 b0 c0 d0 | a1 b1 c1 d1 | ...)
 inline void v4_transpose(v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
     const v4f t0 = __builtin_shufflevector(r0, r1, 0, 4, 1, 5);
@@ -240,190 +229,221 @@ inline void v4_transpose(v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
     r3 = __builtin_shufflevector(t1, t3, 2, 3, 6, 7);
 }
 
-// dst(x; e) = src(e; x),  x < n, e < Eb, dst pitch EP
-inline void to_lanes(const float* __restrict__ src, float* __restrict__ dst, int Eb, int EP, int n) {
+// Load the 4x4 block at p (row pitch `pitch`), transposed.
+inline void load4x4T(const float* p, std::size_t pitch, v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
+    r0 = v4_load(p); r1 = v4_load(p + pitch); r2 = v4_load(p + 2 * pitch); r3 = v4_load(p + 3 * pitch);
+    v4_transpose(r0, r1, r2, r3);
+}
+
+// Walk the (e < Eb) x (x < n) index space in 4x4 blocks: block(e, x) for every
+// full block, scalar(e, x) for every remaining single position.
+template <class Block, class Scalar>
+inline void for_blocks(int Eb, int n, Block block, Scalar scalar) {
     const int E4 = Eb & ~3, n4 = n & ~3;
     for (int e = 0; e < E4; e += 4) {
-        const float* s0 = src + std::size_t(e) * n;
-        for (int x = 0; x < n4; x += 4) {
-            v4f r0 = v4_load(s0 + x), r1 = v4_load(s0 + n + x), r2 = v4_load(s0 + 2 * n + x), r3 = v4_load(s0 + 3 * n + x);
-            v4_transpose(r0, r1, r2, r3);
-            float* d = dst + std::size_t(x) * EP + e;
-            v4_store(d, r0); v4_store(d + EP, r1); v4_store(d + 2 * EP, r2); v4_store(d + 3 * EP, r3);
-        }
+        for (int x = 0; x < n4; x += 4) block(e, x);
         for (int x = n4; x < n; ++x)
-            for (int k = 0; k < 4; ++k) dst[std::size_t(x) * EP + e + k] = s0[std::size_t(k) * n + x];
+            for (int k = 0; k < 4; ++k) scalar(e + k, x);
     }
     for (int e = E4; e < Eb; ++e)
-        for (int x = 0; x < n; ++x) dst[std::size_t(x) * EP + e] = src[std::size_t(e) * n + x];
+        for (int x = 0; x < n; ++x) scalar(e, x);
+}
+
+// dst(x; e) = src(e; x),  x < n, e < Eb, dst pitch EP
+inline void to_lanes(const float* __restrict__ src, float* __restrict__ dst, int Eb, int EP, int n) {
+    for_blocks(Eb, n,
+        [&](int e, int x) {
+            v4f r0, r1, r2, r3;
+            load4x4T(src + std::size_t(e) * n + x, n, r0, r1, r2, r3);
+            float* d = dst + std::size_t(x) * EP + e;
+            v4_store(d, r0); v4_store(d + EP, r1); v4_store(d + 2 * EP, r2); v4_store(d + 3 * EP, r3);
+        },
+        [&](int e, int x) { dst[std::size_t(x) * EP + e] = src[std::size_t(e) * n + x]; });
 }
 
 // dst(e; x) = src(x; e)
 inline void from_lanes(const float* __restrict__ src, float* __restrict__ dst, int Eb, int EP, int n) {
-    const int E4 = Eb & ~3, n4 = n & ~3;
-    const bool nt = use_nt_store();
-    for (int e = 0; e < E4; e += 4) {
-        float* d0 = dst + std::size_t(e) * n;
-        for (int x = 0; x < n4; x += 4) {
-            const float* sp = src + std::size_t(x) * EP + e;
-            v4f r0 = v4_load(sp), r1 = v4_load(sp + EP), r2 = v4_load(sp + 2 * EP), r3 = v4_load(sp + 3 * EP);
-            v4_transpose(r0, r1, r2, r3);
-            if (nt) { v4_store_stream(d0 + x, r0); v4_store_stream(d0 + n + x, r1); v4_store_stream(d0 + 2 * n + x, r2); v4_store_stream(d0 + 3 * n + x, r3); }
-            else    { v4_store(d0 + x, r0);        v4_store(d0 + n + x, r1);        v4_store(d0 + 2 * n + x, r2);        v4_store(d0 + 3 * n + x, r3); }
-        }
-        for (int x = n4; x < n; ++x)
-            for (int k = 0; k < 4; ++k) d0[std::size_t(k) * n + x] = src[std::size_t(x) * EP + e + k];
-    }
-    for (int e = E4; e < Eb; ++e)
-        for (int x = 0; x < n; ++x) dst[std::size_t(e) * n + x] = src[std::size_t(x) * EP + e];
+    for_blocks(Eb, n,
+        [&](int e, int x) {
+            v4f r0, r1, r2, r3;
+            load4x4T(src + std::size_t(x) * EP + e, EP, r0, r1, r2, r3);
+            float* d = dst + std::size_t(e) * n + x;
+            v4_store(d, r0); v4_store(d + n, r1); v4_store(d + 2 * n, r2); v4_store(d + 3 * n, r3);
+        },
+        [&](int e, int x) { dst[std::size_t(e) * n + x] = src[std::size_t(x) * EP + e]; });
 }
 
 // w(x; e) *= JxW(e; x)   (step-5 for the element-major layout)
 inline void scale_lanes(float* __restrict__ w, const float* __restrict__ JxW, int Eb, int EP, int n) {
-    const int E4 = Eb & ~3, n4 = n & ~3;
-    for (int e = 0; e < E4; e += 4) {
-        const float* j0 = JxW + std::size_t(e) * n;
-        for (int x = 0; x < n4; x += 4) {
-            v4f r0 = v4_load(j0 + x), r1 = v4_load(j0 + n + x), r2 = v4_load(j0 + 2 * n + x), r3 = v4_load(j0 + 3 * n + x);
-            v4_transpose(r0, r1, r2, r3);
+    for_blocks(Eb, n,
+        [&](int e, int x) {
+            v4f r0, r1, r2, r3;
+            load4x4T(JxW + std::size_t(e) * n + x, n, r0, r1, r2, r3);
             float* d = w + std::size_t(x) * EP + e;
             v4_store(d,          v4_load(d)          * r0);
             v4_store(d + EP,     v4_load(d + EP)     * r1);
             v4_store(d + 2 * EP, v4_load(d + 2 * EP) * r2);
             v4_store(d + 3 * EP, v4_load(d + 3 * EP) * r3);
-        }
-        for (int x = n4; x < n; ++x)
-            for (int k = 0; k < 4; ++k) w[std::size_t(x) * EP + e + k] *= j0[std::size_t(k) * n + x];
-    }
-    for (int e = E4; e < Eb; ++e)
-        for (int x = 0; x < n; ++x) w[std::size_t(x) * EP + e] *= JxW[std::size_t(e) * n + x];
+        },
+        [&](int e, int x) { w[std::size_t(x) * EP + e] *= JxW[std::size_t(e) * n + x]; });
 }
 
-// One batch of Eb <= EP elements, sum-factorized path.
+// ---------------------------------------------------------------------------
+// One batch of Eb <= EP elements: layout handling shared by both paths.
 // soa = false: in_e/JxW_e/out_e are element-major (e; idx).
 // soa = true : EP == 16 and in_e/JxW_e/out_e are already (idx; e) chunks; the
 //              kernel then reads in_e and writes out_e directly.
-// w0, w1: nq^3 * EP + 48 floats each, 128-byte aligned.
-template <int nq>
-inline void batch_sumfact(const bool soa, const int Eb, const int EP,
-                          const float* __restrict__ in_e, const float* __restrict__ JxW_e,
-                          float* __restrict__ out_e, const Coef<nq>& C,
-                          float* __restrict__ w0, float* __restrict__ w1)
+// w0, w1: workspace of nq^3 * EP floats plus quad-load padding, 128-byte aligned.
+// fwd(src, dst): nm^3 planes (idx; e) -> nq^3 planes;  rev(src, dst): the reverse.
+// ---------------------------------------------------------------------------
+template <int nq, class Fwd, class Rev>
+inline void run_batch(const bool soa, const int Eb, const int EP,
+                      const float* __restrict__ in_e, const float* __restrict__ JxW_e,
+                      float* __restrict__ out_e, float* __restrict__ w0, float* __restrict__ w1,
+                      Fwd fwd, Rev rev)
 {
     constexpr int nm = nq - 1, nm3 = nm * nm * nm, nq3 = nq * nq * nq;
 
     const float* src = in_e;
     if (!soa) { to_lanes(in_e, w0, Eb, EP, nm3); src = w0; }       // step-1
 
-    // steps 2-4: (i,j,k) -> (p,j,k) -> (p,q,k) -> (p,q,r)
-    contract_dim<nq>(0, nm, nm, nm, src, w1, C.Bp, EP);
-    contract_dim<nq>(1, nq, nm, nm, w1, w0, C.Bp, EP);
-    contract_dim<nq>(2, nq, nq, nm, w0, w1, C.Bp, EP);
+    fwd(src, w1);                                                   // steps 2-4
 
-    // step-5: quadrature weights
-    if (soa) { for (int x = 0; x < nq3 * 16; ++x) w1[x] *= JxW_e[x]; }
+    if (soa) { for (int x = 0; x < nq3 * EP; ++x) w1[x] *= JxW_e[x]; }   // step-5
     else      scale_lanes(w1, JxW_e, Eb, EP, nq3);
 
-    // steps 6-8: (p,q,r) -> (i,q,r) -> (i,j,r) -> (i,j,k)
-    contract_dim<nm>(0, nq, nq, nq, w1, w0, C.BT, EP);
-    contract_dim<nm>(1, nm, nq, nq, w0, w1, C.BT, EP);
-    contract_dim<nm>(2, nm, nm, nq, w1, soa ? out_e : w0, C.BT, EP);
+    rev(w1, soa ? out_e : w0);                                      // steps 6-8
 
     if (!soa) from_lanes(w0, out_e, Eb, EP, nm3);                   // step-9
-}
-
-// One batch of Eb <= 16 elements, dense path (EP == 16).
-template <int nq>
-inline void batch_dense(const bool soa, const int Eb,
-                        const float* __restrict__ in_e, const float* __restrict__ JxW_e,
-                        float* __restrict__ out_e, const DenseCoef<nq>& D,
-                        float* __restrict__ w0, float* __restrict__ w1)
-{
-    using DC = DenseCoef<nq>;
-    constexpr int nm3 = DC::nm3, nq3 = DC::nq3;
-
-    const float* src = in_e;
-    if (!soa) { to_lanes(in_e, w0, Eb, 16, nm3); src = w0; }
-
-    dense_step<DC::SF, DC::CF>(nm3, src, w1, D.Bf, nq3);           // (s; e) -> (q; e)
-
-    if (soa) { for (int x = 0; x < nq3 * 16; ++x) w1[x] *= JxW_e[x]; }
-    else      scale_lanes(w1, JxW_e, Eb, 16, nq3);
-
-    dense_step<DC::SR, DC::CR>(nq3, w1, soa ? out_e : w0, D.Br, nm3);   // (q; e) -> (x; e)
-
-    if (!soa) from_lanes(w0, out_e, Eb, 16, nm3);
 }
 
 struct Options {
     bool soa   = false;   // in/JxW/out already elements-on-lanes, chunks of 16
     bool dense = false;   // dense element-matrix path
-    int  batch = 16;
-};
+    int  batch = LANES;   // elements per batch; always 16 for dense or soa
 
-template <int nq>
-Options options(bool soa) {
-    Options o;
-    o.soa = soa;
-    o.dense = (nq <= 4);
-    if (auto v = get_env("BK_DENSE")) o.dense = std::atoi(v->c_str()) != 0;
-    if (auto v = get_env("BK_BATCH")) o.batch = std::max(1, std::atoi(v->c_str()));
-    if (o.dense || o.soa) o.batch = 16;
-    return o;
-}
+    // Read BK_LAYOUT / BK_DENSE / BK_BATCH; dense_default applies when BK_DENSE is unset.
+    static Options from_env(bool dense_default) {
+        Options o;
+        o.soa   = get_env("BK_LAYOUT").value_or("") == "soa";
+        o.dense = dense_default;
+        if (auto v = get_env("BK_DENSE")) o.dense = std::atoi(v->c_str()) != 0;
+        if (auto v = get_env("BK_BATCH")) o.batch = round_up(std::max(1, std::atoi(v->c_str())), LANES);
+        if (o.dense || o.soa) o.batch = LANES;
+        return o;
+    }
+};
 
 // In SoA layout the arrays are chunks of 16 elements: (chunk, idx, lane), with
 // nelmt rounded up to a whole chunk and, for the dense path's quad loads,
 // 48 floats of readable padding after the last chunk.
 inline std::size_t soa_size(std::size_t nelmt, std::size_t n) { return (nelmt + 15) / 16 * 16 * n + 48; }
+inline std::size_t soa_index(std::size_t e, std::size_t x, std::size_t n) { return ((e / 16) * n + x) * 16 + e % 16; }
 
-template <int nq>
-void SumFactorization(const std::size_t nelmt,
-                      const float* __restrict__ basis,
-                      const float* __restrict__ JxW,
-                      const float* __restrict__ in,
-                      float* __restrict__ out,
-                      const Options& o)
-{
-    constexpr int nm = nq - 1;
-    constexpr std::size_t nm3 = std::size_t(nm) * nm * nm;
-    constexpr std::size_t nq3 = std::size_t(nq) * nq * nq;
-
-    const Coef<nq> C(basis);
-    const DenseCoef<nq>* D = o.dense ? new DenseCoef<nq>(basis) : nullptr;
-    const int E  = o.batch;
-    const int EP = round16(E);
-    const std::size_t nbatch = (nelmt + E - 1) / E;
-    const std::size_t wsz = nq3 * EP + 48;             // +3 planes for quad-load overrun
-
-    #pragma omp parallel
-    {
-        // AMX state is per thread: every thread must enable it itself.
-        std::vector<float> storage(2 * wsz + 32, 0.f);            // +32 floats for 128-byte alignment
-        float* w0 = reinterpret_cast<float*>((reinterpret_cast<uintptr_t>(storage.data()) + 127) & ~uintptr_t(127));
-        float* w1 = w0 + wsz;
-        AMX_SET();
-        #pragma omp for schedule(dynamic,4)
-        for (std::size_t b = 0; b < nbatch; ++b) {
-            const std::size_t e0 = b * E;
-            const int Eb = int(std::min<std::size_t>(E, nelmt - e0));
-            const float* in_e  = in  + e0 * nm3;     // element-major and SoA (E == 16) agree
-            const float* JxW_e = JxW + e0 * nq3;
-            float*       out_e = out + e0 * nm3;
-            if (o.dense) batch_dense<nq>(o.soa, Eb, in_e, JxW_e, out_e, *D, w0, w1);
-            else         batch_sumfact<nq>(o.soa, Eb, EP, in_e, JxW_e, out_e, C, w0, w1);
-        }
-        AMX_CLR();
+// Per-thread scratch space, 128-byte aligned, kept across calls so the timed
+// kernel does not allocate.  AMX state is per thread as well.
+inline float* workspace(std::size_t nfloats) {
+    struct Buf {
+        float* p = nullptr; std::size_t n = 0;
+        ~Buf() { ::operator delete(p, std::align_val_t(128)); }
+    };
+    static thread_local Buf buf;
+    if (buf.n < nfloats) {
+        ::operator delete(buf.p, std::align_val_t(128));
+        buf.p = static_cast<float*>(::operator new(nfloats * sizeof(float), std::align_val_t(128)));
+        buf.n = nfloats;
     }
-    delete D;
+    return buf.p;
 }
+
+// The BK1 operator for one order: coefficient tables built once, then applied
+// to any number of elements by operator().
+template <int nq>
+class Kernel {
+public:
+    static constexpr int nm = nq - 1;
+    static constexpr std::size_t nm3 = std::size_t(nm) * nm * nm;
+    static constexpr std::size_t nq3 = std::size_t(nq) * nq * nq;
+
+    Kernel(const float* basis, const Options& o)
+        : o_(o), C_(basis), D_(o.dense ? std::make_unique<const DenseCoef<nq>>(basis) : nullptr) {}
+
+    const Options& options() const { return o_; }
+
+    void operator()(const std::size_t nelmt, const float* __restrict__ JxW,
+                    const float* __restrict__ in, float* __restrict__ out) const
+    {
+        const int E  = o_.batch;
+        const int EP = round_up(E, LANES);
+        const std::size_t nbatch = (nelmt + E - 1) / E;
+        // + 3 planes for the quad-load overrun, rounded up to keep w1 128-byte aligned
+        const std::size_t wsz = round_up(int(nq3 * EP + 48), 32);
+
+        #pragma omp parallel
+        {
+            float* w0 = workspace(2 * wsz);
+            float* w1 = w0 + wsz;
+            AMX_SET();                    // every thread enables AMX for itself
+            #pragma omp for schedule(dynamic,4)
+            for (std::size_t b = 0; b < nbatch; ++b) {
+                const std::size_t e0 = b * E;
+                const int Eb = int(std::min<std::size_t>(E, nelmt - e0));
+                const float* in_e  = in  + e0 * nm3;     // element-major and SoA (E == 16) agree
+                const float* JxW_e = JxW + e0 * nq3;
+                float*       out_e = out + e0 * nm3;
+                if (o_.dense) dense_batch(Eb, in_e, JxW_e, out_e, w0, w1);
+                else          sumfact_batch(Eb, EP, in_e, JxW_e, out_e, w0, w1);
+            }
+            AMX_CLR();
+        }
+    }
+
+private:
+    Options o_;
+    Coef<nq> C_;
+    std::unique_ptr<const DenseCoef<nq>> D_;   // 55 MB at nq = 16, so on the heap
+
+    void sumfact_batch(int Eb, int EP, const float* in_e, const float* JxW_e, float* out_e,
+                       float* w0, float* w1) const
+    {
+        const Coef<nq>& C = C_;
+        run_batch<nq>(o_.soa, Eb, EP, in_e, JxW_e, out_e, w0, w1,
+            [&](const float* src, float* dst) {     // (i,j,k) -> (p,j,k) -> (p,q,k) -> (p,q,r)
+                contract_dim<nq>(0, nm, nm, nm, src, dst, C.Bp, EP);
+                contract_dim<nq>(1, nq, nm, nm, dst, w0,  C.Bp, EP);
+                contract_dim<nq>(2, nq, nq, nm, w0,  dst, C.Bp, EP);
+            },
+            [&](const float* src, float* dst) {     // (p,q,r) -> (i,q,r) -> (i,j,r) -> (i,j,k)
+                contract_dim<nm>(0, nq, nq, nq, src, w0,  C.BT, EP);
+                contract_dim<nm>(1, nm, nq, nq, w0,  w1,  C.BT, EP);    // src (== w1) is consumed
+                contract_dim<nm>(2, nm, nm, nq, w1,  dst, C.BT, EP);
+            });
+    }
+
+    void dense_batch(int Eb, const float* in_e, const float* JxW_e, float* out_e,
+                     float* w0, float* w1) const
+    {
+        using DC = DenseCoef<nq>;
+        const DC& D = *D_;
+        run_batch<nq>(o_.soa, Eb, LANES, in_e, JxW_e, out_e, w0, w1,
+            [&](const float* src, float* dst) {     // (s; e) -> (q; e)
+                // quad loads need 128-byte alignment; an SoA chunk that only has
+                // 64 (odd nm^3, odd chunk) is staged through w0 first
+                if (reinterpret_cast<uintptr_t>(src) & 127) { std::memcpy(w0, src, nm3 * LANES * sizeof(float)); src = w0; }
+                dense_step<DC::SF, DC::CF>(nm3, src, dst, D.Bf, nq3);
+            },
+            [&](const float* src, float* dst) {     // (q; e) -> (x; e)
+                dense_step<DC::SR, DC::CR>(nq3, src, dst, D.Br, nm3);
+            });
+    }
+};
 
 } // namespace amx
 
 // ---------------------------------------------------------------------------
 // Serial reference (body of BK1.cpp without the target pragmas)
 // ---------------------------------------------------------------------------
-template <typename T, int nq, typename index_t = int>
+template <typename T, int nq>
 void SumFactorizationRef(const std::size_t nelmt, const T* basis, const T* JxW,
                          const T* in, T* out)
 {
@@ -441,23 +461,23 @@ void SumFactorizationRef(const std::size_t nelmt, const T* basis, const T* JxW,
         const nm_view  e_out{out + e * nm_view::size};
         const nq_cview e_JxW{JxW + e * nq_cview::size};
 
-        for (index_t i = 0; i < nm; ++i) for (index_t j = 0; j < nm; ++j) for (index_t k = 0; k < nm; ++k)
+        for (int i = 0; i < nm; ++i) for (int j = 0; j < nm; ++j) for (int k = 0; k < nm; ++k)
             wsp0(i, j, k) = e_in(i, j, k);
-        for (index_t p = 0; p < nq; ++p) for (index_t k = 0; k < nm; ++k) for (index_t j = 0; j < nm; ++j) {
-            T tmp = 0; for (index_t i = 0; i < nm; ++i) tmp += wsp0(i, j, k) * B(i, p); wsp1(p, j, k) = tmp; }
-        for (index_t q = 0; q < nq; ++q) for (index_t p = 0; p < nq; ++p) for (index_t k = 0; k < nm; ++k) {
-            T tmp = 0; for (index_t j = 0; j < nm; ++j) tmp += wsp1(p, j, k) * B(j, q); wsp0(q, p, k) = tmp; }
-        for (index_t r = 0; r < nq; ++r) for (index_t q = 0; q < nq; ++q) for (index_t p = 0; p < nq; ++p) {
-            T tmp = 0; for (index_t k = 0; k < nm; ++k) tmp += wsp0(q, p, k) * B(k, r); wsp1(p, q, r) = tmp; }
-        for (index_t r = 0; r < nq; ++r) for (index_t q = 0; q < nq; ++q) for (index_t p = 0; p < nq; ++p)
+        for (int p = 0; p < nq; ++p) for (int k = 0; k < nm; ++k) for (int j = 0; j < nm; ++j) {
+            T tmp = 0; for (int i = 0; i < nm; ++i) tmp += wsp0(i, j, k) * B(i, p); wsp1(p, j, k) = tmp; }
+        for (int q = 0; q < nq; ++q) for (int p = 0; p < nq; ++p) for (int k = 0; k < nm; ++k) {
+            T tmp = 0; for (int j = 0; j < nm; ++j) tmp += wsp1(p, j, k) * B(j, q); wsp0(q, p, k) = tmp; }
+        for (int r = 0; r < nq; ++r) for (int q = 0; q < nq; ++q) for (int p = 0; p < nq; ++p) {
+            T tmp = 0; for (int k = 0; k < nm; ++k) tmp += wsp0(q, p, k) * B(k, r); wsp1(p, q, r) = tmp; }
+        for (int r = 0; r < nq; ++r) for (int q = 0; q < nq; ++q) for (int p = 0; p < nq; ++p)
             wsp1(p, q, r) *= e_JxW(p, q, r);
-        for (index_t k = 0; k < nm; ++k) for (index_t q = 0; q < nq; ++q) for (index_t p = 0; p < nq; ++p) {
-            T tmp = 0; for (index_t r = 0; r < nq; ++r) tmp += wsp1(p, q, r) * B(k, r); wsp0(q, p, k) = tmp; }
-        for (index_t j = 0; j < nm; ++j) for (index_t k = 0; k < nm; ++k) for (index_t p = 0; p < nq; ++p) {
-            T tmp = 0; for (index_t q = 0; q < nq; ++q) tmp += wsp0(q, p, k) * B(j, q); wsp1(p, j, k) = tmp; }
-        for (index_t i = 0; i < nm; ++i) for (index_t j = 0; j < nm; ++j) for (index_t k = 0; k < nm; ++k) {
-            T tmp = 0; for (index_t p = 0; p < nq; ++p) tmp += wsp1(p, j, k) * B(i, p); wsp0(i, j, k) = tmp; }
-        for (index_t i = 0; i < nm; ++i) for (index_t j = 0; j < nm; ++j) for (index_t k = 0; k < nm; ++k)
+        for (int k = 0; k < nm; ++k) for (int q = 0; q < nq; ++q) for (int p = 0; p < nq; ++p) {
+            T tmp = 0; for (int r = 0; r < nq; ++r) tmp += wsp1(p, q, r) * B(k, r); wsp0(q, p, k) = tmp; }
+        for (int j = 0; j < nm; ++j) for (int k = 0; k < nm; ++k) for (int p = 0; p < nq; ++p) {
+            T tmp = 0; for (int q = 0; q < nq; ++q) tmp += wsp0(q, p, k) * B(j, q); wsp1(p, j, k) = tmp; }
+        for (int i = 0; i < nm; ++i) for (int j = 0; j < nm; ++j) for (int k = 0; k < nm; ++k) {
+            T tmp = 0; for (int p = 0; p < nq; ++p) tmp += wsp1(p, j, k) * B(i, p); wsp0(i, j, k) = tmp; }
+        for (int i = 0; i < nm; ++i) for (int j = 0; j < nm; ++j) for (int k = 0; k < nm; ++k)
             e_out(i, j, k) = wsp0(i, j, k);
     }
 }
@@ -469,20 +489,21 @@ using namespace bk;
 // ---------------------------------------------------------------------------
 // Test driver
 // ---------------------------------------------------------------------------
-template <typename T, int nq>
+template <int nq>
 void run_test(const std::size_t nelmt, const int ntests)
 {
+    using T = float;                       // the AMX kernel is fp32 only
     constexpr int nm = nq - 1;
     constexpr std::size_t nm3 = std::size_t(nm) * nm * nm, nq3 = std::size_t(nq) * nq * nq;
 
-    const bool soa = get_env("BK_LAYOUT").value_or("") == "soa";
-    const bk::amx::Options opt = bk::amx::options<nq>(soa);
+    const bk::amx::Options opt = bk::amx::Options::from_env(/*dense_default=*/ nq <= 4);
+    const bool soa   = opt.soa;
+    const bool noref = get_env("BK_NOREF").has_value();
 
     const std::array<T, nm * nq> basis = make_test_basis<T, nm, nq>();
     std::vector<T> JxW(nelmt * nq3, T(1.0));
     std::vector<T> in (nelmt * nm3, T(3.0));
     std::vector<T> out(nelmt * nm3);
-    std::vector<T> ref(get_env("BK_NOREF") ? 0 : nelmt * nm3);
 
     if (get_env("BK_RANDOM")) {          // deterministic LCG, values in [-1, 1]
         uint32_t s = 12345u;
@@ -490,6 +511,9 @@ void run_test(const std::size_t nelmt, const int ntests)
         for (auto& v : in)  v = next();
         for (auto& v : JxW) v = T(1.5) + next();
     }
+
+    const std::size_t size_inout = in.size();
+    const std::size_t size_JxW   = JxW.size();
 
     // Kernel-side arrays: element-major, or SoA chunks of 16 elements
     // (chunk, idx, lane).  In SoA mode the conversion happens once here,
@@ -499,16 +523,19 @@ void run_test(const std::size_t nelmt, const int ntests)
     auto to_soa = [&](const std::vector<T>& a, std::size_t n) {
         std::vector<T> r(bk::amx::soa_size(nelmt, n), T(0));
         for (std::size_t e = 0; e < nelmt; ++e)
-            for (std::size_t x = 0; x < n; ++x) r[((e / 16) * n + x) * 16 + e % 16] = a[e * n + x];
+            for (std::size_t x = 0; x < n; ++x) r[bk::amx::soa_index(e, x, n)] = a[e * n + x];
         return r;
     };
-    if (soa) { in_k = to_soa(in, nm3); JxW_k = to_soa(JxW, nq3); out_k.assign(bk::amx::soa_size(nelmt, nm3), T(0)); }
+    if (soa) {
+        in_k = to_soa(in, nm3); JxW_k = to_soa(JxW, nq3); out_k.assign(bk::amx::soa_size(nelmt, nm3), T(0));
+        if (noref) { std::vector<T>().swap(in); std::vector<T>().swap(JxW); }   // only the SoA copies are needed
+    }
     const T* d_in  = soa ? in_k.data()  : in.data();
     const T* d_JxW = soa ? JxW_k.data() : JxW.data();
     T*       d_out = soa ? out_k.data() : out.data();
 
-    const std::size_t size_inout = in.size();
-    const std::size_t size_JxW   = JxW.size();
+    // Coefficient tables are built once, outside the timed region, as in an application.
+    const bk::amx::Kernel<nq> kernel(basis.data(), opt);
 
     using std::chrono::high_resolution_clock;
     using std::chrono::duration;
@@ -516,14 +543,14 @@ void run_test(const std::size_t nelmt, const int ntests)
 
     for (int t = 0; t < ntests; ++t) {
         auto start = high_resolution_clock::now();
-        bk::amx::SumFactorization<nq>(nelmt, basis.data(), d_JxW, d_in, d_out, opt);
+        kernel(nelmt, d_JxW, d_in, d_out);
         auto stop = high_resolution_clock::now();
         duration<double> rep_time = stop - start;
         elapsed = std::min(elapsed, rep_time.count());
     }
     if (soa)
         for (std::size_t e = 0; e < nelmt; ++e)
-            for (std::size_t x = 0; x < nm3; ++x) out[e * nm3 + x] = out_k[((e / 16) * nm3 + x) * 16 + e % 16];
+            for (std::size_t x = 0; x < nm3; ++x) out[e * nm3 + x] = out_k[bk::amx::soa_index(e, x, nm3)];
 
     const auto dof_rate  = [&](double s) { return 1.0e-9 * size_inout / s; };
     const auto byte_rate = [&](double s) { return 1.0e-9 * sizeof(T) * (2 * size_inout + size_JxW) / s; };
@@ -534,14 +561,14 @@ void run_test(const std::size_t nelmt, const int ntests)
 #endif
     std::cout << "SumFactorization[AMX" << (AMX_HW ? "" : ", emulated")
               << (opt.dense ? ", dense" : ", sumfact") << (soa ? ", soa" : "")
-              << (bk::amx::use_nt_store() ? ", nt" : "")
               << ", batch = " << opt.batch << ", threads = " << nthreads << "] -> nelmt = " << nelmt
               << " GDoF/s = " << dof_rate(elapsed)
               << " GB/s = "   << byte_rate(elapsed) << "\n";
     std::cout << "norm = " << norm2(out.data(), out.size()) << "\n";
 
     // Verification against the serial reference (BK_NOREF=1 skips it, for sweeps)
-    if (get_env("BK_NOREF")) return;
+    if (noref) return;
+    std::vector<T> ref(nelmt * nm3);
     SumFactorizationRef<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), ref.data());
     double max_err = 0, max_ref = 0;
     for (std::size_t x = 0; x < size_inout; ++x) {
@@ -560,30 +587,31 @@ int main(int argc, char** argv)
 #ifdef _OPENMP
     // Default thread count: all cores but one (9 on an M2 Pro), unless the
     // user set OMP_NUM_THREADS.  Ten threads on ten cores was measured to be
-    // slower and noisier than nine because the last guided chunks straggle.
+    // slower and noisier than nine because the last chunks straggle.
     if (!get_env("OMP_NUM_THREADS")) omp_set_num_threads(std::max(1, omp_get_num_procs() - 1));
 #endif
     const int p = (argc > 1) ? std::atoi(argv[1]) : 2;
     const std::size_t nelmt = (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
     const int ntests = (argc > 3) ? std::atoi(argv[3]) : 5;
 
+    // Runtime p -> compile-time nq = p + 2; nq <= 16 so that one Z tile holds a row.
     switch (p) {
-        case 1: run_test<float,  3>(nelmt, ntests); break;
-        case 2: run_test<float,  4>(nelmt, ntests); break;
-        case 3: run_test<float,  5>(nelmt, ntests); break;
-        case 4: run_test<float,  6>(nelmt, ntests); break;
-        case 5: run_test<float,  7>(nelmt, ntests); break;
-        case 6: run_test<float,  8>(nelmt, ntests); break;
-        case 7: run_test<float,  9>(nelmt, ntests); break;
-        case 8: run_test<float, 10>(nelmt, ntests); break;
-        case 9: run_test<float, 11>(nelmt, ntests); break;
-        case 10: run_test<float, 12>(nelmt, ntests); break;
-        case 11: run_test<float, 13>(nelmt, ntests); break;
-        case 12: run_test<float, 14>(nelmt, ntests); break;
-        case 13: run_test<float, 15>(nelmt, ntests); break;
-        case 14: run_test<float, 16>(nelmt, ntests); break;
+        case 1: run_test< 3>(nelmt, ntests); break;
+        case 2: run_test< 4>(nelmt, ntests); break;
+        case 3: run_test< 5>(nelmt, ntests); break;
+        case 4: run_test< 6>(nelmt, ntests); break;
+        case 5: run_test< 7>(nelmt, ntests); break;
+        case 6: run_test< 8>(nelmt, ntests); break;
+        case 7: run_test< 9>(nelmt, ntests); break;
+        case 8: run_test<10>(nelmt, ntests); break;
+        case 9: run_test<11>(nelmt, ntests); break;
+        case 10: run_test<12>(nelmt, ntests); break;
+        case 11: run_test<13>(nelmt, ntests); break;
+        case 12: run_test<14>(nelmt, ntests); break;
+        case 13: run_test<15>(nelmt, ntests); break;
+        case 14: run_test<16>(nelmt, ntests); break;
         default:
-            std::cerr << "unsupported polynomial order p = " << p << " (supported: 1..8)\n";
+            std::cerr << "unsupported polynomial order p = " << p << " (supported: 1..14)\n";
             return 1;
     }
     return 0;

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """plot_throughput.py -- CEED-style throughput plots from throughput.sh output.
 
-usage: ./plot_throughput.py results.csv [out.png]
+usage: ./plot_throughput.py results.csv [out.png] [title]
 
 One panel per kernel: GDoF/s (linear) versus degrees of freedom (log),
 one curve per polynomial order.  A final panel overlays the best order of
@@ -15,9 +15,11 @@ from collections import defaultdict
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 src = sys.argv[1] if len(sys.argv) > 1 else "results.csv"
 dst = sys.argv[2] if len(sys.argv) > 2 else src.rsplit(".", 1)[0] + ".png"
+title = sys.argv[3] if len(sys.argv) > 3 else "BK1 (mass operator) throughput"
 
 data = defaultdict(lambda: defaultdict(list))   # data[kernel][p] -> [(dofs, gdofs, target)]
 with open(src) as f:
@@ -33,8 +35,7 @@ with open(src) as f:
 
 labels = {"serial": "serial", "omp": "OpenMP (scalar)",
           "amx_aos": "AMX, element-major", "amx_soa": "AMX, elements-on-lanes"}
-kernels = [k for k in ["serial", "omp", "amx_aos", "amx_soa"] if k in data] + \
-          [k for k in data if k not in labels]
+kernels = [k for k in labels if k in data] + [k for k in data if k not in labels]
 
 n = len(kernels) + (2 if "omp" in data else 1)
 cols = min(n, 3)
@@ -47,17 +48,23 @@ cmap = plt.get_cmap("viridis")
 orders = sorted({p for k in data.values() for p in k})
 color = {p: cmap((i + 0.5) / len(orders)) for i, p in enumerate(orders)}
 
+
+def style(ax, title, ylabel="GDoF/s", ylim=(0, ymax)):
+    ax.set_xscale("log")
+    if ylim:
+        ax.set_ylim(*ylim)
+    ax.set_title(title)
+    ax.set_xlabel("degrees of freedom")
+    ax.set_ylabel(ylabel)
+    ax.grid(True, which="both", alpha=0.3)
+
+
 for ax, k in zip(axes, kernels):
     for p in sorted(data[k]):
         pts = sorted(data[k][p])
         ax.plot([d for d, _, _ in pts], [g for _, g, _ in pts], "o-", ms=3, lw=1.2,
                 color=color[p], label=f"p = {p}")
-    ax.set_xscale("log")
-    ax.set_ylim(0, ymax)
-    ax.set_title(labels.get(k, k))
-    ax.set_xlabel("degrees of freedom")
-    ax.set_ylabel("GDoF/s")
-    ax.grid(True, which="both", alpha=0.3)
+    style(ax, labels.get(k, k))
     ax.legend(fontsize=8, ncol=2)
 
 # summary panel: for each kernel, its best order at each target size; the
@@ -80,46 +87,34 @@ for k in kernels:
 for t in sorted({t for b in best_all.values() for t in b}):
     print(f"{t:>10}  " + "  ".join(
         f"{('p=%d  %.2f' % best_all[k][t]) if t in best_all[k] else '':>24}" for k in kernels))
-ax.set_xscale("log")
-ax.set_ylim(0, ymax)
-ax.set_title("best order per kernel (marker colour = order)")
-ax.set_xlabel("degrees of freedom")
-ax.set_ylabel("GDoF/s")
-ax.grid(True, which="both", alpha=0.3)
+style(ax, "best order per kernel (marker colour = order)")
 leg1 = ax.legend(fontsize=8, loc="upper left")
 ax.add_artist(leg1)
-from matplotlib.lines import Line2D
 ax.legend([Line2D([], [], marker="o", ls="", color=color[p]) for p in orders],
           [f"p = {p}" for p in orders], fontsize=7, ncol=2, loc="lower right", title="winning order")
 
 # speedup panel: AMX kernels over the OpenMP scalar kernel at equal order
-if "omp" in data and len(kernels) + 1 < len(axes):
+if "omp" in data:
     ax = axes[len(kernels) + 1]
     ref = {p: {t: g for _, g, t in pts} for p, pts in data["omp"].items()}
-    style = {"amx_aos": "--", "amx_soa": "-"}
+    linestyle = {"amx_aos": "--", "amx_soa": "-"}
     for k in ("amx_aos", "amx_soa"):
         if k not in data:
             continue
         for p in sorted(data[k]):
             pts = sorted((t, g / ref[p][t]) for _, g, t in data[k][p] if p in ref and t in ref[p])
-            ax.plot([t for t, _ in pts], [s for _, s in pts], style[k], lw=1.2, color=color[p],
+            ax.plot([t for t, _ in pts], [s for _, s in pts], linestyle[k], lw=1.2, color=color[p],
                     label=f"p = {p}" if k == "amx_soa" else None)
     ax.axhline(1.0, color="k", lw=0.8)
-    ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_title("AMX speedup over OpenMP at equal order\n(solid: elements-on-lanes, dashed: element-major)")
-    ax.set_xlabel("degrees of freedom")
-    ax.set_ylabel("speedup")
-    ax.grid(True, which="both", alpha=0.3)
+    style(ax, "AMX speedup over OpenMP at equal order\n(solid: elements-on-lanes, dashed: element-major)",
+          ylabel="speedup", ylim=None)
     ax.legend(fontsize=7, ncol=2, loc="lower right")
-    used = len(kernels) + 2
-else:
-    used = len(kernels) + 1
 
-for ax in axes[used:]:
+for ax in axes[n:]:
     ax.set_visible(False)
 
-fig.suptitle("BK1 (mass operator) throughput, Apple M2 Pro", y=1.0)
+fig.suptitle(title, y=1.0)
 fig.tight_layout()
 fig.savefig(dst, dpi=150, bbox_inches="tight")
 print(f"wrote {dst}")

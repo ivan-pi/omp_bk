@@ -43,3 +43,18 @@ make CXX=clang++
 
 Each run prints the achieved `GDoF/s` and effective `GB/s`, followed by the
 solution norm (useful as a quick correctness check).
+
+## Apple AMX version of BK1
+
+`amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX
+coprocessor (Apple Silicon); elsewhere the AMX instructions are emulated in
+software by `amx/amx.h`, so the kernel logic can be checked on any machine.
+
+```sh
+make BK1_amx                         # or: make CXX=clang++ BK1_amx
+./BK1_amx <p> [nelmt] [ntests]       # same arguments as BK1, p = 1..14
+```
+
+The header of `amx/BK1_amx.cpp` lists the environment variables (layout,
+dense path, batch size, random test data) and `amx/scripts/` holds the
+validation, tuning and throughput-sweep scripts.

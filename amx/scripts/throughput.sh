@@ -9,12 +9,14 @@
 #         NTESTS=5                   repetitions per point (driver takes the minimum)
 #         KERNELS="serial omp amx_aos amx_soa"
 #         SERIAL_MAX=1e7             cap for the serial kernel (it is slow)
-#         OMP_NUM_THREADS            threads for omp / amx (default: cores - 1)
+#         OMP_NUM_THREADS            threads for omp / amx (default: cores - 1,
+#                                    which is also the AMX driver's own default)
 #
 # Output CSV columns: kernel,p,target,nelmt,dofs,gdofs,gbs
 #   target = the log-spaced size point, dofs = nelmt * (p+1)^3 actually run
 # Each point is one run of the driver; parse failures are recorded as NaN.
 
+. "$(dirname "$0")/common.sh"
 OUT=${1:-results.csv}
 ORDERS=${ORDERS:-"1 2 3 4 5 6 7 8"}
 DOF_MIN=${DOF_MIN:-1e4}
@@ -35,13 +37,13 @@ sizes=$(awk -v lo="$DOF_MIN" -v hi="$DOF_MAX" -v ppd="$PPD" 'BEGIN {
 run() {   # run <kernel> <p> <nelmt>  -> "gdofs gbs"
   local k=$1 p=$2 n=$3 out
   case $k in
-    serial)  out=$(./bk1     $p $n $NTESTS) ;;
-    omp)     out=$(./bk1_omp $p $n $NTESTS) ;;
-    amx_aos) out=$(BK_LAYOUT=aos ./bk1_amx $p $n $NTESTS) ;;
-    amx_soa) out=$(BK_LAYOUT=soa ./bk1_amx $p $n $NTESTS) ;;
+    serial)  out=$($BK1     $p $n $NTESTS) ;;
+    omp)     out=$($BK1_OMP $p $n $NTESTS) ;;
+    amx_aos) out=$(BK_LAYOUT=aos $BK1_AMX $p $n $NTESTS) ;;
+    amx_soa) out=$(BK_LAYOUT=soa $BK1_AMX $p $n $NTESTS) ;;
     *) echo "unknown kernel $k" >&2; return 1 ;;
   esac
-  echo "$out" | sed -n 's/.*GDoF\/s = \([0-9.e+-]*\) GB\/s = \([0-9.e+-]*\).*/\1 \2/p'
+  echo "$out" | rates
 }
 
 echo "kernel,p,target,nelmt,dofs,gdofs,gbs" > "$OUT"
