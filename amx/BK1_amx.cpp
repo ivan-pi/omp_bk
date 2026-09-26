@@ -124,7 +124,9 @@ struct StepShape {
 
 // AMX: for each combination of the two free indices (one Z tile each, four at
 // a time) and each 16-element chunk:
-//     X = in(free, s; e0..e0+15)     (aligned load)
+//     X = in(free, s; e0..e0+15)     (aligned load; X0..3 for even s, X4..7
+//                                     for odd s, so the loads of s + 1 never
+//                                     wait on the outer products of s)
 //     Y = coef[s]                    (Y register s; rows s >= 7 share Y7 when S > 8)
 //     z[tile][n][e] (+)= y[n] * x[e]
 // then rows n = 0..N-1 of the tile are stored to out(free, n; e0..e0+15).
@@ -136,6 +138,7 @@ inline void contract_dim(const float* __restrict__ in, float* __restrict__ out,
     using Sh = StepShape<N, D, A0, A1, A2>;
     constexpr int S = Sh::S, F = Sh::F, TILES = 4;
     static_assert(S >= 1 && S <= 16, "the coefficient table has 16 lanes per row");
+    static_assert(2 * TILES <= 8, "two blocks of TILES X registers must fit the eight X registers");
     assert(EP > 0 && EP % LANES == 0);
 
     // Coefficient rows resident in Y0..Y6 (Y7 too when they all fit); for
@@ -155,11 +158,12 @@ inline void contract_dim(const float* __restrict__ in, float* __restrict__ out,
                     yreg = 7;
                     AMX_LDY(ldxy(7, coef[s]));
                 }
+                const int x0 = (s & 1) * TILES;                     // X ring: 0..3, 4..7, 0..3, ...
                 for (int t = 0; t < nt; ++t) {
-                    AMX_LDX(ldxy(t, in + (Sh::in_base(f0 + t) + s * Sh::ST_S) * EP + e0));
+                    AMX_LDX(ldxy(x0 + t, in + (Sh::in_base(f0 + t) + s * Sh::ST_S) * EP + e0));
                 }
                 for (int t = 0; t < nt; ++t) {
-                    AMX_FMA32(fma(t, 64 * t, 64 * yreg, s == 0 ? ALU_MUL : ALU_MAC));
+                    AMX_FMA32(fma(t, 64 * (x0 + t), 64 * yreg, s == 0 ? ALU_MUL : ALU_MAC));
                 }
             }
             for (int t = 0; t < nt; ++t) {

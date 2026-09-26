@@ -2,6 +2,9 @@
 // (copy, scale, add, triad), the Schoenauer triad d = a + b*c (3 reads, 1
 // write), read-only (read, dot) and write-only (fill) tests, with the same OpenMP setup
 // and thread default as BK1_amx.cpp, so the numbers are directly comparable.
+// On Apple Silicon the read, fill and copy streams are repeated through the
+// AMX unit's own loads and stores (amx_read, amx_fill, amx_copy), which is how
+// the elements-on-lanes kernel reads `in` and writes `out`.
 //
 //   make bw_test       (or: clang++ -O3 -mcpu=native -std=c++17 -fopenmp amx/bench/bw_test.cpp -o bw_test)
 //   ./bw_test [floats_per_array=67108864] [ntests=5]  > bw.csv
@@ -309,6 +312,78 @@ int main(int argc, char** argv) {
             }
         }
         std::printf("amx_peak,%d,%.0f,%.6f,%.2f\n", threads, flops, best, 1e-9 * flops / best);
+    }
+
+    // amx_read / amx_fill / amx_copy: the read, fill and copy streams issued
+    // by the AMX unit instead of the core, 64-byte lines through a ring of
+    // X registers (loads) or Z rows (stores), threads as above.  Read against
+    // read / fill / copy: the gap is what the kernel's DRAM-facing steps lose
+    // (ldx gets no help from the core's prefetchers; a single stz writes half
+    // of a 128-byte line).  amx_copy is the kernel's own step shape, one
+    // fma32 per line between the load and the store (Y0 = e0 so Z row 0 of
+    // the tile is a copy of X).
+    {
+        // whole 64-byte lines from the first aligned line of each array
+        auto first_line = [](const float* p) {
+            return (64 - reinterpret_cast<uintptr_t>(p) % 64) % 64 / sizeof(float);
+        };
+        const std::size_t oa = first_line(a.data());
+        const std::size_t oc = first_line(c.data());
+        const std::size_t nl = std::min(n - oa, n - oc) / 16;         // lines per stream
+        assert(nl >= 64);
+        const float* ra = a.data() + oa;
+        float* wc = c.data() + oc;
+        const double line_bytes = double(nl) * 64;
+        alignas(64) float e0[16] = {1.0f};                              // y = (1, 0, ..., 0)
+
+        report("amx_read", line_bytes, best_of(ntests, [&] {
+            #pragma omp parallel
+            {
+                AMX_SET();
+                #pragma omp for schedule(static)
+                for (std::size_t l = 0; l < nl; ++l) {
+                    AMX_LDX(amx::op::ldxy(int(l & 7), ra + 16 * l));
+                }
+                AMX_CLR();
+            }
+        }));
+        report("amx_fill", line_bytes, best_of(ntests, [&] {
+            #pragma omp parallel
+            {
+                AMX_SET();
+                AMX_LDX(amx::op::ldxy(0, ra));                          // every Z row = x[0] * (1, 0, ..)
+                AMX_LDY(amx::op::ldxy(0, e0));
+                for (int tile = 0; tile < 4; ++tile) {
+                    AMX_FMA32(amx::op::fma(tile, 0, 0, amx::op::ALU_MUL));
+                }
+                #pragma omp for schedule(static)
+                for (std::size_t l = 0; l < nl; ++l) {
+                    AMX_STZ(amx::op::stz(int(l & 63), wc + 16 * l));
+                }
+                AMX_CLR();
+            }
+        }));
+        consume(c);
+        report("amx_copy", 2 * line_bytes, best_of(ntests, [&] {
+            #pragma omp parallel
+            {
+                AMX_SET();
+                AMX_LDY(amx::op::ldxy(0, e0));
+                #pragma omp for schedule(static)
+                for (std::size_t l = 0; l < nl; ++l) {
+                    const int x = int(l & 7);
+                    const int tile = int(l & 3);
+                    AMX_LDX(amx::op::ldxy(x, ra + 16 * l));
+                    AMX_FMA32(amx::op::fma(tile, 64 * x, 0, amx::op::ALU_MUL));
+                    AMX_STZ(amx::op::stz(amx::op::zrow_f32(tile, 0), wc + 16 * l));
+                }
+                AMX_CLR();
+            }
+        }));
+        for (std::size_t l = 0; l < nl; l += nl / 64 + 1) {            // it is a copy
+            assert(std::memcmp(wc + 16 * l, ra + 16 * l, 64) == 0);
+        }
+        consume(c);
     }
 #endif
     // "add" (2 reads, 1 write) is the BK1-shaped mix and the number to use for

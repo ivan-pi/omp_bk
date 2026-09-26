@@ -62,7 +62,7 @@ amx/scripts/validate.sh               # every kernel against the reference; exit
 amx/scripts/throughput.sh results.csv # sweep (all kernels from BK1_amx): kernel,p,target,nelmt,dofs,gdofs,gbs
 amx/scripts/high_order.sh results_high.csv   # the same for p = 9..14 (AMX binary only)
 OUT=tune.csv amx/scripts/tune.sh      # best layout/path/batch per order
-./bw_test    > bw.csv                 # bandwidth and FMA roofs: test,threads,bytes,seconds,GB_per_s
+./bw_test    > bw.csv                 # bandwidth and FMA roofs (+ amx_read/fill/copy streams): test,threads,bytes,seconds,GB_per_s
 ./amx_pipe   > pipe.txt               # AMX load-to-use and store behaviour (one unit)
 ./accel_gemm > gemm.csv               # Accelerate sgemm calibration (macOS)
 
