@@ -11,7 +11,8 @@
 // machine.  AMX_HW is 1 when the real hardware is used, 0 otherwise.
 //
 // Emulated subset (operand bitfields as documented by corsix/amx):
-//   ldx ldy ldz stx sty stz     64-byte moves, pair (bit 62) and quad (bit 60)
+//   ldx ldy ldz stx sty stz     64-byte moves, pair (bit 62) and quad (bit 60);
+//                               pair/quad addresses must be 128-byte aligned
 //   fma32 fma64 fms32 fms64     matrix and vector mode, X/Y byte offsets,
 //                               ALU select (bits 27-29), lane enables (32-46);
 //                               f16 operand widening (bits 60/61) not supported
@@ -186,8 +187,19 @@ inline void set() { state().enabled = true; }
 inline void clr() { state().enabled = false; }
 
 // --- 64-byte moves ---------------------------------------------------------
+// A single register may use any address; a pair or quad transfer must be
+// 128-byte aligned (corsix/amx ldst.md), which is enforced here so that a
+// kernel checked under emulation also meets the hardware's requirement.
+inline void check_multi_align(const char* what, uint64_t opnd) {
+    if ((opnd & (uint64_t(1) << 62)) && (opnd & op::PTR_MASK & 127)) {
+        std::fprintf(stderr, "amx emulation: %s pair/quad transfer at address %% 256 = %u\n",
+                     what, unsigned(opnd & 255));
+        fail("pair/quad load or store with an address that is not 128-byte aligned");
+    }
+}
 inline void ld_common(Reg* regs, uint64_t opnd, unsigned regmask) {
     check_enabled();
+    check_multi_align("load", opnd);
     const unsigned rn = (opnd >> 56) & regmask;
     const uint8_t* src = reinterpret_cast<const uint8_t*>(uintptr_t(opnd & op::PTR_MASK));
     std::memcpy(regs + rn, src, 64);
@@ -199,6 +211,7 @@ inline void ld_common(Reg* regs, uint64_t opnd, unsigned regmask) {
 }
 inline void st_common(const Reg* regs, uint64_t opnd, unsigned regmask) {
     check_enabled();
+    check_multi_align("store", opnd);
     const unsigned rn = (opnd >> 56) & regmask;
     uint8_t* dst = reinterpret_cast<uint8_t*>(uintptr_t(opnd & op::PTR_MASK));
     std::memcpy(dst, regs + rn, 64);
