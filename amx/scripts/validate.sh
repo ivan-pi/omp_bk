@@ -51,8 +51,14 @@ check() {   # check <label> <env assignments...>   (uses P, N, n_ref)
   esac
 }
 
-for P in 1 2 3 5 8; do
-  n_ref=$($BK1 $P $N 1 | sed -n '2s/norm = //p')     # constant-data norm, once per order
+for P in 1 2 3 5 8 11 14; do
+  # constant-data norm, once per order; the BK1 executable stops at p = 8, so
+  # above that the norm check compares against the AMX binary's reference kernel
+  if [ $P -le 8 ]; then
+    n_ref=$($BK1 $P $N 1 | sed -n '2s/norm = //p')
+  else
+    n_ref=$(BK_KERNEL=ref BK_NOREF=1 $BK1_AMX $P $N 1 | sed -n '2s/norm = //p')
+  fi
   for layout in aos soa; do
     check "sumfact $layout"        BK_DENSE=0 BK_LAYOUT=$layout
     if [ $P -le 3 ]; then

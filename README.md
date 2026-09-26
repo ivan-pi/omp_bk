@@ -60,6 +60,7 @@ BK_KERNEL=neon BK_LAYOUT=soa ./BK1_amx 4
 
 amx/scripts/validate.sh               # every kernel against the reference; exit 1 on failure
 amx/scripts/throughput.sh results.csv # throughput sweep: kernel,p,target,nelmt,dofs,gdofs,gbs
+amx/scripts/high_order.sh results_high.csv   # the same for p = 9..14 (AMX binary only)
 OUT=tune.csv amx/scripts/tune.sh      # best layout/path/batch per order
 ./bw_test    > bw.csv                 # bandwidth and FMA roofs: test,threads,bytes,seconds,GB_per_s
 ./amx_pipe   > pipe.txt               # AMX load-to-use and store behaviour (one unit)

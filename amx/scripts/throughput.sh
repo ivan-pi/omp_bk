@@ -2,7 +2,7 @@
 # throughput.sh -- CEED-style throughput sweep: GDoF/s versus problem size,
 # log-spaced from DOF_MIN to DOF_MAX, for each polynomial order and kernel.
 #
-# usage:  ./throughput.sh [results.csv]
+# usage:  ./throughput.sh [results.csv]        (high_order.sh: the same for p = 9..14)
 # env:    ORDERS="1 2 3 4 5 6 7 8"   polynomial orders
 #         DOF_MIN=1e4 DOF_MAX=1e8    problem-size range in degrees of freedom
 #         PPD=4                      points per decade
@@ -10,7 +10,7 @@
 #         KERNELS="serial omp omp_v neon_aos neon_soa amx_aos amx_soa"
 #           serial = the reference kernel on one thread (BK_KERNEL=ref
 #                    BK_PARALLEL=0 in the AMX binary)
-#           omp    = BK1 from the Makefile (OpenMP target, host fallback)
+#           omp    = BK1 from the Makefile (OpenMP target, host fallback; p <= 8)
 #           omp_v  = the reference loops interchanged for unit-stride inner
 #                    loops (BK_KERNEL=refv in the AMX binary, OpenMP over elements)
 #         SERIAL_MAX=1e7             cap for the serial kernel (it is slow)
@@ -60,6 +60,7 @@ for k in $KERNELS; do
     nm3=$(( (p+1)*(p+1)*(p+1) ))
     for d in $sizes; do
       if [ "$k" = serial ] && awk -v d="$d" -v m="$SERIAL_MAX" 'BEGIN{exit !(d > m)}'; then continue; fi
+      if [ "$k" = omp ] && [ "$p" -gt 8 ]; then continue; fi        # the BK1 executable stops at p = 8
       n=$(( (d + nm3/2) / nm3 )); [ $n -lt 1 ] && n=1
       dofs=$(( n * nm3 ))
       r=$(run $k $p $n)
