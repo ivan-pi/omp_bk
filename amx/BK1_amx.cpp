@@ -15,8 +15,8 @@
 //   BK_RANDOM=1  use pseudo-random in/JxW instead of the constant 3.0/1.0
 //                (constant data cannot detect index-transposition bugs).
 //   BK_BATCH=E   elements per AMX batch, rounded up to a multiple of 16
-//                (default 16, the measured optimum; the dense path and the
-//                SoA layout always use 16)
+//                (default 16, the measured optimum; the dense path, the NEON
+//                kernel and the SoA layout always use 16)
 //   OMP_NUM_THREADS  default: number of cores minus one
 //   BK_DENSE=0/1 dense element-matrix path (default: on for p <= 2)
 //   BK_KERNEL=neon  cross-element NEON kernel (GNU vector types) instead of
@@ -26,7 +26,8 @@
 //   BK_KERNEL=refv  the same with loops interchanged so every inner loop is
 //                unit-stride and vectorizes (the CPU-correct loop order)
 //   BK_NEON_NB=1|2|4|6|8  output rows per NEON register block (default 4;
-//                4 NB + 5 live registers, so up to 6 fits the 32 NEON registers)
+//                4 NB + 5 live registers, so 6 still fits the 32 NEON
+//                registers and 8 spills)
 //   BK_LAYOUT=soa  store in/JxW/out elements-on-lanes (chunks of 16) so the
 //                kernel runs without any layout conversion
 //   BK_NOREF=1   skip the serial reference comparison (throughput sweeps)
@@ -68,8 +69,21 @@ namespace amx {
 using ::amx::op::ldxy;
 using ::amx::op::stz;
 using ::amx::op::fma;
+using ::amx::op::zrow_f32;
+using ::amx::op::ALU_MAC;
+using ::amx::op::ALU_MUL;
 
-constexpr int LANES = 16;                       // elements per 64-byte line
+constexpr int LANES    = 16;            // elements per 64-byte line
+constexpr int QUAD_PAD = 3 * LANES;     // readable planes past the end for a quad load's overrun
+
+template <class I> constexpr I ceil_div(I x, int m) { return (x + m - 1) / m; }
+template <class I> constexpr I round_up(I x, int m) { return ceil_div(x, m) * m; }
+
+// Extents of one order: nm = p + 1 modes, nq = p + 2 quadrature points per direction.
+template <int nq>
+struct Dims {
+    static constexpr int nm = nq - 1, nm3 = nm * nm * nm, nq3 = nq * nq * nq;
+};
 
 // ---------------------------------------------------------------------------
 // Elements-on-lanes layout.  A batch of E elements (padded to EP, a multiple
@@ -78,40 +92,47 @@ constexpr int LANES = 16;                       // elements per 64-byte line
 // A 64-byte load at (a0,a1,a2, e0) is 16 consecutive elements of one entry,
 // so every ldx/stz is a full, aligned line and lanes never interact.
 //
-// One contraction over index position d (0, 1 or 2) of a 3-index field,
-// replacing extent S by N in place:
+// One contraction over index position D (0, 1 or 2) of a 3-index field with
+// extents (A0, A1, A2) replaces that extent by N in place:
 //     out(.., n, ..; e) = sum_s in(.., s, ..; e) * coef[s][n]
-// For each combination of the two free indices (one Z tile each, four at a
-// time) and each 16-element chunk:
-//     X = in(free, s; e0..e0+15)     (aligned load)
-//     Y = coef[s]                    (loaded once per step, Y register s)
-//     z[tile][n][e] (+)= y[n] * x[e]
-// then rows n = 0..N-1 of the tile are stored to out(free, n; e0..e0+15).
 // The output index simply takes the contracted index's place, so the index
 // order (i,j,k) -> (p,q,r) -> (i,j,k) never changes and no transposes or
-// rotations are needed.
+// rotations are needed.  StepShape holds the geometry of one such step for
+// both backends (AMX outer products, NEON vector FMAs).
 // ---------------------------------------------------------------------------
-template <int N>
-inline void contract_dim(const int d, const int A0, const int A1, const int A2,
-                         const float* __restrict__ in, float* __restrict__ out,
+template <int N, int D, int A0, int A1, int A2>
+struct StepShape {
+    static constexpr int ext_in[3]  = {A0, A1, A2};
+    static constexpr int ext_out[3] = {D == 0 ? N : A0, D == 1 ? N : A1, D == 2 ? N : A2};
+    static constexpr int S = ext_in[D];                                          // contracted extent
+    static constexpr int st_in[3]  = {ext_in[1] * ext_in[2],  ext_in[2],  1};   // strides in planes
+    static constexpr int st_out[3] = {ext_out[1] * ext_out[2], ext_out[2], 1};
+    static constexpr int u = (D == 0) ? 1 : 0, v = (D == 2) ? 1 : 2;            // the free index positions
+    static constexpr int F = ext_in[u] * ext_in[v];                              // free-index combinations
+    static constexpr int ST_S = st_in[D], ST_N = st_out[D];                      // strides of s and n
+    // plane offsets of free-index combination f in the input and the output
+    static constexpr int in_base(int f)  { return (f / ext_in[v]) * st_in[u]  + (f % ext_in[v]) * st_in[v]; }
+    static constexpr int out_base(int f) { return (f / ext_in[v]) * st_out[u] + (f % ext_in[v]) * st_out[v]; }
+};
+
+// AMX: for each combination of the two free indices (one Z tile each, four at
+// a time) and each 16-element chunk:
+//     X = in(free, s; e0..e0+15)     (aligned load)
+//     Y = coef[s]                    (Y register s; rows s >= 7 share Y7 when S > 8)
+//     z[tile][n][e] (+)= y[n] * x[e]
+// then rows n = 0..N-1 of the tile are stored to out(free, n; e0..e0+15).
+template <int N, int D, int A0, int A1, int A2>
+inline void contract_dim(const float* __restrict__ in, float* __restrict__ out,
                          const float (*__restrict__ coef)[16], const int EP)
 {
     static_assert(N >= 1 && N <= 16, "output extent must fit one Z tile");
-    constexpr int TILES = 4;
+    using Sh = StepShape<N, D, A0, A1, A2>;
+    constexpr int S = Sh::S, F = Sh::F, TILES = 4;
 
-    const int ext_in[3]  = {A0, A1, A2};
-    int ext_out[3]       = {A0, A1, A2};
-    ext_out[d] = N;
-    const int S = ext_in[d];
-    // strides (in floats / EP) of the two layouts
-    const int st_in[3]  = {ext_in[1] * ext_in[2],  ext_in[2],  1};
-    const int st_out[3] = {ext_out[1] * ext_out[2], ext_out[2], 1};
-    const int u = (d == 0) ? 1 : 0, v = (d == 2) ? 1 : 2;     // the free index positions
-    const int F = ext_in[u] * ext_in[v];
-
-    // Coefficient rows: Y register s holds coef[s] for s < 7; s >= 7 share Y7
-    // and are reloaded per round when S > 8.
-    const int ny = std::min(S, 8);
+    // Coefficient rows resident in Y0..Y6 (Y7 too when they all fit); for
+    // S > 8 the rows from 7 on cycle through Y7, reloaded per round.
+    constexpr bool cycle_y7 = S > 8;
+    constexpr int ny = cycle_y7 ? 7 : S;
     for (int s = 0; s < ny; ++s) {
         AMX_LDY(ldxy(s, coef[s]));
     }
@@ -119,28 +140,22 @@ inline void contract_dim(const int d, const int A0, const int A1, const int A2,
     for (int e0 = 0; e0 < EP; e0 += LANES) {
         for (int f0 = 0; f0 < F; f0 += TILES) {
             const int nt = std::min(TILES, F - f0);
-            int base_in[TILES], base_out[TILES];
-            for (int t = 0; t < nt; ++t) {
-                const int f = f0 + t, fu = f / ext_in[v], fv = f % ext_in[v];
-                base_in[t]  = (fu * st_in[u]  + fv * st_in[v])  * EP + e0;
-                base_out[t] = (fu * st_out[u] + fv * st_out[v]) * EP + e0;
-            }
             for (int s = 0; s < S; ++s) {
                 int yreg = s;
-                if (s >= 7 && S > 8) {
+                if (cycle_y7 && s >= 7) {
                     yreg = 7;
                     AMX_LDY(ldxy(7, coef[s]));
                 }
                 for (int t = 0; t < nt; ++t) {
-                    AMX_LDX(ldxy(t, in + base_in[t] + s * st_in[d] * EP));
+                    AMX_LDX(ldxy(t, in + (Sh::in_base(f0 + t) + s * Sh::ST_S) * EP + e0));
                 }
                 for (int t = 0; t < nt; ++t) {
-                    AMX_FMA32(fma(t, 64 * t, 64 * yreg, s == 0 ? 1 : 0));
+                    AMX_FMA32(fma(t, 64 * t, 64 * yreg, s == 0 ? ALU_MUL : ALU_MAC));
                 }
             }
             for (int t = 0; t < nt; ++t) {
                 for (int n = 0; n < N; ++n) {
-                    AMX_STZ(stz(4 * n + t, out + base_out[t] + n * st_out[d] * EP));
+                    AMX_STZ(stz(zrow_f32(t, n), out + (Sh::out_base(f0 + t) + n * Sh::ST_N) * EP + e0));
                 }
             }
         }
@@ -151,8 +166,8 @@ inline void contract_dim(const int d, const int A0, const int A1, const int A2,
 //   Bp[i][p] = B(i,p)   (rows i < nm, used by the forward steps)
 //   BT[p][i] = B(i,p)   (rows p < nq, used by the reverse steps)
 template <int nq>
-struct Coef {
-    static constexpr int nm = nq - 1;
+struct Coef : Dims<nq> {
+    using Dims<nq>::nm;
     alignas(64) float Bp[nm][16];
     alignas(64) float BT[nq][16];
     explicit Coef(const float* basis) {
@@ -179,10 +194,12 @@ struct Coef {
 // Pair and quad loads need 128-byte aligned addresses (corsix/amx, ldst.md).
 // ---------------------------------------------------------------------------
 template <int nq>
-struct DenseCoef {
-    static constexpr int nm = nq - 1, nm3 = nm * nm * nm, nq3 = nq * nq * nq;
-    static constexpr int CF = (nq3 + 15) / 16, CR = (nm3 + 15) / 16;      // tiles forward / reverse
-    static constexpr int SF = (nm3 + 3) & ~3,  SR = (nq3 + 3) & ~3;       // padded plane counts
+struct DenseCoef : Dims<nq> {
+    using Dims<nq>::nm;
+    using Dims<nq>::nm3;
+    using Dims<nq>::nq3;
+    static constexpr int CF = ceil_div(nq3, 16), CR = ceil_div(nm3, 16);   // tiles forward / reverse
+    static constexpr int SF = round_up(nm3, 4),  SR = round_up(nq3, 4);    // padded plane counts
     alignas(128) float Bf[CF][SF][16];    // Bf[c][s][q'] = Bd(s, 16c+q')
     alignas(128) float Br[CR][SR][16];    // Br[c][q][x'] = Bd(16c+x', q)
     explicit DenseCoef(const float* basis) {
@@ -211,12 +228,13 @@ struct DenseCoef {
 
 // out(16c + n'; e) = sum_{s<S} coef[c][s][n'] * in(s; e)      for c < C, lanes e < 16
 // in : S planes of 16 floats, 128-byte aligned, readable up to plane SP-1 (SP = S rounded up to 4)
-// out: N = 16C rows of 16 floats (rows >= the real extent are padding)
+// out: N rows of 16 floats (rows >= N of the last tile are not stored)
 // Tiles are processed in rounds of four; each round re-streams the input planes.
-template <int SP, int C>
-inline void dense_step(const int S, const float* __restrict__ in, float* __restrict__ out,
-                       const float (*__restrict__ coef)[SP][16], const int N)
+template <int S, int N, int C, int SP>
+inline void dense_step(const float* __restrict__ in, float* __restrict__ out,
+                       const float (&__restrict__ coef)[C][SP][16])
 {
+    static_assert(SP >= round_up(S, 4) && 16 * C >= N, "coefficient table does not cover the step");
     for (int cr = 0; cr < C; cr += 4) {
         const int nt = std::min(4, C - cr);
         for (int s0 = 0; s0 < S; s0 += 4) {
@@ -229,27 +247,23 @@ inline void dense_step(const int S, const float* __restrict__ in, float* __restr
                 }
                 for (int k = 0; k < 4 && s0 + k < S; ++k) {
                     for (int c = 0; c < nc; ++c) {
-                        AMX_FMA32(fma(c0 + c, 64 * k, 64 * (4 * c + k), (s0 + k == 0) ? 1 : 0));
+                        AMX_FMA32(fma(c0 + c, 64 * k, 64 * (4 * c + k), (s0 + k == 0) ? ALU_MUL : ALU_MAC));
                     }
                 }
             }
         }
         for (int t = 0; t < nt; ++t) {
             for (int n = 0; n < std::min(16, N - 16 * (cr + t)); ++n) {
-                AMX_STZ(stz(4 * n + t, out + (16 * (cr + t) + n) * 16));
+                AMX_STZ(stz(zrow_f32(t, n), out + (16 * (cr + t) + n) * 16));
             }
         }
     }
 }
 
-inline int round_up(int x, int m) { return (x + m - 1) / m * m; }
-
 // ---------------------------------------------------------------------------
-// Element-major <-> elements-on-lanes conversions (steps 1, 5, 9), done as
-// 4x4 block transposes with 4-float vectors.  On arm64 clang lowers the
-// shuffles to NEON zip/uzp; the same code builds on x86 for emulation runs.
-// Remainders (n % 4 entries, Eb % 4 elements) are handled by scalar loops.
-// The SoA layout skips these functions entirely.
+// 4-float vectors (GNU vector types): the lane conversions and the NEON kernel.
+// On arm64 clang lowers the shuffles to NEON zip/uzp; the same code builds on
+// x86 for emulation runs.
 // ---------------------------------------------------------------------------
 typedef float v4f __attribute__((vector_size(16)));
 
@@ -273,22 +287,33 @@ inline void v4_transpose(v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
     r3 = __builtin_shufflevector(t1, t3, 2, 3, 6, 7);
 }
 
-// Load the 4x4 block at p (row pitch `pitch`), transposed.
-inline void load4x4T(const float* p, std::size_t pitch, v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
+// Four vectors from / to the rows of a 4x4 block at p with row pitch `pitch`
+// (pitch 4: one contiguous 16-float lane line).
+inline void load4x4(const float* p, std::size_t pitch, v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
     r0 = v4_load(p);
     r1 = v4_load(p + pitch);
     r2 = v4_load(p + 2 * pitch);
     r3 = v4_load(p + 3 * pitch);
-    v4_transpose(r0, r1, r2, r3);
 }
 
-// Store four vectors as the rows of the 4x4 block at p (row pitch `pitch`).
 inline void store4x4(float* p, std::size_t pitch, v4f r0, v4f r1, v4f r2, v4f r3) {
     v4_store(p, r0);
     v4_store(p + pitch, r1);
     v4_store(p + 2 * pitch, r2);
     v4_store(p + 3 * pitch, r3);
 }
+
+// The 4x4 block at p, transposed.
+inline void load4x4T(const float* p, std::size_t pitch, v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
+    load4x4(p, pitch, r0, r1, r2, r3);
+    v4_transpose(r0, r1, r2, r3);
+}
+
+// ---------------------------------------------------------------------------
+// Element-major <-> elements-on-lanes conversions (steps 1, 5, 9), done as
+// 4x4 block transposes.  Remainders (n % 4 entries, Eb % 4 elements) are
+// handled by scalar loops.  The SoA layout skips these functions entirely.
+// ---------------------------------------------------------------------------
 
 // Walk the (e < Eb) x (x < n) index space in 4x4 blocks: block(e, x) for every
 // full block, scalar(e, x) for every remaining single position.
@@ -342,13 +367,12 @@ inline void from_lanes(const float* __restrict__ src, float* __restrict__ dst, i
 inline void scale_lanes(float* __restrict__ w, const float* __restrict__ JxW, int Eb, int EP, int n) {
     for_blocks(Eb, n,
         [&](int e, int x) {
-            v4f r0, r1, r2, r3;
-            load4x4T(JxW + std::size_t(e) * n + x, n, r0, r1, r2, r3);
+            v4f j0, j1, j2, j3;
+            load4x4T(JxW + std::size_t(e) * n + x, n, j0, j1, j2, j3);
             float* d = w + std::size_t(x) * EP + e;
-            v4_store(d,          v4_load(d)          * r0);
-            v4_store(d + EP,     v4_load(d + EP)     * r1);
-            v4_store(d + 2 * EP, v4_load(d + 2 * EP) * r2);
-            v4_store(d + 3 * EP, v4_load(d + 3 * EP) * r3);
+            v4f w0, w1, w2, w3;
+            load4x4(d, EP, w0, w1, w2, w3);
+            store4x4(d, EP, w0 * j0, w1 * j1, w2 * j2, w3 * j3);
         },
         [&](int e, int x) {
             w[std::size_t(x) * EP + e] *= JxW[std::size_t(e) * n + x];
@@ -361,9 +385,9 @@ inline void scale_lanes(float* __restrict__ w, const float* __restrict__ JxW, in
 // free-index combination is done with 4-wide vector FMAs in the core instead
 // of outer products on the unit -- NB x 4 accumulator registers (NB output
 // rows x 4 vectors of 4 elements), 4 registers for the plane, one broadcast
-// coefficient.  This is the honest CPU baseline: the blocked-across-cells
-// structure of deal.II / libCEED on the same layout.  Batches are one lane
-// chunk (EP = 16).
+// coefficient, so NB <= 6 fits the 32 NEON registers and NB = 8 spills.
+// This is the honest CPU baseline: the blocked-across-cells structure of
+// deal.II / libCEED on the same layout.  Batches are one lane chunk (EP = 16).
 // ---------------------------------------------------------------------------
 #if defined(__clang__)
 #define BK_UNROLL _Pragma("clang loop unroll(full)")
@@ -379,11 +403,8 @@ inline void neon_block(const int n0, const float* __restrict__ pin, float* __res
 {
     v4f acc[NB][4] = {};
     auto plane = [&](int s) {
-        const float* x = pin + std::size_t(s) * ST_S * LANES;
-        const v4f x0 = v4_load(x);
-        const v4f x1 = v4_load(x + 4);
-        const v4f x2 = v4_load(x + 8);
-        const v4f x3 = v4_load(x + 12);
+        v4f x0, x1, x2, x3;
+        load4x4(pin + std::size_t(s) * ST_S * LANES, 4, x0, x1, x2, x3);
         for (int n = 0; n < NB; ++n) {
             const float c = coef[s][n0 + n];
             const v4f b = {c, c, c, c};
@@ -413,100 +434,70 @@ inline void neon_block(const int n0, const float* __restrict__ pin, float* __res
         }
     }
     for (int n = 0; n < NB; ++n) {
-        float* o = pout + std::size_t(n0 + n) * ST_N * LANES;
-        v4_store(o, acc[n][0]);
-        v4_store(o + 4, acc[n][1]);
-        v4_store(o + 8, acc[n][2]);
-        v4_store(o + 12, acc[n][3]);
+        store4x4(pout + std::size_t(n0 + n) * ST_N * LANES, 4, acc[n][0], acc[n][1], acc[n][2], acc[n][3]);
     }
 }
 
-// BK_NEON_NB: output rows per register block (1, 2, 4, 6 or 8; default 4)
-inline int neon_block_rows() {
-    static const int nb = [] {
-        auto v = get_env("BK_NEON_NB");
-        const int x = v ? std::atoi(v->c_str()) : 4;
-        return (x == 8 || x == 6 || x == 4 || x == 2 || x == 1) ? x : 4;
-    }();
-    return nb;
-}
-
-// out(.., n, ..; e) = sum_s in(.., s, ..; e) * coef[s][n], contracting index
-// position D of a field with extents (A0, A1, A2), one 16-lane chunk; all
-// extents and strides are compile-time constants, so the s-loop unrolls.
-template <int N, int D, int A0, int A1, int A2>
+// One contraction (the StepShape of contract_dim) on NEON, NB output rows per
+// register block; a tail of N % NB rows is split 4 + rest so that no block
+// exceeds the register budget.
+template <int NB, int N, int D, int A0, int A1, int A2>
 inline void neon_contract(const float* __restrict__ in, float* __restrict__ out,
                           const float (*__restrict__ coef)[16])
 {
-    constexpr int ext_in[3]  = {A0, A1, A2};
-    constexpr int ext_out[3] = {D == 0 ? N : A0, D == 1 ? N : A1, D == 2 ? N : A2};
-    constexpr int S = ext_in[D];
-    constexpr int st_in[3]  = {ext_in[1] * ext_in[2],  ext_in[2],  1};
-    constexpr int st_out[3] = {ext_out[1] * ext_out[2], ext_out[2], 1};
-    constexpr int u = (D == 0) ? 1 : 0, v = (D == 2) ? 1 : 2;     // the free index positions
-    constexpr int F = ext_in[u] * ext_in[v];
-    constexpr int ST_S = st_in[D], ST_N = st_out[D];
+    using Sh = StepShape<N, D, A0, A1, A2>;
+    constexpr int S = Sh::S, ST_S = Sh::ST_S, ST_N = Sh::ST_N;
+    constexpr int R = N % NB;
 
-    const int NB = neon_block_rows();
-    for (int f = 0; f < F; ++f) {
-        const int fu = f / ext_in[v], fv = f % ext_in[v];
-        const float* pin  = in  + std::size_t(fu * st_in[u]  + fv * st_in[v])  * LANES;
-        float*       pout = out + std::size_t(fu * st_out[u] + fv * st_out[v]) * LANES;
-        int n0 = 0;
-        for (; n0 + NB <= N; n0 += NB) {
-            switch (NB) {
-                case 8: neon_block<8, S, ST_S, ST_N>(n0, pin, pout, coef); break;
-                case 6: neon_block<6, S, ST_S, ST_N>(n0, pin, pout, coef); break;
-                case 4: neon_block<4, S, ST_S, ST_N>(n0, pin, pout, coef); break;
-                case 2: neon_block<2, S, ST_S, ST_N>(n0, pin, pout, coef); break;
-                default: neon_block<1, S, ST_S, ST_N>(n0, pin, pout, coef); break;
-            }
+    for (int f = 0; f < Sh::F; ++f) {
+        const float* pin  = in  + std::size_t(Sh::in_base(f))  * LANES;
+        float*       pout = out + std::size_t(Sh::out_base(f)) * LANES;
+        for (int n0 = 0; n0 + NB <= N; n0 += NB) {
+            neon_block<NB, S, ST_S, ST_N>(n0, pin, pout, coef);
         }
-        // tail: the largest blocks that still fit (only sizes N allows are instantiated)
-        while (n0 < N) {
-            const int r = N - n0;
-            if constexpr (N >= 4) {
-                if (r >= 4) {
-                    neon_block<4, S, ST_S, ST_N>(n0, pin, pout, coef);
-                    n0 += 4;
-                    continue;
-                }
-            }
-            if constexpr (N >= 3) {
-                if (r == 3) {
-                    neon_block<3, S, ST_S, ST_N>(n0, pin, pout, coef);
-                    n0 += 3;
-                    continue;
-                }
-            }
-            if constexpr (N >= 2) {
-                if (r == 2) {
-                    neon_block<2, S, ST_S, ST_N>(n0, pin, pout, coef);
-                    n0 += 2;
-                    continue;
-                }
-            }
-            neon_block<1, S, ST_S, ST_N>(n0, pin, pout, coef);
-            n0 += 1;
+        if constexpr (R > 4) {
+            neon_block<4, S, ST_S, ST_N>(N - R, pin, pout, coef);
+            neon_block<R - 4, S, ST_S, ST_N>(N - R + 4, pin, pout, coef);
+        } else if constexpr (R > 0) {
+            neon_block<R, S, ST_S, ST_N>(N - R, pin, pout, coef);
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// One batch of Eb <= EP elements: layout handling shared by all three paths.
+// The sum-factorized chain, written once for both backends.  An Op performs
+// one contraction:  Op::contract<N, D, A0, A1, A2>(in, out, coef, EP).
+// ---------------------------------------------------------------------------
+struct AmxOp {
+    static constexpr bool uses_amx = true;
+    template <int N, int D, int A0, int A1, int A2>
+    static void contract(const float* in, float* out, const float (*coef)[16], int EP) {
+        contract_dim<N, D, A0, A1, A2>(in, out, coef, EP);
+    }
+};
+
+template <int NB>
+struct NeonOp {
+    static constexpr bool uses_amx = false;
+    template <int N, int D, int A0, int A1, int A2>
+    static void contract(const float* in, float* out, const float (*coef)[16], int /*EP == 16*/) {
+        neon_contract<NB, N, D, A0, A1, A2>(in, out, coef);
+    }
+};
+
+// One batch of Eb <= EP elements: layout handling shared by all paths.
 // soa = false: in_e/JxW_e/out_e are element-major (e; idx).
 // soa = true : EP == 16 and in_e/JxW_e/out_e are already (idx; e) chunks; the
 //              kernel then reads in_e and writes out_e directly.
 // w0, w1: workspace of nq^3 * EP floats plus quad-load padding, 128-byte aligned.
 // fwd(src, dst): nm^3 planes (idx; e) -> nq^3 planes;  rev(src, dst): the reverse.
-// ---------------------------------------------------------------------------
 template <int nq, class Fwd, class Rev>
 inline void run_batch(const bool soa, const int Eb, const int EP,
                       const float* __restrict__ in_e, const float* __restrict__ JxW_e,
                       float* __restrict__ out_e, float* __restrict__ w0, float* __restrict__ w1,
                       Fwd fwd, Rev rev)
 {
-    constexpr int nm = nq - 1, nm3 = nm * nm * nm, nq3 = nq * nq * nq;
+    constexpr int nm3 = Dims<nq>::nm3, nq3 = Dims<nq>::nq3;
 
     // step-1
     const float* src = in_e;
@@ -534,43 +525,99 @@ inline void run_batch(const bool soa, const int Eb, const int EP,
     }
 }
 
-struct Options {
-    bool soa   = false;   // in/JxW/out already elements-on-lanes, chunks of 16
-    bool dense = false;   // dense element-matrix path (AMX)
-    bool neon  = false;   // NEON cross-element kernel instead of AMX
-    int  batch = LANES;   // elements per batch; always 16 for dense, neon or soa
+// Steps 2-4 and 6-8 with the contraction Op:
+//   (i,j,k) -> (p,j,k) -> (p,q,k) -> (p,q,r) [*JxW] -> (i,q,r) -> (i,j,r) -> (i,j,k)
+template <int nq, class Op>
+inline void sumfact_batch(const bool soa, const int Eb, const int EP,
+                          const float* __restrict__ in_e, const float* __restrict__ JxW_e,
+                          float* __restrict__ out_e, const Coef<nq>& C,
+                          float* __restrict__ w0, float* __restrict__ w1)
+{
+    constexpr int nm = nq - 1;
+    run_batch<nq>(soa, Eb, EP, in_e, JxW_e, out_e, w0, w1,
+        [&](const float* src, float* dst) {
+            Op::template contract<nq, 0, nm, nm, nm>(src, dst, C.Bp, EP);
+            Op::template contract<nq, 1, nq, nm, nm>(dst, w0,  C.Bp, EP);
+            Op::template contract<nq, 2, nq, nq, nm>(w0,  dst, C.Bp, EP);
+        },
+        [&](const float* src, float* dst) {
+            Op::template contract<nm, 0, nq, nq, nq>(src, w0,  C.BT, EP);
+            Op::template contract<nm, 1, nm, nq, nq>(w0,  w1,  C.BT, EP);    // src (== w1) is consumed
+            Op::template contract<nm, 2, nm, nm, nq>(w1,  dst, C.BT, EP);
+        });
+}
 
-    // Read BK_LAYOUT / BK_DENSE / BK_KERNEL / BK_BATCH; dense_default applies
-    // when BK_DENSE is unset.
+// The dense element matrix, forward then reverse (EP == 16).
+template <int nq>
+inline void dense_batch(const bool soa, const int Eb,
+                        const float* __restrict__ in_e, const float* __restrict__ JxW_e,
+                        float* __restrict__ out_e, const DenseCoef<nq>& D,
+                        float* __restrict__ w0, float* __restrict__ w1)
+{
+    using DC = DenseCoef<nq>;
+    run_batch<nq>(soa, Eb, LANES, in_e, JxW_e, out_e, w0, w1,
+        [&](const float* src, float* dst) {     // (s; e) -> (q; e)
+            // quad loads need 128-byte alignment; an SoA chunk that only has
+            // 64 (odd nm^3, odd chunk) is staged through w0 first
+            if (reinterpret_cast<uintptr_t>(src) & 127) {
+                std::memcpy(w0, src, DC::nm3 * LANES * sizeof(float));
+                src = w0;
+            }
+            dense_step<DC::nm3, DC::nq3>(src, dst, D.Bf);
+        },
+        [&](const float* src, float* dst) {     // (q; e) -> (x; e)
+            dense_step<DC::nq3, DC::nm3>(src, dst, D.Br);
+        });
+}
+
+enum class KernelKind { amx, neon, ref, refv };
+
+struct Options {
+    KernelKind kernel = KernelKind::amx;
+    bool soa     = false;   // in/JxW/out already elements-on-lanes, chunks of 16
+    bool dense   = false;   // dense element-matrix path (AMX only)
+    int  batch   = LANES;   // elements per batch; always 16 for dense, neon or soa
+    int  neon_nb = 4;       // NEON output rows per register block
+
+    // Read BK_KERNEL / BK_LAYOUT / BK_DENSE / BK_BATCH / BK_NEON_NB;
+    // dense_default applies when BK_DENSE is unset.
     static Options from_env(bool dense_default) {
+        auto env_int = [](const char* name, int fallback) {
+            auto v = get_env(name);
+            return v ? std::atoi(v->c_str()) : fallback;
+        };
         Options o;
+        const std::string kernel = get_env("BK_KERNEL").value_or("amx");
+        if (kernel == "neon") {
+            o.kernel = KernelKind::neon;
+        } else if (kernel == "ref") {
+            o.kernel = KernelKind::ref;
+        } else if (kernel == "refv") {
+            o.kernel = KernelKind::refv;
+        } else if (kernel != "amx") {
+            std::cerr << "BK_KERNEL=" << kernel << ": expected amx, neon, ref or refv\n";
+            std::exit(1);
+        }
         o.soa   = get_env("BK_LAYOUT").value_or("") == "soa";
-        o.dense = dense_default;
-        if (auto v = get_env("BK_DENSE")) {
-            o.dense = std::atoi(v->c_str()) != 0;
-        }
-        if (get_env("BK_KERNEL").value_or("amx") == "neon") {
-            o.neon  = true;
-            o.dense = false;
-        }
-        if (auto v = get_env("BK_BATCH")) {
-            o.batch = round_up(std::max(1, std::atoi(v->c_str())), LANES);
-        }
-        if (o.dense || o.neon || o.soa) {
+        o.dense = (o.kernel == KernelKind::amx) && env_int("BK_DENSE", dense_default) != 0;
+        o.batch = round_up(std::max(1, env_int("BK_BATCH", LANES)), LANES);
+        if (o.dense || o.kernel != KernelKind::amx || o.soa) {
             o.batch = LANES;
         }
+        const int nb = env_int("BK_NEON_NB", 4);
+        o.neon_nb = (nb == 8 || nb == 6 || nb == 4 || nb == 2 || nb == 1) ? nb : 4;
         return o;
     }
 };
 
 // In SoA layout the arrays are chunks of 16 elements: (chunk, idx, lane), with
 // nelmt rounded up to a whole chunk and, for the dense path's quad loads,
-// 48 floats of readable padding after the last chunk.
+// QUAD_PAD floats of readable padding after the last chunk.
 inline std::size_t soa_size(std::size_t nelmt, std::size_t n) {
-    return (nelmt + 15) / 16 * 16 * n + 48;
+    return round_up(nelmt, LANES) * n + QUAD_PAD;
 }
 inline std::size_t soa_index(std::size_t e, std::size_t x, std::size_t n) {
-    return ((e / 16) * n + x) * 16 + e % 16;
+    return ((e / LANES) * n + x) * LANES + e % LANES;
 }
 
 // Per-thread scratch space, 128-byte aligned, kept across calls so the timed
@@ -593,51 +640,39 @@ inline float* workspace(std::size_t nfloats) {
 // The BK1 operator for one order: coefficient tables built once, then applied
 // to any number of elements by operator().
 template <int nq>
-class Kernel {
+class Kernel : public Dims<nq> {
 public:
-    static constexpr int nm = nq - 1;
-    static constexpr std::size_t nm3 = std::size_t(nm) * nm * nm;
-    static constexpr std::size_t nq3 = std::size_t(nq) * nq * nq;
+    using Dims<nq>::nm3;
+    using Dims<nq>::nq3;
 
     Kernel(const float* basis, const Options& o)
         : o_(o), C_(basis), D_(o.dense ? std::make_unique<const DenseCoef<nq>>(basis) : nullptr) {}
 
-    const Options& options() const { return o_; }
-
     void operator()(const std::size_t nelmt, const float* __restrict__ JxW,
                     const float* __restrict__ in, float* __restrict__ out) const
     {
-        const int E  = o_.batch;
-        const int EP = round_up(E, LANES);
-        const std::size_t nbatch = (nelmt + E - 1) / E;
-        // + 3 planes for the quad-load overrun, rounded up to keep w1 128-byte aligned
-        const std::size_t wsz = round_up(int(nq3 * EP + 48), 32);
-
-        #pragma omp parallel
-        {
-            float* w0 = workspace(2 * wsz);
-            float* w1 = w0 + wsz;
-            if (!o_.neon) {
-                AMX_SET();                // every thread enables AMX for itself
+        auto chain = [&](auto op) {        // the sum-factorized chain with one contraction Op
+            using Op = decltype(op);
+            run(Op::uses_amx, nelmt, JxW, in, out,
+                [&](int Eb, const float* in_e, const float* JxW_e, float* out_e, float* w0, float* w1) {
+                    sumfact_batch<nq, Op>(o_.soa, Eb, o_.batch, in_e, JxW_e, out_e, C_, w0, w1);
+                });
+        };
+        if (o_.kernel == KernelKind::neon) {
+            switch (o_.neon_nb) {
+                case 8: chain(NeonOp<8>{}); break;
+                case 6: chain(NeonOp<6>{}); break;
+                case 2: chain(NeonOp<2>{}); break;
+                case 1: chain(NeonOp<1>{}); break;
+                default: chain(NeonOp<4>{}); break;
             }
-            #pragma omp for schedule(dynamic,4)
-            for (std::size_t b = 0; b < nbatch; ++b) {
-                const std::size_t e0 = b * E;
-                const int Eb = int(std::min<std::size_t>(E, nelmt - e0));
-                const float* in_e  = in  + e0 * nm3;     // element-major and SoA (E == 16) agree
-                const float* JxW_e = JxW + e0 * nq3;
-                float*       out_e = out + e0 * nm3;
-                if (o_.neon) {
-                    neon_batch(Eb, in_e, JxW_e, out_e, w0, w1);
-                } else if (o_.dense) {
-                    dense_batch(Eb, in_e, JxW_e, out_e, w0, w1);
-                } else {
-                    sumfact_batch(Eb, EP, in_e, JxW_e, out_e, w0, w1);
-                }
-            }
-            if (!o_.neon) {
-                AMX_CLR();
-            }
+        } else if (o_.dense) {
+            run(true, nelmt, JxW, in, out,
+                [&](int Eb, const float* in_e, const float* JxW_e, float* out_e, float* w0, float* w1) {
+                    dense_batch<nq>(o_.soa, Eb, in_e, JxW_e, out_e, *D_, w0, w1);
+                });
+        } else {
+            chain(AmxOp{});
         }
     }
 
@@ -646,58 +681,34 @@ private:
     Coef<nq> C_;
     std::unique_ptr<const DenseCoef<nq>> D_;   // 55 MB at nq = 16, so on the heap
 
-    void sumfact_batch(int Eb, int EP, const float* in_e, const float* JxW_e, float* out_e,
-                       float* w0, float* w1) const
+    // The batch loop: batch(Eb, in_e, JxW_e, out_e, w0, w1) for every batch.
+    template <class Batch>
+    void run(const bool use_amx, const std::size_t nelmt, const float* __restrict__ JxW,
+             const float* __restrict__ in, float* __restrict__ out, Batch batch) const
     {
-        const Coef<nq>& C = C_;
-        run_batch<nq>(o_.soa, Eb, EP, in_e, JxW_e, out_e, w0, w1,
-            [&](const float* src, float* dst) {     // (i,j,k) -> (p,j,k) -> (p,q,k) -> (p,q,r)
-                contract_dim<nq>(0, nm, nm, nm, src, dst, C.Bp, EP);
-                contract_dim<nq>(1, nq, nm, nm, dst, w0,  C.Bp, EP);
-                contract_dim<nq>(2, nq, nq, nm, w0,  dst, C.Bp, EP);
-            },
-            [&](const float* src, float* dst) {     // (p,q,r) -> (i,q,r) -> (i,j,r) -> (i,j,k)
-                contract_dim<nm>(0, nq, nq, nq, src, w0,  C.BT, EP);
-                contract_dim<nm>(1, nm, nq, nq, w0,  w1,  C.BT, EP);    // src (== w1) is consumed
-                contract_dim<nm>(2, nm, nm, nq, w1,  dst, C.BT, EP);
-            });
-    }
+        const int EP = o_.batch;                                     // a multiple of LANES
+        const std::size_t nbatch = ceil_div(nelmt, EP);
+        // quad-load overrun, rounded up so that w1 is 128-byte aligned too
+        const std::size_t wsz = round_up(nq3 * EP + QUAD_PAD, 32);
 
-    void neon_batch(int Eb, const float* in_e, const float* JxW_e, float* out_e,
-                    float* w0, float* w1) const
-    {
-        const Coef<nq>& C = C_;
-        run_batch<nq>(o_.soa, Eb, LANES, in_e, JxW_e, out_e, w0, w1,
-            [&](const float* src, float* dst) {     // (i,j,k) -> (p,j,k) -> (p,q,k) -> (p,q,r)
-                neon_contract<nq, 0, nm, nm, nm>(src, dst, C.Bp);
-                neon_contract<nq, 1, nq, nm, nm>(dst, w0,  C.Bp);
-                neon_contract<nq, 2, nq, nq, nm>(w0,  dst, C.Bp);
-            },
-            [&](const float* src, float* dst) {     // (p,q,r) -> (i,q,r) -> (i,j,r) -> (i,j,k)
-                neon_contract<nm, 0, nq, nq, nq>(src, w0,  C.BT);
-                neon_contract<nm, 1, nm, nq, nq>(w0,  w1,  C.BT);      // src (== w1) is consumed
-                neon_contract<nm, 2, nm, nm, nq>(w1,  dst, C.BT);
-            });
-    }
-
-    void dense_batch(int Eb, const float* in_e, const float* JxW_e, float* out_e,
-                     float* w0, float* w1) const
-    {
-        using DC = DenseCoef<nq>;
-        const DC& D = *D_;
-        run_batch<nq>(o_.soa, Eb, LANES, in_e, JxW_e, out_e, w0, w1,
-            [&](const float* src, float* dst) {     // (s; e) -> (q; e)
-                // quad loads need 128-byte alignment; an SoA chunk that only has
-                // 64 (odd nm^3, odd chunk) is staged through w0 first
-                if (reinterpret_cast<uintptr_t>(src) & 127) {
-                    std::memcpy(w0, src, nm3 * LANES * sizeof(float));
-                    src = w0;
-                }
-                dense_step<DC::SF, DC::CF>(nm3, src, dst, D.Bf, nq3);
-            },
-            [&](const float* src, float* dst) {     // (q; e) -> (x; e)
-                dense_step<DC::SR, DC::CR>(nq3, src, dst, D.Br, nm3);
-            });
+        #pragma omp parallel
+        {
+            float* w0 = workspace(2 * wsz);
+            float* w1 = w0 + wsz;
+            if (use_amx) {
+                AMX_SET();                // every thread enables AMX for itself
+            }
+            #pragma omp for schedule(dynamic,4)
+            for (std::size_t b = 0; b < nbatch; ++b) {
+                const std::size_t e0 = b * EP;
+                const int Eb = int(std::min<std::size_t>(EP, nelmt - e0));
+                // element-major and SoA (EP == 16) agree on the batch offsets
+                batch(Eb, in + e0 * nm3, JxW + e0 * nq3, out + e0 * nm3, w0, w1);
+            }
+            if (use_amx) {
+                AMX_CLR();
+            }
+        }
     }
 };
 
@@ -960,13 +971,13 @@ void run_test(const std::size_t nelmt, const int ntests)
     constexpr int nm = nq - 1;
     constexpr std::size_t nm3 = std::size_t(nm) * nm * nm, nq3 = std::size_t(nq) * nq * nq;
 
+    using bk::amx::KernelKind;
     const bk::amx::Options opt = bk::amx::Options::from_env(/*dense_default=*/ nq <= 4);
-    const std::string kernel_name = get_env("BK_KERNEL").value_or("amx");   // amx, neon, ref, refv
-    const bool ref_kernel = (kernel_name == "ref" || kernel_name == "refv");
+    const bool ref_kernel = (opt.kernel == KernelKind::ref || opt.kernel == KernelKind::refv);
     const bool soa   = opt.soa;
     const bool noref = get_env("BK_NOREF").has_value();
     if (ref_kernel && soa) {
-        std::cerr << "BK_KERNEL=" << kernel_name << " is element-major only\n";
+        std::cerr << "BK_KERNEL=ref/refv is element-major only\n";
         return;
     }
 
@@ -1028,9 +1039,9 @@ void run_test(const std::size_t nelmt, const int ntests)
 
     for (int t = 0; t < ntests; ++t) {
         auto start = high_resolution_clock::now();
-        if (kernel_name == "refv") {
+        if (opt.kernel == KernelKind::refv) {
             SumFactorizationRefV<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), out.data());
-        } else if (kernel_name == "ref") {
+        } else if (opt.kernel == KernelKind::ref) {
             SumFactorizationRef<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), out.data());
         } else {
             kernel(nelmt, d_JxW, d_in, d_out);
@@ -1054,10 +1065,10 @@ void run_test(const std::size_t nelmt, const int ntests)
 #ifdef _OPENMP
     nthreads = omp_get_max_threads();
 #endif
-    const char* label = kernel_name == "refv" ? "reference, loops interchanged"
-                      : kernel_name == "ref"  ? "reference"
-                      : opt.neon              ? "NEON"
-                      : AMX_HW                ? "AMX" : "AMX, emulated";
+    const char* label = opt.kernel == KernelKind::refv ? "reference, loops interchanged"
+                      : opt.kernel == KernelKind::ref  ? "reference"
+                      : opt.kernel == KernelKind::neon ? "NEON"
+                      : AMX_HW                         ? "AMX" : "AMX, emulated";
     std::cout << "SumFactorization[" << label
               << (ref_kernel ? "" : opt.dense ? ", dense" : ", sumfact") << (soa ? ", soa" : "")
               << ", batch = " << opt.batch << ", threads = " << nthreads << "] -> nelmt = " << nelmt

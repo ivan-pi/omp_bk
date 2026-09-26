@@ -87,6 +87,12 @@ inline uint64_t fma(int zrow, int xoff, int yoff, int alu = 0, bool vector = fal
          | uint64_t(yoff & 0x1ff);
 }
 
+// f32 matrix mode: the outer product's row j of tile 0-3 lives in Z row 4j + tile.
+constexpr int zrow_f32(int tile, int row) { return 4 * row + tile; }
+// ALU modes of fma (see above): accumulate z += x*y, or overwrite z = x*y.
+constexpr int ALU_MAC = 0;
+constexpr int ALU_MUL = 1;
+
 // extrx: X[xreg] = Y[yreg];  extry: Y[yreg] = X[xreg]  (whole registers)
 inline uint64_t extrx_copy(int xreg, int yreg) {
     return (uint64_t(1) << 27) | (uint64_t(yreg & 7) << 20) | (uint64_t(xreg & 7) << 16);
