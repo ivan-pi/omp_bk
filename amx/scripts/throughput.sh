@@ -8,14 +8,14 @@
 #         PPD=4                      points per decade
 #         NTESTS=5                   repetitions per point (driver takes the minimum)
 #         KERNELS="serial omp omp_v neon_aos neon_soa amx_aos amx_soa"
-#           serial = the reference kernel on one thread (BK_KERNEL=ref
-#                    BK_PARALLEL=0 in the AMX binary)
-#           omp    = BK1 from the Makefile (OpenMP target, host fallback; p <= 8)
+#           all from the AMX binary (BK1_amx):
+#           serial = the reference kernel (BK1.cpp's loops) on one thread
+#                    (BK_KERNEL=ref BK_PARALLEL=0)
+#           omp    = the reference kernel, OpenMP over elements (BK_KERNEL=ref)
 #           omp_v  = the reference loops interchanged for unit-stride inner
-#                    loops (BK_KERNEL=refv in the AMX binary, OpenMP over elements)
+#                    loops, OpenMP over elements (BK_KERNEL=refv)
 #         SERIAL_MAX=1e7             cap for the serial kernel (it is slow)
-#         OMP_NUM_THREADS            threads for omp / amx (default: cores - 1,
-#                                    which is also the AMX driver's own default)
+#         OMP_NUM_THREADS            threads (default: cores - 1, the AMX driver's own default)
 #
 # Output CSV columns: kernel,p,target,nelmt,dofs,gdofs,gbs
 #   target = the log-spaced size point, dofs = nelmt * (p+1)^3 actually run
@@ -43,7 +43,7 @@ run() {   # run <kernel> <p> <nelmt>  -> "gdofs gbs"
   local k=$1 p=$2 n=$3 out
   case $k in
     serial)  out=$(BK_KERNEL=ref BK_PARALLEL=0 $BK1_AMX $p $n $NTESTS) ;;
-    omp)     out=$($BK1     $p $n $NTESTS) ;;
+    omp)     out=$(BK_KERNEL=ref $BK1_AMX $p $n $NTESTS) ;;
     omp_v)    out=$(BK_KERNEL=refv $BK1_AMX $p $n $NTESTS) ;;
     neon_aos) out=$(BK_KERNEL=neon BK_LAYOUT=aos $BK1_AMX $p $n $NTESTS) ;;
     neon_soa) out=$(BK_KERNEL=neon BK_LAYOUT=soa $BK1_AMX $p $n $NTESTS) ;;
@@ -60,7 +60,6 @@ for k in $KERNELS; do
     nm3=$(( (p+1)*(p+1)*(p+1) ))
     for d in $sizes; do
       if [ "$k" = serial ] && awk -v d="$d" -v m="$SERIAL_MAX" 'BEGIN{exit !(d > m)}'; then continue; fi
-      if [ "$k" = omp ] && [ "$p" -gt 8 ]; then continue; fi        # the BK1 executable stops at p = 8
       n=$(( (d + nm3/2) / nm3 )); [ $n -lt 1 ] && n=1
       dofs=$(( n * nm3 ))
       r=$(run $k $p $n)

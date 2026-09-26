@@ -5,7 +5,7 @@
 # overridable from the environment.
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 BK1_AMX=${BK1_AMX:-$ROOT/BK1_amx}   # amx/BK1_amx.cpp: AMX, NEON and reference kernels
-BK1=${BK1:-$ROOT/BK1}               # BK1.cpp with -fopenmp (OpenMP target, host fallback)
+BK1=${BK1:-$ROOT/BK1}               # BK1.cpp (OpenMP target); only validate.sh's norm cross-check uses it
 
 # Parse the driver's "... GDoF/s = <g> GB/s = <b>" line from stdin.
 rates() { sed -n 's/.*GDoF\/s = \([0-9.e+-]*\) GB\/s = \([0-9.e+-]*\).*/\1 \2/p'; }   # "<g> <b>"

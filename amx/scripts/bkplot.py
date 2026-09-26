@@ -12,7 +12,7 @@ from collections import defaultdict
 # fixed drawing order, label and colour (a validated categorical palette;
 # in the order of KERNELS)
 KERNELS = ["serial", "omp", "omp_v", "neon_aos", "neon_soa", "amx_aos", "amx_soa"]
-LABELS = {"serial": "serial", "omp": "OpenMP (scalar)", "omp_v": "OpenMP, loops interchanged",
+LABELS = {"serial": "serial", "omp": "OpenMP, reference loops", "omp_v": "OpenMP, loops interchanged",
           "neon_aos": "NEON, element-major", "neon_soa": "NEON, elements-on-lanes",
           "amx_aos": "AMX, element-major", "amx_soa": "AMX, elements-on-lanes"}
 COLORS = {"serial": "#4a3aa7", "omp": "#eda100", "omp_v": "#008300",
