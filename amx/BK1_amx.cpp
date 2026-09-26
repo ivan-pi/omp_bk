@@ -101,7 +101,9 @@ inline void contract_dim(const int d, const int A0, const int A1, const int A2,
     // Coefficient rows: Y register s holds coef[s] for s < 7; s >= 7 share Y7
     // and are reloaded per round when S > 8.
     const int ny = std::min(S, 8);
-    for (int s = 0; s < ny; ++s) AMX_LDY(ldxy(s, coef[s]));
+    for (int s = 0; s < ny; ++s) {
+        AMX_LDY(ldxy(s, coef[s]));
+    }
 
     for (int e0 = 0; e0 < EP; e0 += LANES) {
         for (int f0 = 0; f0 < F; f0 += TILES) {
@@ -114,13 +116,22 @@ inline void contract_dim(const int d, const int A0, const int A1, const int A2,
             }
             for (int s = 0; s < S; ++s) {
                 int yreg = s;
-                if (s >= 7 && S > 8) { yreg = 7; AMX_LDY(ldxy(7, coef[s])); }
-                for (int t = 0; t < nt; ++t) AMX_LDX(ldxy(t, in + base_in[t] + s * st_in[d] * EP));
-                for (int t = 0; t < nt; ++t) AMX_FMA32(fma(t, 64 * t, 64 * yreg, s == 0 ? 1 : 0));
+                if (s >= 7 && S > 8) {
+                    yreg = 7;
+                    AMX_LDY(ldxy(7, coef[s]));
+                }
+                for (int t = 0; t < nt; ++t) {
+                    AMX_LDX(ldxy(t, in + base_in[t] + s * st_in[d] * EP));
+                }
+                for (int t = 0; t < nt; ++t) {
+                    AMX_FMA32(fma(t, 64 * t, 64 * yreg, s == 0 ? 1 : 0));
+                }
             }
-            for (int t = 0; t < nt; ++t)
-                for (int n = 0; n < N; ++n)
+            for (int t = 0; t < nt; ++t) {
+                for (int n = 0; n < N; ++n) {
                     AMX_STZ(stz(4 * n + t, out + base_out[t] + n * st_out[d] * EP));
+                }
+            }
         }
     }
 }
@@ -136,11 +147,12 @@ struct Coef {
     explicit Coef(const float* basis) {
         std::memset(Bp, 0, sizeof Bp);
         std::memset(BT, 0, sizeof BT);
-        for (int i = 0; i < nm; ++i)
+        for (int i = 0; i < nm; ++i) {
             for (int p = 0; p < nq; ++p) {
                 Bp[i][p] = basis[i * nq + p];
                 BT[p][i] = basis[i * nq + p];
             }
+        }
     }
 };
 
@@ -166,13 +178,23 @@ struct DenseCoef {
         std::memset(Bf, 0, sizeof Bf);
         std::memset(Br, 0, sizeof Br);
         auto B = [&](int i, int p) { return basis[i * nq + p]; };
-        for (int i = 0; i < nm; ++i) for (int j = 0; j < nm; ++j) for (int k = 0; k < nm; ++k)
-            for (int p = 0; p < nq; ++p) for (int q = 0; q < nq; ++q) for (int r = 0; r < nq; ++r) {
-                const int sidx = (i * nm + j) * nm + k, qidx = (p * nq + q) * nq + r;
-                const float v = B(i, p) * B(j, q) * B(k, r);
-                Bf[qidx / 16][sidx][qidx % 16] = v;
-                Br[sidx / 16][qidx][sidx % 16] = v;
+        for (int i = 0; i < nm; ++i) {
+            for (int j = 0; j < nm; ++j) {
+                for (int k = 0; k < nm; ++k) {
+                    const int sidx = (i * nm + j) * nm + k;
+                    for (int p = 0; p < nq; ++p) {
+                        for (int q = 0; q < nq; ++q) {
+                            for (int r = 0; r < nq; ++r) {
+                                const int qidx = (p * nq + q) * nq + r;
+                                const float v = B(i, p) * B(j, q) * B(k, r);
+                                Bf[qidx / 16][sidx][qidx % 16] = v;
+                                Br[sidx / 16][qidx][sidx % 16] = v;
+                            }
+                        }
+                    }
+                }
             }
+        }
     }
 };
 
@@ -191,15 +213,21 @@ inline void dense_step(const int S, const float* __restrict__ in, float* __restr
             // Y0..Y3 and Y4..Y7 hold the coefficient quads of two tiles at a time
             for (int c0 = 0; c0 < nt; c0 += 2) {
                 const int nc = std::min(2, nt - c0);
-                for (int c = 0; c < nc; ++c) AMX_LDY(ldxy(4 * c, &coef[cr + c0 + c][s0][0], false, true));
-                for (int k = 0; k < 4 && s0 + k < S; ++k)
-                    for (int c = 0; c < nc; ++c)
+                for (int c = 0; c < nc; ++c) {
+                    AMX_LDY(ldxy(4 * c, &coef[cr + c0 + c][s0][0], false, true));
+                }
+                for (int k = 0; k < 4 && s0 + k < S; ++k) {
+                    for (int c = 0; c < nc; ++c) {
                         AMX_FMA32(fma(c0 + c, 64 * k, 64 * (4 * c + k), (s0 + k == 0) ? 1 : 0));
+                    }
+                }
             }
         }
-        for (int t = 0; t < nt; ++t)
-            for (int n = 0; n < std::min(16, N - 16 * (cr + t)); ++n)
+        for (int t = 0; t < nt; ++t) {
+            for (int n = 0; n < std::min(16, N - 16 * (cr + t)); ++n) {
                 AMX_STZ(stz(4 * n + t, out + (16 * (cr + t) + n) * 16));
+            }
+        }
     }
 }
 
@@ -214,8 +242,13 @@ inline int round_up(int x, int m) { return (x + m - 1) / m * m; }
 // ---------------------------------------------------------------------------
 typedef float v4f __attribute__((vector_size(16)));
 
-inline v4f v4_load(const float* p)          { v4f v; std::memcpy(&v, p, 16); return v; }
-inline void v4_store(float* p, v4f v)       { std::memcpy(p, &v, 16); }
+inline v4f v4_load(const float* p) {
+    v4f v;
+    std::memcpy(&v, p, 16);
+    return v;
+}
+
+inline void v4_store(float* p, v4f v) { std::memcpy(p, &v, 16); }
 
 // (a0 a1 a2 a3 | b0.. | c0.. | d0..) -> (a0 b0 c0 d0 | a1 b1 c1 d1 | ...)
 inline void v4_transpose(v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
@@ -231,8 +264,19 @@ inline void v4_transpose(v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
 
 // Load the 4x4 block at p (row pitch `pitch`), transposed.
 inline void load4x4T(const float* p, std::size_t pitch, v4f& r0, v4f& r1, v4f& r2, v4f& r3) {
-    r0 = v4_load(p); r1 = v4_load(p + pitch); r2 = v4_load(p + 2 * pitch); r3 = v4_load(p + 3 * pitch);
+    r0 = v4_load(p);
+    r1 = v4_load(p + pitch);
+    r2 = v4_load(p + 2 * pitch);
+    r3 = v4_load(p + 3 * pitch);
     v4_transpose(r0, r1, r2, r3);
+}
+
+// Store four vectors as the rows of the 4x4 block at p (row pitch `pitch`).
+inline void store4x4(float* p, std::size_t pitch, v4f r0, v4f r1, v4f r2, v4f r3) {
+    v4_store(p, r0);
+    v4_store(p + pitch, r1);
+    v4_store(p + 2 * pitch, r2);
+    v4_store(p + 3 * pitch, r3);
 }
 
 // Walk the (e < Eb) x (x < n) index space in 4x4 blocks: block(e, x) for every
@@ -241,12 +285,20 @@ template <class Block, class Scalar>
 inline void for_blocks(int Eb, int n, Block block, Scalar scalar) {
     const int E4 = Eb & ~3, n4 = n & ~3;
     for (int e = 0; e < E4; e += 4) {
-        for (int x = 0; x < n4; x += 4) block(e, x);
-        for (int x = n4; x < n; ++x)
-            for (int k = 0; k < 4; ++k) scalar(e + k, x);
+        for (int x = 0; x < n4; x += 4) {
+            block(e, x);
+        }
+        for (int x = n4; x < n; ++x) {
+            for (int k = 0; k < 4; ++k) {
+                scalar(e + k, x);
+            }
+        }
     }
-    for (int e = E4; e < Eb; ++e)
-        for (int x = 0; x < n; ++x) scalar(e, x);
+    for (int e = E4; e < Eb; ++e) {
+        for (int x = 0; x < n; ++x) {
+            scalar(e, x);
+        }
+    }
 }
 
 // dst(x; e) = src(e; x),  x < n, e < Eb, dst pitch EP
@@ -255,10 +307,11 @@ inline void to_lanes(const float* __restrict__ src, float* __restrict__ dst, int
         [&](int e, int x) {
             v4f r0, r1, r2, r3;
             load4x4T(src + std::size_t(e) * n + x, n, r0, r1, r2, r3);
-            float* d = dst + std::size_t(x) * EP + e;
-            v4_store(d, r0); v4_store(d + EP, r1); v4_store(d + 2 * EP, r2); v4_store(d + 3 * EP, r3);
+            store4x4(dst + std::size_t(x) * EP + e, EP, r0, r1, r2, r3);
         },
-        [&](int e, int x) { dst[std::size_t(x) * EP + e] = src[std::size_t(e) * n + x]; });
+        [&](int e, int x) {
+            dst[std::size_t(x) * EP + e] = src[std::size_t(e) * n + x];
+        });
 }
 
 // dst(e; x) = src(x; e)
@@ -267,10 +320,11 @@ inline void from_lanes(const float* __restrict__ src, float* __restrict__ dst, i
         [&](int e, int x) {
             v4f r0, r1, r2, r3;
             load4x4T(src + std::size_t(x) * EP + e, EP, r0, r1, r2, r3);
-            float* d = dst + std::size_t(e) * n + x;
-            v4_store(d, r0); v4_store(d + n, r1); v4_store(d + 2 * n, r2); v4_store(d + 3 * n, r3);
+            store4x4(dst + std::size_t(e) * n + x, n, r0, r1, r2, r3);
         },
-        [&](int e, int x) { dst[std::size_t(e) * n + x] = src[std::size_t(x) * EP + e]; });
+        [&](int e, int x) {
+            dst[std::size_t(e) * n + x] = src[std::size_t(x) * EP + e];
+        });
 }
 
 // w(x; e) *= JxW(e; x)   (step-5 for the element-major layout)
@@ -285,7 +339,9 @@ inline void scale_lanes(float* __restrict__ w, const float* __restrict__ JxW, in
             v4_store(d + 2 * EP, v4_load(d + 2 * EP) * r2);
             v4_store(d + 3 * EP, v4_load(d + 3 * EP) * r3);
         },
-        [&](int e, int x) { w[std::size_t(x) * EP + e] *= JxW[std::size_t(e) * n + x]; });
+        [&](int e, int x) {
+            w[std::size_t(x) * EP + e] *= JxW[std::size_t(e) * n + x];
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -304,17 +360,30 @@ inline void run_batch(const bool soa, const int Eb, const int EP,
 {
     constexpr int nm = nq - 1, nm3 = nm * nm * nm, nq3 = nq * nq * nq;
 
+    // step-1
     const float* src = in_e;
-    if (!soa) { to_lanes(in_e, w0, Eb, EP, nm3); src = w0; }       // step-1
+    if (!soa) {
+        to_lanes(in_e, w0, Eb, EP, nm3);
+        src = w0;
+    }
 
     fwd(src, w1);                                                   // steps 2-4
 
-    if (soa) { for (int x = 0; x < nq3 * EP; ++x) w1[x] *= JxW_e[x]; }   // step-5
-    else      scale_lanes(w1, JxW_e, Eb, EP, nq3);
+    // step-5: quadrature weights
+    if (soa) {
+        for (int x = 0; x < nq3 * EP; ++x) {
+            w1[x] *= JxW_e[x];
+        }
+    } else {
+        scale_lanes(w1, JxW_e, Eb, EP, nq3);
+    }
 
     rev(w1, soa ? out_e : w0);                                      // steps 6-8
 
-    if (!soa) from_lanes(w0, out_e, Eb, EP, nm3);                   // step-9
+    // step-9
+    if (!soa) {
+        from_lanes(w0, out_e, Eb, EP, nm3);
+    }
 }
 
 struct Options {
@@ -327,9 +396,15 @@ struct Options {
         Options o;
         o.soa   = get_env("BK_LAYOUT").value_or("") == "soa";
         o.dense = dense_default;
-        if (auto v = get_env("BK_DENSE")) o.dense = std::atoi(v->c_str()) != 0;
-        if (auto v = get_env("BK_BATCH")) o.batch = round_up(std::max(1, std::atoi(v->c_str())), LANES);
-        if (o.dense || o.soa) o.batch = LANES;
+        if (auto v = get_env("BK_DENSE")) {
+            o.dense = std::atoi(v->c_str()) != 0;
+        }
+        if (auto v = get_env("BK_BATCH")) {
+            o.batch = round_up(std::max(1, std::atoi(v->c_str())), LANES);
+        }
+        if (o.dense || o.soa) {
+            o.batch = LANES;
+        }
         return o;
     }
 };
@@ -337,14 +412,19 @@ struct Options {
 // In SoA layout the arrays are chunks of 16 elements: (chunk, idx, lane), with
 // nelmt rounded up to a whole chunk and, for the dense path's quad loads,
 // 48 floats of readable padding after the last chunk.
-inline std::size_t soa_size(std::size_t nelmt, std::size_t n) { return (nelmt + 15) / 16 * 16 * n + 48; }
-inline std::size_t soa_index(std::size_t e, std::size_t x, std::size_t n) { return ((e / 16) * n + x) * 16 + e % 16; }
+inline std::size_t soa_size(std::size_t nelmt, std::size_t n) {
+    return (nelmt + 15) / 16 * 16 * n + 48;
+}
+inline std::size_t soa_index(std::size_t e, std::size_t x, std::size_t n) {
+    return ((e / 16) * n + x) * 16 + e % 16;
+}
 
 // Per-thread scratch space, 128-byte aligned, kept across calls so the timed
 // kernel does not allocate.  AMX state is per thread as well.
 inline float* workspace(std::size_t nfloats) {
     struct Buf {
-        float* p = nullptr; std::size_t n = 0;
+        float* p = nullptr;
+        std::size_t n = 0;
         ~Buf() { ::operator delete(p, std::align_val_t(128)); }
     };
     static thread_local Buf buf;
@@ -391,8 +471,11 @@ public:
                 const float* in_e  = in  + e0 * nm3;     // element-major and SoA (E == 16) agree
                 const float* JxW_e = JxW + e0 * nq3;
                 float*       out_e = out + e0 * nm3;
-                if (o_.dense) dense_batch(Eb, in_e, JxW_e, out_e, w0, w1);
-                else          sumfact_batch(Eb, EP, in_e, JxW_e, out_e, w0, w1);
+                if (o_.dense) {
+                    dense_batch(Eb, in_e, JxW_e, out_e, w0, w1);
+                } else {
+                    sumfact_batch(Eb, EP, in_e, JxW_e, out_e, w0, w1);
+                }
             }
             AMX_CLR();
         }
@@ -429,7 +512,10 @@ private:
             [&](const float* src, float* dst) {     // (s; e) -> (q; e)
                 // quad loads need 128-byte alignment; an SoA chunk that only has
                 // 64 (odd nm^3, odd chunk) is staged through w0 first
-                if (reinterpret_cast<uintptr_t>(src) & 127) { std::memcpy(w0, src, nm3 * LANES * sizeof(float)); src = w0; }
+                if (reinterpret_cast<uintptr_t>(src) & 127) {
+                    std::memcpy(w0, src, nm3 * LANES * sizeof(float));
+                    src = w0;
+                }
                 dense_step<DC::SF, DC::CF>(nm3, src, dst, D.Bf, nq3);
             },
             [&](const float* src, float* dst) {     // (q; e) -> (x; e)
@@ -461,24 +547,93 @@ void SumFactorizationRef(const std::size_t nelmt, const T* basis, const T* JxW,
         const nm_view  e_out{out + e * nm_view::size};
         const nq_cview e_JxW{JxW + e * nq_cview::size};
 
-        for (int i = 0; i < nm; ++i) for (int j = 0; j < nm; ++j) for (int k = 0; k < nm; ++k)
-            wsp0(i, j, k) = e_in(i, j, k);
-        for (int p = 0; p < nq; ++p) for (int k = 0; k < nm; ++k) for (int j = 0; j < nm; ++j) {
-            T tmp = 0; for (int i = 0; i < nm; ++i) tmp += wsp0(i, j, k) * B(i, p); wsp1(p, j, k) = tmp; }
-        for (int q = 0; q < nq; ++q) for (int p = 0; p < nq; ++p) for (int k = 0; k < nm; ++k) {
-            T tmp = 0; for (int j = 0; j < nm; ++j) tmp += wsp1(p, j, k) * B(j, q); wsp0(q, p, k) = tmp; }
-        for (int r = 0; r < nq; ++r) for (int q = 0; q < nq; ++q) for (int p = 0; p < nq; ++p) {
-            T tmp = 0; for (int k = 0; k < nm; ++k) tmp += wsp0(q, p, k) * B(k, r); wsp1(p, q, r) = tmp; }
-        for (int r = 0; r < nq; ++r) for (int q = 0; q < nq; ++q) for (int p = 0; p < nq; ++p)
-            wsp1(p, q, r) *= e_JxW(p, q, r);
-        for (int k = 0; k < nm; ++k) for (int q = 0; q < nq; ++q) for (int p = 0; p < nq; ++p) {
-            T tmp = 0; for (int r = 0; r < nq; ++r) tmp += wsp1(p, q, r) * B(k, r); wsp0(q, p, k) = tmp; }
-        for (int j = 0; j < nm; ++j) for (int k = 0; k < nm; ++k) for (int p = 0; p < nq; ++p) {
-            T tmp = 0; for (int q = 0; q < nq; ++q) tmp += wsp0(q, p, k) * B(j, q); wsp1(p, j, k) = tmp; }
-        for (int i = 0; i < nm; ++i) for (int j = 0; j < nm; ++j) for (int k = 0; k < nm; ++k) {
-            T tmp = 0; for (int p = 0; p < nq; ++p) tmp += wsp1(p, j, k) * B(i, p); wsp0(i, j, k) = tmp; }
-        for (int i = 0; i < nm; ++i) for (int j = 0; j < nm; ++j) for (int k = 0; k < nm; ++k)
-            e_out(i, j, k) = wsp0(i, j, k);
+        for (int i = 0; i < nm; ++i) {
+            for (int j = 0; j < nm; ++j) {
+                for (int k = 0; k < nm; ++k) {
+                    wsp0(i, j, k) = e_in(i, j, k);
+                }
+            }
+        }
+        for (int p = 0; p < nq; ++p) {
+            for (int k = 0; k < nm; ++k) {
+                for (int j = 0; j < nm; ++j) {
+                    T tmp = 0;
+                    for (int i = 0; i < nm; ++i) {
+                        tmp += wsp0(i, j, k) * B(i, p);
+                    }
+                    wsp1(p, j, k) = tmp;
+                }
+            }
+        }
+        for (int q = 0; q < nq; ++q) {
+            for (int p = 0; p < nq; ++p) {
+                for (int k = 0; k < nm; ++k) {
+                    T tmp = 0;
+                    for (int j = 0; j < nm; ++j) {
+                        tmp += wsp1(p, j, k) * B(j, q);
+                    }
+                    wsp0(q, p, k) = tmp;
+                }
+            }
+        }
+        for (int r = 0; r < nq; ++r) {
+            for (int q = 0; q < nq; ++q) {
+                for (int p = 0; p < nq; ++p) {
+                    T tmp = 0;
+                    for (int k = 0; k < nm; ++k) {
+                        tmp += wsp0(q, p, k) * B(k, r);
+                    }
+                    wsp1(p, q, r) = tmp;
+                }
+            }
+        }
+        for (int r = 0; r < nq; ++r) {
+            for (int q = 0; q < nq; ++q) {
+                for (int p = 0; p < nq; ++p) {
+                    wsp1(p, q, r) *= e_JxW(p, q, r);
+                }
+            }
+        }
+        for (int k = 0; k < nm; ++k) {
+            for (int q = 0; q < nq; ++q) {
+                for (int p = 0; p < nq; ++p) {
+                    T tmp = 0;
+                    for (int r = 0; r < nq; ++r) {
+                        tmp += wsp1(p, q, r) * B(k, r);
+                    }
+                    wsp0(q, p, k) = tmp;
+                }
+            }
+        }
+        for (int j = 0; j < nm; ++j) {
+            for (int k = 0; k < nm; ++k) {
+                for (int p = 0; p < nq; ++p) {
+                    T tmp = 0;
+                    for (int q = 0; q < nq; ++q) {
+                        tmp += wsp0(q, p, k) * B(j, q);
+                    }
+                    wsp1(p, j, k) = tmp;
+                }
+            }
+        }
+        for (int i = 0; i < nm; ++i) {
+            for (int j = 0; j < nm; ++j) {
+                for (int k = 0; k < nm; ++k) {
+                    T tmp = 0;
+                    for (int p = 0; p < nq; ++p) {
+                        tmp += wsp1(p, j, k) * B(i, p);
+                    }
+                    wsp0(i, j, k) = tmp;
+                }
+            }
+        }
+        for (int i = 0; i < nm; ++i) {
+            for (int j = 0; j < nm; ++j) {
+                for (int k = 0; k < nm; ++k) {
+                    e_out(i, j, k) = wsp0(i, j, k);
+                }
+            }
+        }
     }
 }
 
@@ -507,9 +662,16 @@ void run_test(const std::size_t nelmt, const int ntests)
 
     if (get_env("BK_RANDOM")) {          // deterministic LCG, values in [-1, 1]
         uint32_t s = 12345u;
-        auto next = [&] { s = 1664525u * s + 1013904223u; return T(s >> 8) / T(1 << 23) - T(1); };
-        for (auto& v : in)  v = next();
-        for (auto& v : JxW) v = T(1.5) + next();
+        auto next = [&] {
+            s = 1664525u * s + 1013904223u;
+            return T(s >> 8) / T(1 << 23) - T(1);
+        };
+        for (auto& v : in) {
+            v = next();
+        }
+        for (auto& v : JxW) {
+            v = T(1.5) + next();
+        }
     }
 
     const std::size_t size_inout = in.size();
@@ -522,13 +684,21 @@ void run_test(const std::size_t nelmt, const int ntests)
     std::vector<T> in_k, JxW_k, out_k;
     auto to_soa = [&](const std::vector<T>& a, std::size_t n) {
         std::vector<T> r(bk::amx::soa_size(nelmt, n), T(0));
-        for (std::size_t e = 0; e < nelmt; ++e)
-            for (std::size_t x = 0; x < n; ++x) r[bk::amx::soa_index(e, x, n)] = a[e * n + x];
+        for (std::size_t e = 0; e < nelmt; ++e) {
+            for (std::size_t x = 0; x < n; ++x) {
+                r[bk::amx::soa_index(e, x, n)] = a[e * n + x];
+            }
+        }
         return r;
     };
     if (soa) {
-        in_k = to_soa(in, nm3); JxW_k = to_soa(JxW, nq3); out_k.assign(bk::amx::soa_size(nelmt, nm3), T(0));
-        if (noref) { std::vector<T>().swap(in); std::vector<T>().swap(JxW); }   // only the SoA copies are needed
+        in_k  = to_soa(in, nm3);
+        JxW_k = to_soa(JxW, nq3);
+        out_k.assign(bk::amx::soa_size(nelmt, nm3), T(0));
+        if (noref) {                     // only the SoA copies are needed from here on
+            std::vector<T>().swap(in);
+            std::vector<T>().swap(JxW);
+        }
     }
     const T* d_in  = soa ? in_k.data()  : in.data();
     const T* d_JxW = soa ? JxW_k.data() : JxW.data();
@@ -548,9 +718,13 @@ void run_test(const std::size_t nelmt, const int ntests)
         duration<double> rep_time = stop - start;
         elapsed = std::min(elapsed, rep_time.count());
     }
-    if (soa)
-        for (std::size_t e = 0; e < nelmt; ++e)
-            for (std::size_t x = 0; x < nm3; ++x) out[e * nm3 + x] = out_k[bk::amx::soa_index(e, x, nm3)];
+    if (soa) {
+        for (std::size_t e = 0; e < nelmt; ++e) {
+            for (std::size_t x = 0; x < nm3; ++x) {
+                out[e * nm3 + x] = out_k[bk::amx::soa_index(e, x, nm3)];
+            }
+        }
+    }
 
     const auto dof_rate  = [&](double s) { return 1.0e-9 * size_inout / s; };
     const auto byte_rate = [&](double s) { return 1.0e-9 * sizeof(T) * (2 * size_inout + size_JxW) / s; };
@@ -567,7 +741,9 @@ void run_test(const std::size_t nelmt, const int ntests)
     std::cout << "norm = " << norm2(out.data(), out.size()) << "\n";
 
     // Verification against the serial reference (BK_NOREF=1 skips it, for sweeps)
-    if (noref) return;
+    if (noref) {
+        return;
+    }
     std::vector<T> ref(nelmt * nm3);
     SumFactorizationRef<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), ref.data());
     double max_err = 0, max_ref = 0;
@@ -588,7 +764,9 @@ int main(int argc, char** argv)
     // Default thread count: all cores but one (9 on an M2 Pro), unless the
     // user set OMP_NUM_THREADS.  Ten threads on ten cores was measured to be
     // slower and noisier than nine because the last chunks straggle.
-    if (!get_env("OMP_NUM_THREADS")) omp_set_num_threads(std::max(1, omp_get_num_procs() - 1));
+    if (!get_env("OMP_NUM_THREADS")) {
+        omp_set_num_threads(std::max(1, omp_get_num_procs() - 1));
+    }
 #endif
     const int p = (argc > 1) ? std::atoi(argv[1]) : 2;
     const std::size_t nelmt = (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
