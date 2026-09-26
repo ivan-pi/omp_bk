@@ -66,8 +66,8 @@ OUT=tune.csv amx/scripts/tune.sh      # best layout/path/batch per order
 ./amx_pipe   > pipe.txt               # AMX load-to-use and store behaviour (one unit)
 ./accel_gemm > gemm.csv               # Accelerate sgemm calibration (macOS)
 
-amx/scripts/plot_throughput.py results.csv throughput.png
-amx/scripts/plot_roofline.py results.csv bw.csv roofline.png
+amx/scripts/plot_throughput.py results.csv throughput.png   # per kernel and order, AMX/NEON speedup
+amx/scripts/plot_roofline.py results.csv bw.csv roofline.png # plateaus against the roofs
 ```
 
 The scripts find `BK1` and `BK1_amx` in the repository root and run from

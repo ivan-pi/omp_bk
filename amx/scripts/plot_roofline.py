@@ -9,25 +9,30 @@ The plateau per kernel and order is the best GDoF/s among the three largest
 problem sizes that were run (the serial kernel is capped at 1e7 DoF by
 throughput.sh, the others go to 1e8).
 
-Left panel:  per order, the measured plateau of each kernel (best GDoF/s over
-             sizes >= 1e7 DoF) against
+Left panel:  per order, the measured plateau of each kernel against the
+             ceilings, on a log axis so that the slow baselines and the roofs
+             (which reach 16 GDoF/s at high order) fit one panel:
                memory roof  = BW / bytes-per-DoF(p)         (BW = "add" from bw.csv:
                                                               2 reads + 1 write, the BK1 mix)
                NEON FMA roof = pcores * ghz * 16 / MAC-per-DoF(p)
+               AMX FMA roof and AMX store-path roof (see below)
 Right panel: the classic roofline, GFLOP/s vs arithmetic intensity (flop/byte),
              one point per (kernel, order), with the memory and FMA roofs.
+The roofs are labelled at their right end; the kernels share one legend below.
 
 bytes-per-DoF counts in + out + JxW; --rfo adds 4 bytes/DoF for the
 write-allocate of `out` (use it if bw_test shows "fill" well below "read").
 """
 import sys
 import csv
-import math
-from collections import defaultdict
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker
+from matplotlib.lines import Line2D
+
+import bkplot as bk
 
 opts = sys.argv[1:]
 # positional arguments: everything that is neither an option nor an option's value
@@ -43,8 +48,7 @@ rfo = "--rfo" in opts
 # amx_pipe on M2 Pro a 128-byte pair store costs ~1.2 ns (~32 B/cycle), i.e.
 # ~107 GB/s per unit; default assumes two P-cluster units.
 amx_store_gbs = float(opts[opts.index("--amx-store") + 1]) if "--amx-store" in opts else 214.0
-title = opts[opts.index("--title") + 1] if "--title" in opts else "BK1: measured plateaus vs memory and FMA roofs"
-PLATEAU_TOP = 3     # plateau = best of the three largest sizes run for that kernel and order
+title = opts[opts.index("--title") + 1] if "--title" in opts else "BK1 (fp32): measured plateaus vs memory and FMA roofs"
 
 # --- bandwidth -------------------------------------------------------------
 bw = {}
@@ -62,27 +66,10 @@ peak_label = (f"measured FMA peak {peak:.0f} GFLOP/s" if "fma_peak" in bw
 amx_peak = bw.get("amx_peak")          # fma32 outer-product peak, GFLOP/s, full tiles
 
 # --- measured plateaus -----------------------------------------------------
-points = defaultdict(lambda: defaultdict(list))   # points[kernel][p] -> [(dofs, gdofs)]
-with open(res_csv) as f:
-    for row in csv.DictReader(f):
-        try:
-            g = float(row["gdofs"])
-        except ValueError:
-            continue
-        if math.isnan(g):
-            continue
-        points[row["kernel"]][int(row["p"])].append((int(row["dofs"]), g))
-plateau = defaultdict(dict)   # plateau[kernel][p] = best of the PLATEAU_TOP largest sizes
-for k, byp in points.items():
-    for p, pts in byp.items():
-        top = sorted(pts)[-PLATEAU_TOP:]
-        plateau[k][p] = max(g for _, g in top)
-
-labels = {"serial": "serial", "omp": "OpenMP (scalar)", "omp_v": "OpenMP, loops interchanged",
-          "neon_aos": "NEON, element-major", "neon_soa": "NEON, elements-on-lanes",
-          "amx_aos": "AMX, element-major", "amx_soa": "AMX, elements-on-lanes"}
-order = [k for k in ["serial", "omp", "omp_v", "neon_aos", "neon_soa", "amx_aos", "amx_soa"] if k in plateau]
+plateau = bk.plateaus(bk.load_results(res_csv))
+kernels = bk.kernels_in(plateau)
 orders = sorted({p for k in plateau.values() for p in k})
+
 
 def nm(p): return p + 1
 def nq(p): return p + 2
@@ -92,6 +79,7 @@ def bytes_per_dof(p):
 def mac_per_dof(p):
     T = nm(p) ** 2 + nm(p) * nq(p) + nq(p) ** 2
     return 2.0 * nq(p) * T / nm(p) ** 2
+
 
 # AMX: each fma32 is a full 16x16 outer product but only N of the 16 rows are
 # useful (N = nq forward, nm reverse); averaged over the six steps weighted by
@@ -103,30 +91,44 @@ def store_bytes_per_dof(p):
     a, b = nm(p), nq(p)
     return 4.0 * (a ** 3 + 2 * a * a * b + 2 * a * b * b + b ** 3) / a ** 3
 
+
 mem_roof = {p: bw_roof / bytes_per_dof(p) for p in orders}          # GDoF/s
 fma_roof = {p: peak / (2.0 * mac_per_dof(p)) for p in orders}         # GDoF/s
+amx_roof = {p: amx_peak * amx_fill(p) / (2.0 * mac_per_dof(p)) for p in orders} if amx_peak else {}
+store_roof = {p: amx_store_gbs / store_bytes_per_dof(p) for p in orders}
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+ROOF_COLOR = "#52514e"
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 5.6))
+
 
 # --- left: per-order ceilings ---------------------------------------------
-ax1.plot(orders, [mem_roof[p] for p in orders], "k-", lw=2,
-         label=f"memory roof ({bw_roof:.0f} GB/s{', +RFO' if rfo else ''})")
-ax1.plot(orders, [fma_roof[p] for p in orders], "k--", lw=2,
-         label=f"NEON FMA roof ({peak_label})")
-if amx_peak:
-    ax1.plot(orders, [amx_peak * amx_fill(p) / (2.0 * mac_per_dof(p)) for p in orders], "k-.", lw=1.2,
-             label=f"AMX FMA roof: fma32 peak {amx_peak:.0f} GFLOP/s x row fill N/16")
-ax1.plot(orders, [amx_store_gbs / store_bytes_per_dof(p) for p in orders], "k:", lw=2,
-         label=f"AMX store roof: {amx_store_gbs:.0f} GB/s / stored bytes per DoF")
-for i, k in enumerate(order):
+# The ceilings are thin, recessive lines named at their right end (not in the
+# legend); names whose lines end close together are pushed apart on the log axis.
+roofs = [("-", [mem_roof[p] for p in orders], f"memory roof {bw_roof:.0f} GB/s{' + RFO' if rfo else ''}"),
+         ("--", [fma_roof[p] for p in orders], f"NEON FMA roof {peak:.0f} GFLOP/s"),
+         (":", [store_roof[p] for p in orders], f"AMX store roof {amx_store_gbs:.0f} GB/s")]
+if amx_roof:
+    roofs.append(("-.", [amx_roof[p] for p in orders], f"AMX FMA roof {amx_peak:.0f} GFLOP/s x fill"))
+for ls, ys, _ in roofs:
+    ax1.plot(orders, ys, ls, color=ROOF_COLOR, lw=1.3)
+ends = sorted((ys[-1], text) for _, ys, text in roofs)
+label_y = [y for y, _ in ends]
+for i in range(1, len(label_y)):                     # at least a factor 1.3 apart
+    label_y[i] = max(label_y[i], label_y[i - 1] * 1.3)
+for (y_end, text), y in zip(ends, label_y):
+    ax1.annotate(text, (orders[-1], y_end), xytext=(orders[-1] + 0.35, y), textcoords="data",
+                 fontsize=7.5, color=ROOF_COLOR, va="center",
+                 arrowprops=dict(arrowstyle="-", color=ROOF_COLOR, lw=0.5) if y != y_end else None)
+for k in kernels:
     ps = sorted(plateau[k])
-    ax1.plot(ps, [plateau[k][p] for p in ps], "o-", ms=4, color=f"C{i}", label=labels.get(k, k))
+    bk.kernel_line(ax1, k, ps, [plateau[k][p] for p in ps])
+ax1.set_yscale("log")
 ax1.set_xlabel("polynomial order p")
-ax1.set_ylabel(f"GDoF/s (plateau: best of the {PLATEAU_TOP} largest sizes)")
-ax1.set_title("throughput against the per-order ceilings")
+ax1.set_ylabel(f"GDoF/s (plateau: best of the {bk.PLATEAU_TOP} largest sizes)")
+ax1.set_title("throughput against the per-order ceilings", fontsize=11)
 ax1.set_xticks(orders)
-ax1.grid(True, alpha=0.3)
-ax1.legend(fontsize=8)
+ax1.set_xlim(orders[0] - 0.3, orders[-1] + 4.5)          # room for the roof names
+ax1.grid(True, which="major", alpha=0.25)
 
 # --- right: classic roofline ---------------------------------------------
 # Compute limits are horizontal (independent of intensity), bandwidth limits
@@ -135,44 +137,80 @@ ax1.legend(fontsize=8)
 # kernels are plotted twice: useful (algorithmic) flops, and raw flops
 # (useful / row fill) as hollow markers, to be read against the raw AMX peak.
 ai = {p: 2 * mac_per_dof(p) / bytes_per_dof(p) for p in orders}
-ai_min = min(ai.values()) / 3
-ai_max = max(ai.values()) * 3
+ai_min = min(ai.values()) / 2
+ai_max = max(ai.values()) * 2.5
 xs = [ai_min * (ai_max / ai_min) ** (i / 100) for i in range(101)]
-ax2.plot(xs, [bw_roof * x for x in xs], "k-", lw=2, label=f"DRAM roof, {bw_roof:.0f} GB/s (add)")
-ax2.plot(xs, [bw_read * x for x in xs], "k:", lw=1, label=f"DRAM read-only, {bw_read:.0f} GB/s")
-ax2.axhline(peak, color="k", ls="--", lw=2, label=f"NEON FMA peak, {peak:.0f} GFLOP/s")
-ymax = peak * 1.5
+ymax = (amx_peak or peak) * 1.6
+ymin = min(plateau[k][p] * 2 * mac_per_dof(p) for k in kernels for p in plateau[k]) / 2
+
+
+def diagonal(gbs, ls, text, at_top):
+    """A bandwidth line, named where it leaves through the top (at_top) or enters at the left."""
+    ax2.plot(xs, [gbs * x for x in xs], ls, color=ROOF_COLOR, lw=1.3)
+    if at_top:
+        x_top = min(ymax / gbs, ai_max)
+        right = x_top > (ai_min * ai_max) ** 0.5           # leaving near the right edge: text to the left
+        ax2.annotate(text, (x_top, min(ymax, gbs * ai_max)), xytext=(-4 if right else 4, -4),
+                     textcoords="offset points", fontsize=7.5, color=ROOF_COLOR,
+                     ha="right" if right else "left", va="top")
+    else:
+        ax2.annotate(text, (ai_min, gbs * ai_min), xytext=(4, -4), textcoords="offset points",
+                     fontsize=7.5, color=ROOF_COLOR, ha="left", va="top")
+
+
+diagonal(bw_roof, "-", f"DRAM {bw_roof:.0f} GB/s (add)", at_top=True)
+diagonal(bw_read, ":", f"DRAM read-only {bw_read:.0f} GB/s", at_top=False)
+ax2.axhline(peak, color=ROOF_COLOR, ls="--", lw=1.3)
+ax2.annotate(f"NEON FMA peak {peak:.0f} GFLOP/s", (ai_min, peak), xytext=(3, 3), textcoords="offset points",
+             fontsize=7.5, color=ROOF_COLOR)
 if amx_peak:
-    ax2.axhline(amx_peak, color="k", ls="-.", lw=1.5, label=f"AMX fma32 peak (full tiles), {amx_peak:.0f} GFLOP/s")
-    ymax = amx_peak * 1.5
-for i, k in enumerate(order):
+    ax2.axhline(amx_peak, color=ROOF_COLOR, ls="-.", lw=1.3)
+    ax2.annotate(f"AMX fma32 peak (full tiles) {amx_peak:.0f} GFLOP/s", (ai_min, amx_peak), xytext=(3, 3),
+                 textcoords="offset points", fontsize=7.5, color=ROOF_COLOR)
+for k in kernels:
     ps = sorted(plateau[k])
-    ax2.plot([ai[p] for p in ps], [plateau[k][p] * 2 * mac_per_dof(p) for p in ps],
-             "o-", ms=4, color=f"C{i}", label=labels.get(k, k))
+    bk.kernel_line(ax2, k, [ai[p] for p in ps], [plateau[k][p] * 2 * mac_per_dof(p) for p in ps])
     if k.startswith("amx"):
         ax2.plot([ai[p] for p in ps], [plateau[k][p] * 2 * mac_per_dof(p) / amx_fill(p) for p in ps],
-                 "o--", ms=5, mfc="none", color=f"C{i}", lw=0.8, label=f"{labels.get(k, k)}, raw flops (/ fill)")
-    for p in ps:
-        if p in (orders[0], orders[-1]):
-            ax2.annotate(f"p={p}", (ai[p], plateau[k][p] * 2 * mac_per_dof(p)),
-                         fontsize=7, xytext=(3, 3), textcoords="offset points")
+                 ls=bk.LINESTYLES[k], marker="o", ms=4.5, mfc="none", color=bk.COLORS[k], lw=0.8, alpha=0.7)
+    p = ps[-1]                                       # intensity grows with p: name the right end
+    ax2.annotate(f"p={p}", (ai[p], plateau[k][p] * 2 * mac_per_dof(p)),
+                 fontsize=6.5, color=bk.COLORS.get(k, "C7"), xytext=(4, -2), textcoords="offset points")
 ax2.set_xscale("log")
 ax2.set_yscale("log")
 ax2.set_xlim(ai_min, ai_max)
-ax2.set_ylim(top=ymax)
-ax2.set_xlabel("arithmetic intensity (flop / byte; sum-factorized flops, compulsory DRAM bytes)")
+ax2.set_ylim(ymin, ymax)
+ax2.set_xlabel(f"arithmetic intensity, flop / byte (sum-factorized flops, compulsory DRAM bytes); "
+               f"p = {orders[0]} to {orders[-1]} left to right")
 ax2.set_ylabel("GFLOP/s")
-ax2.set_title("roofline (horizontal: compute peaks, diagonal: DRAM)")
-ax2.grid(True, which="both", alpha=0.3)
-ax2.legend(fontsize=7, loc="lower right")
+ax2.set_title("roofline (horizontal: compute peaks, diagonal: DRAM)", fontsize=11)
+ticks = [t for t in (1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 70, 100) if ai_min <= t <= ai_max]
+ax2.xaxis.set_major_locator(matplotlib.ticker.FixedLocator(ticks))
+ax2.xaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
+ax2.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+ax2.grid(True, which="major", alpha=0.25)
+for ax in (ax1, ax2):
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
 
-fig.suptitle(title)
-fig.tight_layout()
+# --- one legend for the kernels, below both panels --------------------------
+handles = [Line2D([], [], color=bk.COLORS.get(k, "C7"), ls=bk.LINESTYLES.get(k, "-"), lw=1.6, marker="o", ms=3.5)
+           for k in kernels]
+labels = [bk.label(k) for k in kernels]
+if any(k.startswith("amx") for k in kernels):
+    handles.append(Line2D([], [], color=bk.COLORS["amx_soa"], ls="", marker="o", ms=4.5, mfc="none", alpha=0.7))
+    labels.append("AMX raw flops (useful / row fill)")
+bk.figure_legend(fig, handles, labels, ncol=4)
+
+fig.suptitle(title, y=1.0)
+fig.tight_layout(rect=(0, 0.08, 1, 1))
 fig.savefig(dst, dpi=150, bbox_inches="tight")
 print(f"wrote {dst}")
 print(f"bandwidth roof {bw_roof:.1f} GB/s (add), read-only {bw_read:.1f} GB/s, compute roof {peak_label}"
       + (f", AMX peak {amx_peak:.0f} GFLOP/s" if amx_peak else ""))
-print(f"{'p':>3} {'B/DoF':>7} {'MAC/DoF':>8} {'stB/DoF':>8} {'mem roof':>9} {'FMA roof':>9} {'AMXst roof':>10}  " + "  ".join(f"{labels.get(k,k)[:14]:>14}" for k in order))
+print(f"{'p':>3} {'B/DoF':>7} {'MAC/DoF':>8} {'stB/DoF':>8} {'mem roof':>9} {'FMA roof':>9} {'AMXst roof':>10}  "
+      + "  ".join(f"{bk.label(k)[:14]:>14}" for k in kernels))
 for p in orders:
-    print(f"{p:>3} {bytes_per_dof(p):>7.1f} {mac_per_dof(p):>8.1f} {store_bytes_per_dof(p):>8.1f} {mem_roof[p]:>9.2f} {fma_roof[p]:>9.2f} {amx_store_gbs / store_bytes_per_dof(p):>10.2f}  "
-          + "  ".join((f"{plateau[k][p]:>14.2f}" if p in plateau[k] else f"{'-':>14}") for k in order))
+    print(f"{p:>3} {bytes_per_dof(p):>7.1f} {mac_per_dof(p):>8.1f} {store_bytes_per_dof(p):>8.1f} "
+          f"{mem_roof[p]:>9.2f} {fma_roof[p]:>9.2f} {store_roof[p]:>10.2f}  "
+          + "  ".join((f"{plateau[k][p]:>14.2f}" if p in plateau[k] else f"{'-':>14}") for k in kernels))
