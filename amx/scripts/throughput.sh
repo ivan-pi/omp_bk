@@ -8,8 +8,10 @@
 #         PPD=4                      points per decade
 #         NTESTS=5                   repetitions per point (driver takes the minimum)
 #         KERNELS="serial omp omp_v neon_aos neon_soa amx_aos amx_soa"
-#           omp_v = the reference loops interchanged for unit-stride inner loops
-#                   (BK_KERNEL=refv in the AMX binary, OpenMP over elements)
+#           serial = the reference kernel on one thread (BK_KERNEL=ref
+#                    BK_PARALLEL=0 in the AMX binary)
+#           omp_v  = the reference loops interchanged for unit-stride inner
+#                    loops (BK_KERNEL=refv in the AMX binary, OpenMP over elements)
 #         SERIAL_MAX=1e7             cap for the serial kernel (it is slow)
 #         OMP_NUM_THREADS            threads for omp / amx (default: cores - 1,
 #                                    which is also the AMX driver's own default)
@@ -39,7 +41,7 @@ sizes=$(awk -v lo="$DOF_MIN" -v hi="$DOF_MAX" -v ppd="$PPD" 'BEGIN {
 run() {   # run <kernel> <p> <nelmt>  -> "gdofs gbs"
   local k=$1 p=$2 n=$3 out
   case $k in
-    serial)  out=$($BK1     $p $n $NTESTS) ;;
+    serial)  out=$(BK_KERNEL=ref BK_PARALLEL=0 $BK1_AMX $p $n $NTESTS) ;;
     omp)     out=$($BK1_OMP $p $n $NTESTS) ;;
     omp_v)    out=$(BK_KERNEL=refv $BK1_AMX $p $n $NTESTS) ;;
     neon_aos) out=$(BK_KERNEL=neon BK_LAYOUT=aos $BK1_AMX $p $n $NTESTS) ;;

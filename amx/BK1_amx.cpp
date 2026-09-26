@@ -18,6 +18,8 @@
 //                (default 16, the measured optimum; the dense path, the NEON
 //                kernel and the SoA layout always use 16)
 //   OMP_NUM_THREADS  default: number of cores minus one
+//   BK_PARALLEL=0  run single-threaded: every OpenMP region gets if(false)
+//                (the same code path as a build without OpenMP)
 //   BK_DENSE=0/1 dense element-matrix path (default: on for p <= 2)
 //   BK_KERNEL=neon  cross-element NEON kernel (GNU vector types) instead of
 //                AMX: the same layout and contractions, 4-wide FMAs in the core
@@ -42,6 +44,7 @@
 
 #include <iostream>
 #include <string>
+#include <cassert>
 #include <cmath>
 #include <array>
 #include <vector>
@@ -78,10 +81,12 @@ constexpr int QUAD_PAD = 3 * LANES;     // readable planes past the end for a qu
 
 template <class I> constexpr I ceil_div(I x, int m) { return (x + m - 1) / m; }
 template <class I> constexpr I round_up(I x, int m) { return ceil_div(x, m) * m; }
+inline bool aligned128(const void* p) { return (reinterpret_cast<uintptr_t>(p) & 127) == 0; }
 
 // Extents of one order: nm = p + 1 modes, nq = p + 2 quadrature points per direction.
 template <int nq>
 struct Dims {
+    static_assert(nq >= 2 && nq <= 16, "nq = p + 2 with p = 0..14: an output row must fit one Z tile");
     static constexpr int nm = nq - 1, nm3 = nm * nm * nm, nq3 = nq * nq * nq;
 };
 
@@ -102,6 +107,8 @@ struct Dims {
 // ---------------------------------------------------------------------------
 template <int N, int D, int A0, int A1, int A2>
 struct StepShape {
+    static_assert(D >= 0 && D <= 2, "D is the position of the contracted index");
+    static_assert(N >= 1 && A0 >= 1 && A1 >= 1 && A2 >= 1, "extents are positive");
     static constexpr int ext_in[3]  = {A0, A1, A2};
     static constexpr int ext_out[3] = {D == 0 ? N : A0, D == 1 ? N : A1, D == 2 ? N : A2};
     static constexpr int S = ext_in[D];                                          // contracted extent
@@ -128,6 +135,8 @@ inline void contract_dim(const float* __restrict__ in, float* __restrict__ out,
     static_assert(N >= 1 && N <= 16, "output extent must fit one Z tile");
     using Sh = StepShape<N, D, A0, A1, A2>;
     constexpr int S = Sh::S, F = Sh::F, TILES = 4;
+    static_assert(S >= 1 && S <= 16, "the coefficient table has 16 lanes per row");
+    assert(EP > 0 && EP % LANES == 0);
 
     // Coefficient rows resident in Y0..Y6 (Y7 too when they all fit); for
     // S > 8 the rows from 7 on cycle through Y7, reloaded per round.
@@ -234,7 +243,9 @@ template <int S, int N, int C, int SP>
 inline void dense_step(const float* __restrict__ in, float* __restrict__ out,
                        const float (&__restrict__ coef)[C][SP][16])
 {
+    static_assert(S >= 1 && N >= 1 && C >= 1, "extents are positive");
     static_assert(SP >= round_up(S, 4) && 16 * C >= N, "coefficient table does not cover the step");
+    assert(aligned128(in) && aligned128(coef));            // quad loads
     for (int cr = 0; cr < C; cr += 4) {
         const int nt = std::min(4, C - cr);
         for (int s0 = 0; s0 < S; s0 += 4) {
@@ -401,6 +412,7 @@ template <int NB, int S, int ST_S, int ST_N>
 inline void neon_block(const int n0, const float* __restrict__ pin, float* __restrict__ pout,
                        const float (*__restrict__ coef)[16])
 {
+    static_assert(NB >= 1 && NB <= 8 && S >= 1, "block of 1..8 output rows over S >= 1 planes");
     v4f acc[NB][4] = {};
     auto plane = [&](int s) {
         v4f x0, x1, x2, x3;
@@ -445,6 +457,7 @@ template <int NB, int N, int D, int A0, int A1, int A2>
 inline void neon_contract(const float* __restrict__ in, float* __restrict__ out,
                           const float (*__restrict__ coef)[16])
 {
+    static_assert(NB >= 1 && NB <= 8, "1..8 output rows per register block");
     using Sh = StepShape<N, D, A0, A1, A2>;
     constexpr int S = Sh::S, ST_S = Sh::ST_S, ST_N = Sh::ST_N;
     constexpr int R = N % NB;
@@ -498,6 +511,9 @@ inline void run_batch(const bool soa, const int Eb, const int EP,
                       Fwd fwd, Rev rev)
 {
     constexpr int nm3 = Dims<nq>::nm3, nq3 = Dims<nq>::nq3;
+    assert(Eb >= 1 && Eb <= EP && EP % LANES == 0);
+    assert(!soa || EP == LANES);                                    // SoA chunks hold 16 elements
+    assert(aligned128(w0) && aligned128(w1));
 
     // step-1
     const float* src = in_e;
@@ -574,12 +590,21 @@ enum class KernelKind { amx, neon, ref, refv };
 
 struct Options {
     KernelKind kernel = KernelKind::amx;
-    bool soa     = false;   // in/JxW/out already elements-on-lanes, chunks of 16
-    bool dense   = false;   // dense element-matrix path (AMX only)
-    int  batch   = LANES;   // elements per batch; always 16 for dense, neon or soa
-    int  neon_nb = 4;       // NEON output rows per register block
+    bool soa      = false;  // in/JxW/out already elements-on-lanes, chunks of 16
+    bool dense    = false;  // dense element-matrix path (AMX only)
+    bool parallel = true;   // OpenMP over batches; false runs the same code on one thread
+    int  batch    = LANES;  // elements per batch; always 16 for dense, neon or soa
+    int  neon_nb  = 4;      // NEON output rows per register block
 
-    // Read BK_KERNEL / BK_LAYOUT / BK_DENSE / BK_BATCH / BK_NEON_NB;
+    // The invariants the kernels rely on (every Options passed to a Kernel must hold them).
+    bool valid() const {
+        const bool nb_ok = neon_nb == 1 || neon_nb == 2 || neon_nb == 4 || neon_nb == 6 || neon_nb == 8;
+        const bool fixed_batch = dense || soa || kernel != KernelKind::amx;
+        return nb_ok && batch > 0 && batch % LANES == 0 && (!fixed_batch || batch == LANES)
+            && (kernel == KernelKind::amx || !dense);
+    }
+
+    // Read BK_KERNEL / BK_LAYOUT / BK_DENSE / BK_BATCH / BK_NEON_NB / BK_PARALLEL;
     // dense_default applies when BK_DENSE is unset.
     static Options from_env(bool dense_default) {
         auto env_int = [](const char* name, int fallback) {
@@ -606,6 +631,8 @@ struct Options {
         }
         const int nb = env_int("BK_NEON_NB", 4);
         o.neon_nb = (nb == 8 || nb == 6 || nb == 4 || nb == 2 || nb == 1) ? nb : 4;
+        o.parallel = env_int("BK_PARALLEL", 1) != 0;
+        assert(o.valid());
         return o;
     }
 };
@@ -617,12 +644,14 @@ inline std::size_t soa_size(std::size_t nelmt, std::size_t n) {
     return round_up(nelmt, LANES) * n + QUAD_PAD;
 }
 inline std::size_t soa_index(std::size_t e, std::size_t x, std::size_t n) {
+    assert(x < n);
     return ((e / LANES) * n + x) * LANES + e % LANES;
 }
 
 // Per-thread scratch space, 128-byte aligned, kept across calls so the timed
 // kernel does not allocate.  AMX state is per thread as well.
 inline float* workspace(std::size_t nfloats) {
+    assert(nfloats > 0);
     struct Buf {
         float* p = nullptr;
         std::size_t n = 0;
@@ -646,7 +675,10 @@ public:
     using Dims<nq>::nq3;
 
     Kernel(const float* basis, const Options& o)
-        : o_(o), C_(basis), D_(o.dense ? std::make_unique<const DenseCoef<nq>>(basis) : nullptr) {}
+        : o_(o), C_(basis), D_(o.dense ? std::make_unique<const DenseCoef<nq>>(basis) : nullptr)
+    {
+        assert(o.valid());
+    }
 
     void operator()(const std::size_t nelmt, const float* __restrict__ JxW,
                     const float* __restrict__ in, float* __restrict__ out) const
@@ -690,11 +722,13 @@ private:
         const std::size_t nbatch = ceil_div(nelmt, EP);
         // quad-load overrun, rounded up so that w1 is 128-byte aligned too
         const std::size_t wsz = round_up(nq3 * EP + QUAD_PAD, 32);
+        assert(wsz % 32 == 0);
 
-        #pragma omp parallel
+        #pragma omp parallel if(o_.parallel)
         {
             float* w0 = workspace(2 * wsz);
             float* w1 = w0 + wsz;
+            assert(aligned128(w0) && aligned128(w1));
             if (use_amx) {
                 AMX_SET();                // every thread enables AMX for itself
             }
@@ -720,15 +754,16 @@ private:
 // ---------------------------------------------------------------------------
 template <typename T, int nq>
 void SumFactorizationRef(const std::size_t nelmt, const T* basis, const T* JxW,
-                         const T* in, T* out)
+                         const T* in, T* out, [[maybe_unused]] const bool parallel)
 {
+    static_assert(nq >= 2, "at least one mode per direction");
     constexpr int nm = nq - 1;
     using nm_cview = ndview<const T, nm, nm, nm>;
     using nm_view  = ndview<T, nm, nm, nm>;
     using nq_cview = ndview<const T, nq, nq, nq>;
     const ndview<const T, nm, nq> B{basis};
 
-    #pragma omp parallel for schedule(guided)
+    #pragma omp parallel for schedule(guided) if(parallel)
     for (std::size_t e = 0; e < nelmt; ++e) {
         T scratch[2 * nq * nq * nq];
         const ndview<T, nq, nq, nq> wsp0{scratch};
@@ -839,8 +874,9 @@ void SumFactorizationRef(const std::size_t nelmt, const T* basis, const T* JxW,
 // ---------------------------------------------------------------------------
 template <typename T, int nq>
 void SumFactorizationRefV(const std::size_t nelmt, const T* basis, const T* JxW,
-                          const T* in, T* out)
+                          const T* in, T* out, [[maybe_unused]] const bool parallel)
 {
+    static_assert(nq >= 2, "at least one mode per direction");
     constexpr int nm = nq - 1, nm2 = nm * nm, nm3 = nm2 * nm, nq2 = nq * nq, nq3 = nq2 * nq;
     // B[i][p] (rows i) and BT[r][k] = B(k,r) (rows r), both row-contiguous
     T B[nm][nq], BT[nq][nm];
@@ -851,7 +887,7 @@ void SumFactorizationRefV(const std::size_t nelmt, const T* basis, const T* JxW,
         }
     }
 
-    #pragma omp parallel for schedule(guided)
+    #pragma omp parallel for schedule(guided) if(parallel)
     for (std::size_t e = 0; e < nelmt; ++e) {
         T w1[nq * nm2], w2[nq2 * nm], w3[nq3], w4[nq2 * nm], w5[nm * nq * nm];
         const T* e_in  = in  + e * nm3;
@@ -1040,9 +1076,9 @@ void run_test(const std::size_t nelmt, const int ntests)
     for (int t = 0; t < ntests; ++t) {
         auto start = high_resolution_clock::now();
         if (opt.kernel == KernelKind::refv) {
-            SumFactorizationRefV<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), out.data());
+            SumFactorizationRefV<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), out.data(), opt.parallel);
         } else if (opt.kernel == KernelKind::ref) {
-            SumFactorizationRef<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), out.data());
+            SumFactorizationRef<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), out.data(), opt.parallel);
         } else {
             kernel(nelmt, d_JxW, d_in, d_out);
         }
@@ -1063,7 +1099,9 @@ void run_test(const std::size_t nelmt, const int ntests)
 
     int nthreads = 1;
 #ifdef _OPENMP
-    nthreads = omp_get_max_threads();
+    if (opt.parallel) {
+        nthreads = omp_get_max_threads();
+    }
 #endif
     const char* label = opt.kernel == KernelKind::refv ? "reference, loops interchanged"
                       : opt.kernel == KernelKind::ref  ? "reference"
@@ -1081,7 +1119,7 @@ void run_test(const std::size_t nelmt, const int ntests)
         return;
     }
     std::vector<T> ref(nelmt * nm3);
-    SumFactorizationRef<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), ref.data());
+    SumFactorizationRef<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), ref.data(), opt.parallel);
     double max_err = 0, max_ref = 0;
     for (std::size_t x = 0; x < size_inout; ++x) {
         max_err = std::max(max_err, double(std::fabs(out[x] - ref[x])));

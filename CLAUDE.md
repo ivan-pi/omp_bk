@@ -18,3 +18,10 @@ holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`).
 - One statement per line; do not put several statements on one line
   (a one-statement function body may stay on the function's line).
 - Use pre-increment (`++i`) in loop counters.
+- State preconditions and invariants as `static_assert` where the value is a
+  compile-time constant and as `assert` otherwise; keep runtime asserts at
+  batch granularity or coarser, never inside the per-plane hot loops
+  (the benchmark builds without `-DNDEBUG`).
+- OpenMP regions take `if(parallel)` from the options so the same binary
+  runs single-threaded (`BK_PARALLEL=0`); a flag only used by a pragma is
+  marked `[[maybe_unused]]` for builds without OpenMP.
