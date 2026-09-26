@@ -43,3 +43,33 @@ make CXX=clang++
 
 Each run prints the achieved `GDoF/s` and effective `GB/s`, followed by the
 solution norm (useful as a quick correctness check).
+
+## Apple AMX version of BK1
+
+`amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX
+coprocessor; elsewhere `amx/amx.h` emulates the AMX instructions in
+software, so the kernel logic can be checked on any machine. The same binary
+also runs the CPU baselines (`BK_KERNEL=neon`: 4-wide NEON FMAs across the
+elements of a batch; `BK_KERNEL=refv`: the reference with unit-stride inner
+loops). The header of `amx/BK1_amx.cpp` lists all environment variables.
+
+```sh
+make BK1 BK1_amx bw_test amx_pipe     # accel_gemm needs macOS (Accelerate)
+./BK1_amx <p> [nelmt] [ntests]        # same arguments as BK1, p = 1..14
+BK_KERNEL=neon BK_LAYOUT=soa ./BK1_amx 4
+
+amx/scripts/validate.sh               # every kernel against the reference; exit 1 on failure
+amx/scripts/throughput.sh results.csv # sweep (all kernels from BK1_amx): kernel,p,target,nelmt,dofs,gdofs,gbs
+amx/scripts/high_order.sh results_high.csv   # the same for p = 9..14 (AMX binary only)
+OUT=tune.csv amx/scripts/tune.sh      # best layout/path/batch per order
+./bw_test    > bw.csv                 # bandwidth and FMA roofs: test,threads,bytes,seconds,GB_per_s
+./amx_pipe   > pipe.txt               # AMX load-to-use and store behaviour (one unit)
+./accel_gemm > gemm.csv               # Accelerate sgemm calibration (macOS)
+
+amx/scripts/plot_throughput.py results.csv throughput.png   # per kernel and order, AMX/NEON speedup
+amx/scripts/plot_roofline.py results.csv bw.csv roofline.png # plateaus against the roofs
+```
+
+The scripts find `BK1` and `BK1_amx` in the repository root and run from
+any directory; set `BK1_AMX=...` or `BK1=...` to use other builds. The
+plots need matplotlib.

@@ -2,26 +2,33 @@
 # throughput.sh -- CEED-style throughput sweep: GDoF/s versus problem size,
 # log-spaced from DOF_MIN to DOF_MAX, for each polynomial order and kernel.
 #
-# usage:  ./throughput.sh [results.csv]
+# usage:  ./throughput.sh [results.csv]        (high_order.sh: the same for p = 9..14)
 # env:    ORDERS="1 2 3 4 5 6 7 8"   polynomial orders
 #         DOF_MIN=1e4 DOF_MAX=1e8    problem-size range in degrees of freedom
 #         PPD=4                      points per decade
 #         NTESTS=5                   repetitions per point (driver takes the minimum)
-#         KERNELS="serial omp amx_aos amx_soa"
+#         KERNELS="serial omp omp_v neon_aos neon_soa amx_aos amx_soa"
+#           all from the AMX binary (BK1_amx):
+#           serial = the reference kernel (BK1.cpp's loops) on one thread
+#                    (BK_KERNEL=ref BK_PARALLEL=0)
+#           omp    = the reference kernel, OpenMP over elements (BK_KERNEL=ref)
+#           omp_v  = the reference loops interchanged for unit-stride inner
+#                    loops, OpenMP over elements (BK_KERNEL=refv)
 #         SERIAL_MAX=1e7             cap for the serial kernel (it is slow)
-#         OMP_NUM_THREADS            threads for omp / amx (default: cores - 1)
+#         OMP_NUM_THREADS            threads (default: cores - 1, the AMX driver's own default)
 #
 # Output CSV columns: kernel,p,target,nelmt,dofs,gdofs,gbs
 #   target = the log-spaced size point, dofs = nelmt * (p+1)^3 actually run
 # Each point is one run of the driver; parse failures are recorded as NaN.
 
+. "$(dirname "$0")/common.sh"
 OUT=${1:-results.csv}
 ORDERS=${ORDERS:-"1 2 3 4 5 6 7 8"}
 DOF_MIN=${DOF_MIN:-1e4}
 DOF_MAX=${DOF_MAX:-1e8}
 PPD=${PPD:-4}
 NTESTS=${NTESTS:-5}
-KERNELS=${KERNELS:-"serial omp amx_aos amx_soa"}
+KERNELS=${KERNELS:-"serial omp omp_v neon_aos neon_soa amx_aos amx_soa"}
 SERIAL_MAX=${SERIAL_MAX:-1e7}
 ncpu=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-$(( ncpu > 1 ? ncpu - 1 : 1 ))}
@@ -35,13 +42,16 @@ sizes=$(awk -v lo="$DOF_MIN" -v hi="$DOF_MAX" -v ppd="$PPD" 'BEGIN {
 run() {   # run <kernel> <p> <nelmt>  -> "gdofs gbs"
   local k=$1 p=$2 n=$3 out
   case $k in
-    serial)  out=$(./bk1     $p $n $NTESTS) ;;
-    omp)     out=$(./bk1_omp $p $n $NTESTS) ;;
-    amx_aos) out=$(BK_LAYOUT=aos ./bk1_amx $p $n $NTESTS) ;;
-    amx_soa) out=$(BK_LAYOUT=soa ./bk1_amx $p $n $NTESTS) ;;
+    serial)  out=$(BK_KERNEL=ref BK_PARALLEL=0 $BK1_AMX $p $n $NTESTS) ;;
+    omp)     out=$(BK_KERNEL=ref $BK1_AMX $p $n $NTESTS) ;;
+    omp_v)    out=$(BK_KERNEL=refv $BK1_AMX $p $n $NTESTS) ;;
+    neon_aos) out=$(BK_KERNEL=neon BK_LAYOUT=aos $BK1_AMX $p $n $NTESTS) ;;
+    neon_soa) out=$(BK_KERNEL=neon BK_LAYOUT=soa $BK1_AMX $p $n $NTESTS) ;;
+    amx_aos) out=$(BK_LAYOUT=aos $BK1_AMX $p $n $NTESTS) ;;
+    amx_soa) out=$(BK_LAYOUT=soa $BK1_AMX $p $n $NTESTS) ;;
     *) echo "unknown kernel $k" >&2; return 1 ;;
   esac
-  echo "$out" | sed -n 's/.*GDoF\/s = \([0-9.e+-]*\) GB\/s = \([0-9.e+-]*\).*/\1 \2/p'
+  echo "$out" | rates
 }
 
 echo "kernel,p,target,nelmt,dofs,gdofs,gbs" > "$OUT"

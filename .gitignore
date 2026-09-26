@@ -2,4 +2,8 @@
 BK1
 BK3
 BK5
+BK1_amx
+bw_test
+amx_pipe
+accel_gemm
 *.o

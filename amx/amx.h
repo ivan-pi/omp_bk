@@ -11,7 +11,8 @@
 // machine.  AMX_HW is 1 when the real hardware is used, 0 otherwise.
 //
 // Emulated subset (operand bitfields as documented by corsix/amx):
-//   ldx ldy ldz stx sty stz     64-byte moves, pair (bit 62) and quad (bit 60)
+//   ldx ldy ldz stx sty stz     64-byte moves, pair (bit 62) and quad (bit 60);
+//                               pair/quad addresses must be 128-byte aligned
 //   fma32 fma64 fms32 fms64     matrix and vector mode, X/Y byte offsets,
 //                               ALU select (bits 27-29), lane enables (32-46);
 //                               f16 operand widening (bits 60/61) not supported
@@ -85,6 +86,12 @@ inline uint64_t fma(int zrow, int xoff, int yoff, int alu = 0, bool vector = fal
          | (uint64_t(xoff & 0x1ff) << 10)
          | uint64_t(yoff & 0x1ff);
 }
+
+// f32 matrix mode: the outer product's row j of tile 0-3 lives in Z row 4j + tile.
+constexpr int zrow_f32(int tile, int row) { return 4 * row + tile; }
+// ALU modes of fma (see above): accumulate z += x*y, or overwrite z = x*y.
+constexpr int ALU_MAC = 0;
+constexpr int ALU_MUL = 1;
 
 // extrx: X[xreg] = Y[yreg];  extry: Y[yreg] = X[xreg]  (whole registers)
 inline uint64_t extrx_copy(int xreg, int yreg) {
@@ -174,36 +181,57 @@ struct State {
     bool enabled = false;
 };
 
-inline State& state() { static thread_local State s{}; return s; }
+inline State& state() {
+    static thread_local State s{};
+    return s;
+}
 
 [[noreturn]] inline void fail(const char* what) {
     std::fprintf(stderr, "amx emulation: %s\n", what);
     std::abort();
 }
-inline void check_enabled() { if (!state().enabled) fail("instruction used while AMX is disabled (missing AMX_SET)"); }
+inline void check_enabled() {
+    if (!state().enabled) {
+        fail("instruction used while AMX is disabled (missing AMX_SET)");
+    }
+}
 
 inline void set() { state().enabled = true; }
 inline void clr() { state().enabled = false; }
 
 // --- 64-byte moves ---------------------------------------------------------
+// A single register may use any address; a pair or quad transfer must be
+// 128-byte aligned (corsix/amx ldst.md), which is enforced here so that a
+// kernel checked under emulation also meets the hardware's requirement.
+inline void check_multi_align(const char* what, uint64_t opnd) {
+    if ((opnd & (uint64_t(1) << 62)) && (opnd & op::PTR_MASK & 127)) {
+        std::fprintf(stderr, "amx emulation: %s pair/quad transfer at address %% 256 = %u\n",
+                     what, unsigned(opnd & 255));
+        fail("pair/quad load or store with an address that is not 128-byte aligned");
+    }
+}
 inline void ld_common(Reg* regs, uint64_t opnd, unsigned regmask) {
     check_enabled();
+    check_multi_align("load", opnd);
     const unsigned rn = (opnd >> 56) & regmask;
     const uint8_t* src = reinterpret_cast<const uint8_t*>(uintptr_t(opnd & op::PTR_MASK));
     std::memcpy(regs + rn, src, 64);
     if (opnd & (uint64_t(1) << 62)) {
         const unsigned n = (regmask <= 15 && (opnd & (uint64_t(1) << 60))) ? 4 : 2;
-        for (unsigned k = 1; k < n; ++k)
+        for (unsigned k = 1; k < n; ++k) {
             std::memcpy(regs + ((rn + k) & regmask), src + 64 * k, 64);
+        }
     }
 }
 inline void st_common(const Reg* regs, uint64_t opnd, unsigned regmask) {
     check_enabled();
+    check_multi_align("store", opnd);
     const unsigned rn = (opnd >> 56) & regmask;
     uint8_t* dst = reinterpret_cast<uint8_t*>(uintptr_t(opnd & op::PTR_MASK));
     std::memcpy(dst, regs + rn, 64);
-    if (opnd & (uint64_t(1) << 62))
+    if (opnd & (uint64_t(1) << 62)) {
         std::memcpy(dst + 64, regs + ((rn + 1) & regmask), 64);
+    }
 }
 inline void ldx(uint64_t o) { ld_common(state().x, o, 7); }
 inline void ldy(uint64_t o) { ld_common(state().y, o, 7); }
@@ -217,12 +245,17 @@ inline void stz(uint64_t o) { st_common(state().z, o, 63); }
 inline void window(void* dst, const Reg* regs, unsigned off) {
     const uint8_t* base = reinterpret_cast<const uint8_t*>(regs);
     uint8_t* d = static_cast<uint8_t*>(dst);
-    for (unsigned b = 0; b < 64; ++b) d[b] = base[(off + b) & 511];
+    for (unsigned b = 0; b < 64; ++b) {
+        d[b] = base[(off + b) & 511];
+    }
 }
 inline void window_store(Reg* regs, unsigned off, const uint8_t* src, uint64_t byte_enable) {
     uint8_t* base = reinterpret_cast<uint8_t*>(regs);
-    for (unsigned b = 0; b < 64; ++b)
-        if ((byte_enable >> b) & 1) base[(off + b) & 511] = src[b];
+    for (unsigned b = 0; b < 64; ++b) {
+        if ((byte_enable >> b) & 1) {
+            base[(off + b) & 511] = src[b];
+        }
+    }
 }
 
 // Lane enable -> per-byte mask. `field` is the 7- or 9-bit enable field,
@@ -230,22 +263,26 @@ inline void window_store(Reg* regs, unsigned off, const uint8_t* src, uint64_t b
 inline uint64_t lane_mask(uint32_t field, unsigned g, unsigned bits) {
     const uint32_t mode = (bits >= 9) ? (field >> 6) & 7 : (field >> 5) & 3;
     uint32_t val = field;
-    if (mode != 0) val *= g;
+    if (mode != 0) {
+        val *= g;
+    }
     val &= 0x3f;
     const uint64_t all = ~uint64_t(0);
     switch (mode) {
     case 0: {
         if (val == 1 || val == 2) {
             uint64_t m = ~(all << g) << (g & -(val & 1));   // odd (1) / even (2) lanes
-            for (unsigned gg = g; (gg <<= 1) < 64;) m |= m << gg;
+            for (unsigned gg = g; (gg <<= 1) < 64;) {
+                m |= m << gg;
+            }
             return m;
         }
         return (val < (bits >= 9 ? 6u : 3u)) ? all : 0;
     }
     case 1: return (~(all << g)) << val;                   // only lane #N
-    case 2: if (val == 0) return all; return ~(all << val);
+    case 2: return (val == 0) ? all : ~(all << val);       // first N lanes (0 = all)
     case 4: return ~(all << val);                          // first N lanes
-    case 3: if (val == 0) return all; return ~(all >> val);
+    case 3: return (val == 0) ? all : ~(all >> val);       // last N lanes (0 = all)
     case 5: return ~(all >> val);                          // last N lanes
     default: return 0;
     }
@@ -283,8 +320,9 @@ template <typename T> inline T default_nan(T v) { return std::isnan(v) ? std::nu
 
 template <typename T, bool SUB> inline void fma_impl(uint64_t o) {
     check_enabled();
-    if (sizeof(T) == 4 && (o & ((uint64_t(1) << 61) | (uint64_t(1) << 60))))
+    if (sizeof(T) == 4 && (o & ((uint64_t(1) << 61) | (uint64_t(1) << 60)))) {
         fail("fma32/fms32 with f16 operands is not emulated");
+    }
     constexpr unsigned N = 64 / sizeof(T);          // lanes
     State& s = state();
     const unsigned yoff = o & 0x1ff, xoff = (o >> 10) & 0x1ff, zrow = (o >> 20) & 63;
@@ -296,13 +334,17 @@ template <typename T, bool SUB> inline void fma_impl(uint64_t o) {
     window(x, s.x, xoff);
     window(y, s.y, yoff);
     for (unsigned i = 0; i < N; ++i) {
-        if (!((xen >> (i * sizeof(T))) & 1)) continue;
+        if (!((xen >> (i * sizeof(T))) & 1)) {
+            continue;
+        }
         if (vector) {
             T& z = reinterpret_cast<T*>(s.z[zrow].u8)[i];
             z = default_nan(SUB ? alu_fms(x[i], y[i], z, mode) : alu_fma(x[i], y[i], z, mode));
         } else {
             for (unsigned j = 0; j < N; ++j) {
-                if (!((yen >> (j * sizeof(T))) & 1)) continue;
+                if (!((yen >> (j * sizeof(T))) & 1)) {
+                    continue;
+                }
                 T& z = reinterpret_cast<T*>(s.z[j * sizeof(T) + (zrow & (sizeof(T) - 1))].u8)[i];
                 z = default_nan(SUB ? alu_fms(x[i], y[j], z, mode) : alu_fma(x[i], y[j], z, mode));
             }
@@ -337,14 +379,19 @@ inline void extrx(uint64_t o) {
         const uint32_t field = (o >> 32) & 0x1ff;
         uint8_t buf[64];
         std::memcpy(buf, s.z[zrow].u8, 64);
-        if (field == 3) std::memset(buf, 0, 64);
+        if (field == 3) {
+            std::memset(buf, 0, 64);
+        }
         window_store(dst, o & 0x1ff, buf, lane_mask(field, g, 9));
     } else if (o & (uint64_t(1) << 27)) {                    // extrx copy
         std::memcpy(s.x + ((o >> 16) & 7), s.y + (zrow & 7), 64);
     } else {                                                 // extrh, 26=0 -> X
         unsigned g = 8 >> ((o >> 28) & 3);
         uint64_t en = ~uint64_t(0);
-        if (g == 1) { g = 2; en = 0x5555555555555555ull; }
+        if (g == 1) {
+            g = 2;
+            en = 0x5555555555555555ull;
+        }
         en &= lane_mask((o >> 41) & 0x7f, g, 7);
         window_store(s.x, (o >> 10) & 0x1ff, s.z[zrow].u8, en);
     }
@@ -371,7 +418,10 @@ inline void extry(uint64_t o) {
     } else {                                                 // extrv, 26=0 -> Y
         g = 8 >> ((o >> 28) & 3);
         en = ~uint64_t(0);
-        if (g == 1) { g = 2; en = 0x5555555555555555ull; }
+        if (g == 1) {
+            g = 2;
+            en = 0x5555555555555555ull;
+        }
         field = (o >> 32) & 0x7f;
         en &= lane_mask(field, g, 7);
         dst = s.y;
@@ -382,7 +432,9 @@ inline void extry(uint64_t o) {
         const unsigned row = (j & ~(g - 1)) | (zcol & (g - 1));
         std::memcpy(buf + j, s.z[row].u8 + (zcol & ~(g - 1)), g);
     }
-    if (field == 3) std::memset(buf, 0, 64);
+    if (field == 3) {
+        std::memset(buf, 0, 64);
+    }
     window_store(dst, o & 0x1ff, buf, en);
 }
 
@@ -392,7 +444,9 @@ inline void unsupported(uint64_t) { fail("instruction not emulated (ldzi/stzi/fm
 inline void dump_z_f32(int tile, std::FILE* f = stdout) {
     const State& s = state();
     for (int j = 0; j < 16; ++j) {
-        for (int i = 0; i < 16; ++i) std::fprintf(f, "%10.4g ", s.z[4 * j + (tile & 3)].f32[i]);
+        for (int i = 0; i < 16; ++i) {
+            std::fprintf(f, "%10.4g ", s.z[4 * j + (tile & 3)].f32[i]);
+        }
         std::fputc('\n', f);
     }
 }
