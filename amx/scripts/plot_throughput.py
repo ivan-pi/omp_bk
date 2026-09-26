@@ -33,11 +33,14 @@ with open(src) as f:
         target = int(row.get("target") or row["dofs"])
         data[row["kernel"]][int(row["p"])].append((int(row["dofs"]), g, target))
 
-labels = {"serial": "serial", "omp": "OpenMP (scalar)",
+labels = {"serial": "serial", "omp": "OpenMP (scalar)", "omp_v": "OpenMP, loops interchanged",
+          "neon_aos": "NEON, element-major", "neon_soa": "NEON, elements-on-lanes",
           "amx_aos": "AMX, element-major", "amx_soa": "AMX, elements-on-lanes"}
 kernels = [k for k in labels if k in data] + [k for k in data if k not in labels]
 
-n = len(kernels) + (2 if "omp" in data else 1)
+# speedup reference: the best NEON kernel, or OpenMP scalar if there is no NEON data
+refk = next((k for k in ("neon_soa", "neon_aos", "omp") if k in data), None)
+n = len(kernels) + (2 if refk else 1)
 cols = min(n, 3)
 rows = (n + cols - 1) // cols
 fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 4.0 * rows), squeeze=False)
@@ -93,10 +96,10 @@ ax.add_artist(leg1)
 ax.legend([Line2D([], [], marker="o", ls="", color=color[p]) for p in orders],
           [f"p = {p}" for p in orders], fontsize=7, ncol=2, loc="lower right", title="winning order")
 
-# speedup panel: AMX kernels over the OpenMP scalar kernel at equal order
-if "omp" in data:
+# speedup panel: AMX kernels over the reference kernel at equal order
+if refk:
     ax = axes[len(kernels) + 1]
-    ref = {p: {t: g for _, g, t in pts} for p, pts in data["omp"].items()}
+    ref = {p: {t: g for _, g, t in pts} for p, pts in data[refk].items()}
     linestyle = {"amx_aos": "--", "amx_soa": "-"}
     for k in ("amx_aos", "amx_soa"):
         if k not in data:
@@ -107,8 +110,8 @@ if "omp" in data:
                     label=f"p = {p}" if k == "amx_soa" else None)
     ax.axhline(1.0, color="k", lw=0.8)
     ax.set_yscale("log")
-    style(ax, "AMX speedup over OpenMP at equal order\n(solid: elements-on-lanes, dashed: element-major)",
-          ylabel="speedup", ylim=None)
+    style(ax, f"AMX speedup over {labels.get(refk, refk)} at equal order\n"
+              "(solid: elements-on-lanes, dashed: element-major)", ylabel="speedup", ylim=None)
     ax.legend(fontsize=7, ncol=2, loc="lower right")
 
 for ax in axes[n:]:

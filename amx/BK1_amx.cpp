@@ -1,4 +1,6 @@
-// BK1_amx.cpp -- BK1 mass-operator sum factorization on the Apple AMX units.
+// BK1_amx.cpp -- BK1 mass-operator sum factorization on the Apple AMX units,
+// with a NEON (GNU vector) kernel on the same elements-on-lanes layout as the
+// CPU baseline.
 //
 // Needs amx.h (instruction layer) next to this file and bk_common.h in the
 // parent directory.  From the repository root:  make BK1_amx
@@ -17,6 +19,14 @@
 //                SoA layout always use 16)
 //   OMP_NUM_THREADS  default: number of cores minus one
 //   BK_DENSE=0/1 dense element-matrix path (default: on for p <= 2)
+//   BK_KERNEL=neon  cross-element NEON kernel (GNU vector types) instead of
+//                AMX: the same layout and contractions, 4-wide FMAs in the core
+//   BK_KERNEL=ref   the element-at-a-time reference kernel (BK1.cpp's loops,
+//                reduction innermost), OpenMP over elements
+//   BK_KERNEL=refv  the same with loops interchanged so every inner loop is
+//                unit-stride and vectorizes (the CPU-correct loop order)
+//   BK_NEON_NB=1|2|4|6|8  output rows per NEON register block (default 4;
+//                4 NB + 5 live registers, so up to 6 fits the 32 NEON registers)
 //   BK_LAYOUT=soa  store in/JxW/out elements-on-lanes (chunks of 16) so the
 //                kernel runs without any layout conversion
 //   BK_NOREF=1   skip the serial reference comparison (throughput sweeps)
@@ -30,6 +40,7 @@
 //   (i,j,k) -> (p,j,k) -> (p,q,k) -> (p,q,r) [*JxW] -> (i,q,r) -> (i,j,r) -> (i,j,k)
 
 #include <iostream>
+#include <string>
 #include <cmath>
 #include <array>
 #include <vector>
@@ -345,7 +356,144 @@ inline void scale_lanes(float* __restrict__ w, const float* __restrict__ JxW, in
 }
 
 // ---------------------------------------------------------------------------
-// One batch of Eb <= EP elements: layout handling shared by both paths.
+// NEON kernel (GNU vector types): the same elements-on-lanes layout and the
+// same six contractions as contract_dim, but the 16 x N x S product for one
+// free-index combination is done with 4-wide vector FMAs in the core instead
+// of outer products on the unit -- NB x 4 accumulator registers (NB output
+// rows x 4 vectors of 4 elements), 4 registers for the plane, one broadcast
+// coefficient.  This is the honest CPU baseline: the blocked-across-cells
+// structure of deal.II / libCEED on the same layout.  Batches are one lane
+// chunk (EP = 16).
+// ---------------------------------------------------------------------------
+#if defined(__clang__)
+#define BK_UNROLL _Pragma("clang loop unroll(full)")
+#else
+#define BK_UNROLL
+#endif
+
+// out(n0 + n; e) = sum_s in(s; e) * coef[s][n0 + n]  for n < NB, lanes e < 16;
+// plane strides ST_S (input) and ST_N (output) in units of 16 floats.
+template <int NB, int S, int ST_S, int ST_N>
+inline void neon_block(const int n0, const float* __restrict__ pin, float* __restrict__ pout,
+                       const float (*__restrict__ coef)[16])
+{
+    v4f acc[NB][4] = {};
+    auto plane = [&](int s) {
+        const float* x = pin + std::size_t(s) * ST_S * LANES;
+        const v4f x0 = v4_load(x);
+        const v4f x1 = v4_load(x + 4);
+        const v4f x2 = v4_load(x + 8);
+        const v4f x3 = v4_load(x + 12);
+        for (int n = 0; n < NB; ++n) {
+            const float c = coef[s][n0 + n];
+            const v4f b = {c, c, c, c};
+            acc[n][0] += x0 * b;
+            acc[n][1] += x1 * b;
+            acc[n][2] += x2 * b;
+            acc[n][3] += x3 * b;
+        }
+    };
+    // Full unroll of the plane loop pays for short loops (S <= 8: removes the
+    // loop and fill/drain overhead, +15-30% at p <= 4 on M2 Pro); for longer
+    // loops the straight-line bodies cost instruction footprint for no gain,
+    // so those are unrolled by two only.
+    if constexpr (S <= 8) {
+        BK_UNROLL
+        for (int s = 0; s < S; ++s) {
+            plane(s);
+        }
+    } else {
+        int s = 0;
+        for (; s + 2 <= S; s += 2) {
+            plane(s);
+            plane(s + 1);
+        }
+        if (s < S) {
+            plane(s);
+        }
+    }
+    for (int n = 0; n < NB; ++n) {
+        float* o = pout + std::size_t(n0 + n) * ST_N * LANES;
+        v4_store(o, acc[n][0]);
+        v4_store(o + 4, acc[n][1]);
+        v4_store(o + 8, acc[n][2]);
+        v4_store(o + 12, acc[n][3]);
+    }
+}
+
+// BK_NEON_NB: output rows per register block (1, 2, 4, 6 or 8; default 4)
+inline int neon_block_rows() {
+    static const int nb = [] {
+        auto v = get_env("BK_NEON_NB");
+        const int x = v ? std::atoi(v->c_str()) : 4;
+        return (x == 8 || x == 6 || x == 4 || x == 2 || x == 1) ? x : 4;
+    }();
+    return nb;
+}
+
+// out(.., n, ..; e) = sum_s in(.., s, ..; e) * coef[s][n], contracting index
+// position D of a field with extents (A0, A1, A2), one 16-lane chunk; all
+// extents and strides are compile-time constants, so the s-loop unrolls.
+template <int N, int D, int A0, int A1, int A2>
+inline void neon_contract(const float* __restrict__ in, float* __restrict__ out,
+                          const float (*__restrict__ coef)[16])
+{
+    constexpr int ext_in[3]  = {A0, A1, A2};
+    constexpr int ext_out[3] = {D == 0 ? N : A0, D == 1 ? N : A1, D == 2 ? N : A2};
+    constexpr int S = ext_in[D];
+    constexpr int st_in[3]  = {ext_in[1] * ext_in[2],  ext_in[2],  1};
+    constexpr int st_out[3] = {ext_out[1] * ext_out[2], ext_out[2], 1};
+    constexpr int u = (D == 0) ? 1 : 0, v = (D == 2) ? 1 : 2;     // the free index positions
+    constexpr int F = ext_in[u] * ext_in[v];
+    constexpr int ST_S = st_in[D], ST_N = st_out[D];
+
+    const int NB = neon_block_rows();
+    for (int f = 0; f < F; ++f) {
+        const int fu = f / ext_in[v], fv = f % ext_in[v];
+        const float* pin  = in  + std::size_t(fu * st_in[u]  + fv * st_in[v])  * LANES;
+        float*       pout = out + std::size_t(fu * st_out[u] + fv * st_out[v]) * LANES;
+        int n0 = 0;
+        for (; n0 + NB <= N; n0 += NB) {
+            switch (NB) {
+                case 8: neon_block<8, S, ST_S, ST_N>(n0, pin, pout, coef); break;
+                case 6: neon_block<6, S, ST_S, ST_N>(n0, pin, pout, coef); break;
+                case 4: neon_block<4, S, ST_S, ST_N>(n0, pin, pout, coef); break;
+                case 2: neon_block<2, S, ST_S, ST_N>(n0, pin, pout, coef); break;
+                default: neon_block<1, S, ST_S, ST_N>(n0, pin, pout, coef); break;
+            }
+        }
+        // tail: the largest blocks that still fit (only sizes N allows are instantiated)
+        while (n0 < N) {
+            const int r = N - n0;
+            if constexpr (N >= 4) {
+                if (r >= 4) {
+                    neon_block<4, S, ST_S, ST_N>(n0, pin, pout, coef);
+                    n0 += 4;
+                    continue;
+                }
+            }
+            if constexpr (N >= 3) {
+                if (r == 3) {
+                    neon_block<3, S, ST_S, ST_N>(n0, pin, pout, coef);
+                    n0 += 3;
+                    continue;
+                }
+            }
+            if constexpr (N >= 2) {
+                if (r == 2) {
+                    neon_block<2, S, ST_S, ST_N>(n0, pin, pout, coef);
+                    n0 += 2;
+                    continue;
+                }
+            }
+            neon_block<1, S, ST_S, ST_N>(n0, pin, pout, coef);
+            n0 += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One batch of Eb <= EP elements: layout handling shared by all three paths.
 // soa = false: in_e/JxW_e/out_e are element-major (e; idx).
 // soa = true : EP == 16 and in_e/JxW_e/out_e are already (idx; e) chunks; the
 //              kernel then reads in_e and writes out_e directly.
@@ -388,10 +536,12 @@ inline void run_batch(const bool soa, const int Eb, const int EP,
 
 struct Options {
     bool soa   = false;   // in/JxW/out already elements-on-lanes, chunks of 16
-    bool dense = false;   // dense element-matrix path
-    int  batch = LANES;   // elements per batch; always 16 for dense or soa
+    bool dense = false;   // dense element-matrix path (AMX)
+    bool neon  = false;   // NEON cross-element kernel instead of AMX
+    int  batch = LANES;   // elements per batch; always 16 for dense, neon or soa
 
-    // Read BK_LAYOUT / BK_DENSE / BK_BATCH; dense_default applies when BK_DENSE is unset.
+    // Read BK_LAYOUT / BK_DENSE / BK_KERNEL / BK_BATCH; dense_default applies
+    // when BK_DENSE is unset.
     static Options from_env(bool dense_default) {
         Options o;
         o.soa   = get_env("BK_LAYOUT").value_or("") == "soa";
@@ -399,10 +549,14 @@ struct Options {
         if (auto v = get_env("BK_DENSE")) {
             o.dense = std::atoi(v->c_str()) != 0;
         }
+        if (get_env("BK_KERNEL").value_or("amx") == "neon") {
+            o.neon  = true;
+            o.dense = false;
+        }
         if (auto v = get_env("BK_BATCH")) {
             o.batch = round_up(std::max(1, std::atoi(v->c_str())), LANES);
         }
-        if (o.dense || o.soa) {
+        if (o.dense || o.neon || o.soa) {
             o.batch = LANES;
         }
         return o;
@@ -463,7 +617,9 @@ public:
         {
             float* w0 = workspace(2 * wsz);
             float* w1 = w0 + wsz;
-            AMX_SET();                    // every thread enables AMX for itself
+            if (!o_.neon) {
+                AMX_SET();                // every thread enables AMX for itself
+            }
             #pragma omp for schedule(dynamic,4)
             for (std::size_t b = 0; b < nbatch; ++b) {
                 const std::size_t e0 = b * E;
@@ -471,13 +627,17 @@ public:
                 const float* in_e  = in  + e0 * nm3;     // element-major and SoA (E == 16) agree
                 const float* JxW_e = JxW + e0 * nq3;
                 float*       out_e = out + e0 * nm3;
-                if (o_.dense) {
+                if (o_.neon) {
+                    neon_batch(Eb, in_e, JxW_e, out_e, w0, w1);
+                } else if (o_.dense) {
                     dense_batch(Eb, in_e, JxW_e, out_e, w0, w1);
                 } else {
                     sumfact_batch(Eb, EP, in_e, JxW_e, out_e, w0, w1);
                 }
             }
-            AMX_CLR();
+            if (!o_.neon) {
+                AMX_CLR();
+            }
         }
     }
 
@@ -500,6 +660,23 @@ private:
                 contract_dim<nm>(0, nq, nq, nq, src, w0,  C.BT, EP);
                 contract_dim<nm>(1, nm, nq, nq, w0,  w1,  C.BT, EP);    // src (== w1) is consumed
                 contract_dim<nm>(2, nm, nm, nq, w1,  dst, C.BT, EP);
+            });
+    }
+
+    void neon_batch(int Eb, const float* in_e, const float* JxW_e, float* out_e,
+                    float* w0, float* w1) const
+    {
+        const Coef<nq>& C = C_;
+        run_batch<nq>(o_.soa, Eb, LANES, in_e, JxW_e, out_e, w0, w1,
+            [&](const float* src, float* dst) {     // (i,j,k) -> (p,j,k) -> (p,q,k) -> (p,q,r)
+                neon_contract<nq, 0, nm, nm, nm>(src, dst, C.Bp);
+                neon_contract<nq, 1, nq, nm, nm>(dst, w0,  C.Bp);
+                neon_contract<nq, 2, nq, nq, nm>(w0,  dst, C.Bp);
+            },
+            [&](const float* src, float* dst) {     // (p,q,r) -> (i,q,r) -> (i,j,r) -> (i,j,k)
+                neon_contract<nm, 0, nq, nq, nq>(src, w0,  C.BT);
+                neon_contract<nm, 1, nm, nq, nq>(w0,  w1,  C.BT);      // src (== w1) is consumed
+                neon_contract<nm, 2, nm, nm, nq>(w1,  dst, C.BT);
             });
     }
 
@@ -527,7 +704,8 @@ private:
 } // namespace amx
 
 // ---------------------------------------------------------------------------
-// Serial reference (body of BK1.cpp without the target pragmas)
+// Reference kernel (body of BK1.cpp without the target pragmas), OpenMP over
+// elements; it is also the check every other kernel is compared against.
 // ---------------------------------------------------------------------------
 template <typename T, int nq>
 void SumFactorizationRef(const std::size_t nelmt, const T* basis, const T* JxW,
@@ -539,6 +717,7 @@ void SumFactorizationRef(const std::size_t nelmt, const T* basis, const T* JxW,
     using nq_cview = ndview<const T, nq, nq, nq>;
     const ndview<const T, nm, nq> B{basis};
 
+    #pragma omp parallel for schedule(guided)
     for (std::size_t e = 0; e < nelmt; ++e) {
         T scratch[2 * nq * nq * nq];
         const ndview<T, nq, nq, nq> wsp0{scratch};
@@ -637,6 +816,136 @@ void SumFactorizationRef(const std::size_t nelmt, const T* basis, const T* JxW,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Reference with the loops interchanged for CPU SIMD: every contraction runs
+// its reduction index OUTSIDE and a contiguous free (or output) index in the
+// innermost loop, so the compiler can vectorize with unit-stride loads and no
+// gathers -- the layout choice that the reference above lacks (there the
+// reduction is innermost with stride-nq^2 loads, which stays scalar for
+// p >= 2).  Same arithmetic, different summation order.
+//   in(i,j,k) -i-> w1(p,j,k) -j-> w2(q,p,k) -k-> w3(p,q,r) [*JxW]
+//             -r-> w4(q,p,k) -q-> w5(j,p,k) -p-> out(i,j,k)
+// ---------------------------------------------------------------------------
+template <typename T, int nq>
+void SumFactorizationRefV(const std::size_t nelmt, const T* basis, const T* JxW,
+                          const T* in, T* out)
+{
+    constexpr int nm = nq - 1, nm2 = nm * nm, nm3 = nm2 * nm, nq2 = nq * nq, nq3 = nq2 * nq;
+    // B[i][p] (rows i) and BT[r][k] = B(k,r) (rows r), both row-contiguous
+    T B[nm][nq], BT[nq][nm];
+    for (int i = 0; i < nm; ++i) {
+        for (int p = 0; p < nq; ++p) {
+            B[i][p]  = basis[i * nq + p];
+            BT[p][i] = basis[i * nq + p];
+        }
+    }
+
+    #pragma omp parallel for schedule(guided)
+    for (std::size_t e = 0; e < nelmt; ++e) {
+        T w1[nq * nm2], w2[nq2 * nm], w3[nq3], w4[nq2 * nm], w5[nm * nq * nm];
+        const T* e_in  = in  + e * nm3;
+        const T* e_JxW = JxW + e * nq3;
+        T*       e_out = out + e * nm3;
+
+        // w1(p; j,k) = sum_i in(i; j,k) B(i,p)          inner: (j,k) contiguous, nm^2
+        for (int p = 0; p < nq; ++p) {
+            T* w = w1 + p * nm2;
+            for (int x = 0; x < nm2; ++x) {
+                w[x] = T(0);
+            }
+            for (int i = 0; i < nm; ++i) {
+                const T b = B[i][p];
+                const T* v = e_in + i * nm2;
+                for (int x = 0; x < nm2; ++x) {
+                    w[x] += v[x] * b;
+                }
+            }
+        }
+        // w2(q,p; k) = sum_j w1(p,j; k) B(j,q)          inner: k contiguous, nm
+        for (int q = 0; q < nq; ++q) {
+            for (int p = 0; p < nq; ++p) {
+                T* w = w2 + (q * nq + p) * nm;
+                for (int k = 0; k < nm; ++k) {
+                    w[k] = T(0);
+                }
+                for (int j = 0; j < nm; ++j) {
+                    const T b = B[j][q];
+                    const T* v = w1 + (p * nm + j) * nm;
+                    for (int k = 0; k < nm; ++k) {
+                        w[k] += v[k] * b;
+                    }
+                }
+            }
+        }
+        // w3(p,q; r) = sum_k w2(q,p; k) B(k,r)          inner: r contiguous (basis row), nq
+        for (int p = 0; p < nq; ++p) {
+            for (int q = 0; q < nq; ++q) {
+                T* w = w3 + (p * nq + q) * nq;
+                for (int r = 0; r < nq; ++r) {
+                    w[r] = T(0);
+                }
+                const T* v = w2 + (q * nq + p) * nm;
+                for (int k = 0; k < nm; ++k) {
+                    const T a = v[k];
+                    for (int r = 0; r < nq; ++r) {
+                        w[r] += a * B[k][r];
+                    }
+                }
+            }
+        }
+        // quadrature weights, contiguous
+        for (int x = 0; x < nq3; ++x) {
+            w3[x] *= e_JxW[x];
+        }
+        // w4(q,p; k) = sum_r w3(p,q; r) B(k,r)          inner: k contiguous (BT row), nm
+        for (int q = 0; q < nq; ++q) {
+            for (int p = 0; p < nq; ++p) {
+                T* w = w4 + (q * nq + p) * nm;
+                for (int k = 0; k < nm; ++k) {
+                    w[k] = T(0);
+                }
+                const T* v = w3 + (p * nq + q) * nq;
+                for (int r = 0; r < nq; ++r) {
+                    const T a = v[r];
+                    for (int k = 0; k < nm; ++k) {
+                        w[k] += a * BT[r][k];
+                    }
+                }
+            }
+        }
+        // w5(j; p,k) = sum_q w4(q; p,k) B(j,q)          inner: (p,k) contiguous, nq*nm
+        for (int j = 0; j < nm; ++j) {
+            T* w = w5 + j * nq * nm;
+            for (int x = 0; x < nq * nm; ++x) {
+                w[x] = T(0);
+            }
+            for (int q = 0; q < nq; ++q) {
+                const T b = B[j][q];
+                const T* v = w4 + q * nq * nm;
+                for (int x = 0; x < nq * nm; ++x) {
+                    w[x] += v[x] * b;
+                }
+            }
+        }
+        // out(i,j; k) = sum_p w5(j,p; k) B(i,p)         inner: k contiguous, nm
+        for (int i = 0; i < nm; ++i) {
+            for (int j = 0; j < nm; ++j) {
+                T* w = e_out + (i * nm + j) * nm;
+                for (int k = 0; k < nm; ++k) {
+                    w[k] = T(0);
+                }
+                for (int p = 0; p < nq; ++p) {
+                    const T b = B[i][p];
+                    const T* v = w5 + (j * nq + p) * nm;
+                    for (int k = 0; k < nm; ++k) {
+                        w[k] += v[k] * b;
+                    }
+                }
+            }
+        }
+    }
+}
+
 } // namespace bk
 
 using namespace bk;
@@ -652,8 +961,14 @@ void run_test(const std::size_t nelmt, const int ntests)
     constexpr std::size_t nm3 = std::size_t(nm) * nm * nm, nq3 = std::size_t(nq) * nq * nq;
 
     const bk::amx::Options opt = bk::amx::Options::from_env(/*dense_default=*/ nq <= 4);
+    const std::string kernel_name = get_env("BK_KERNEL").value_or("amx");   // amx, neon, ref, refv
+    const bool ref_kernel = (kernel_name == "ref" || kernel_name == "refv");
     const bool soa   = opt.soa;
     const bool noref = get_env("BK_NOREF").has_value();
+    if (ref_kernel && soa) {
+        std::cerr << "BK_KERNEL=" << kernel_name << " is element-major only\n";
+        return;
+    }
 
     const std::array<T, nm * nq> basis = make_test_basis<T, nm, nq>();
     std::vector<T> JxW(nelmt * nq3, T(1.0));
@@ -713,7 +1028,13 @@ void run_test(const std::size_t nelmt, const int ntests)
 
     for (int t = 0; t < ntests; ++t) {
         auto start = high_resolution_clock::now();
-        kernel(nelmt, d_JxW, d_in, d_out);
+        if (kernel_name == "refv") {
+            SumFactorizationRefV<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), out.data());
+        } else if (kernel_name == "ref") {
+            SumFactorizationRef<T, nq>(nelmt, basis.data(), JxW.data(), in.data(), out.data());
+        } else {
+            kernel(nelmt, d_JxW, d_in, d_out);
+        }
         auto stop = high_resolution_clock::now();
         duration<double> rep_time = stop - start;
         elapsed = std::min(elapsed, rep_time.count());
@@ -733,8 +1054,12 @@ void run_test(const std::size_t nelmt, const int ntests)
 #ifdef _OPENMP
     nthreads = omp_get_max_threads();
 #endif
-    std::cout << "SumFactorization[AMX" << (AMX_HW ? "" : ", emulated")
-              << (opt.dense ? ", dense" : ", sumfact") << (soa ? ", soa" : "")
+    const char* label = kernel_name == "refv" ? "reference, loops interchanged"
+                      : kernel_name == "ref"  ? "reference"
+                      : opt.neon              ? "NEON"
+                      : AMX_HW                ? "AMX" : "AMX, emulated";
+    std::cout << "SumFactorization[" << label
+              << (ref_kernel ? "" : opt.dense ? ", dense" : ", sumfact") << (soa ? ", soa" : "")
               << ", batch = " << opt.batch << ", threads = " << nthreads << "] -> nelmt = " << nelmt
               << " GDoF/s = " << dof_rate(elapsed)
               << " GB/s = "   << byte_rate(elapsed) << "\n";

@@ -7,7 +7,9 @@
 #         DOF_MIN=1e4 DOF_MAX=1e8    problem-size range in degrees of freedom
 #         PPD=4                      points per decade
 #         NTESTS=5                   repetitions per point (driver takes the minimum)
-#         KERNELS="serial omp amx_aos amx_soa"
+#         KERNELS="serial omp omp_v neon_aos neon_soa amx_aos amx_soa"
+#           omp_v = the reference loops interchanged for unit-stride inner loops
+#                   (BK_KERNEL=refv in the AMX binary, OpenMP over elements)
 #         SERIAL_MAX=1e7             cap for the serial kernel (it is slow)
 #         OMP_NUM_THREADS            threads for omp / amx (default: cores - 1,
 #                                    which is also the AMX driver's own default)
@@ -23,7 +25,7 @@ DOF_MIN=${DOF_MIN:-1e4}
 DOF_MAX=${DOF_MAX:-1e8}
 PPD=${PPD:-4}
 NTESTS=${NTESTS:-5}
-KERNELS=${KERNELS:-"serial omp amx_aos amx_soa"}
+KERNELS=${KERNELS:-"serial omp omp_v neon_aos neon_soa amx_aos amx_soa"}
 SERIAL_MAX=${SERIAL_MAX:-1e7}
 ncpu=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-$(( ncpu > 1 ? ncpu - 1 : 1 ))}
@@ -39,6 +41,9 @@ run() {   # run <kernel> <p> <nelmt>  -> "gdofs gbs"
   case $k in
     serial)  out=$($BK1     $p $n $NTESTS) ;;
     omp)     out=$($BK1_OMP $p $n $NTESTS) ;;
+    omp_v)    out=$(BK_KERNEL=refv $BK1_AMX $p $n $NTESTS) ;;
+    neon_aos) out=$(BK_KERNEL=neon BK_LAYOUT=aos $BK1_AMX $p $n $NTESTS) ;;
+    neon_soa) out=$(BK_KERNEL=neon BK_LAYOUT=soa $BK1_AMX $p $n $NTESTS) ;;
     amx_aos) out=$(BK_LAYOUT=aos $BK1_AMX $p $n $NTESTS) ;;
     amx_soa) out=$(BK_LAYOUT=soa $BK1_AMX $p $n $NTESTS) ;;
     *) echo "unknown kernel $k" >&2; return 1 ;;

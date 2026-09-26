@@ -58,6 +58,7 @@ for P in 1 2 3 5 8; do
     if [ $P -le 3 ]; then
       check "dense $layout"        BK_DENSE=1 BK_LAYOUT=$layout
     fi
+    check "neon $layout"           BK_KERNEL=neon BK_LAYOUT=$layout
   done
   check "sumfact aos batch=32"     BK_DENSE=0 BK_LAYOUT=aos BK_BATCH=32
 done

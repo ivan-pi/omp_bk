@@ -55,6 +55,10 @@ make BK1_amx                         # or: make CXX=clang++ BK1_amx
 ./BK1_amx <p> [nelmt] [ntests]       # same arguments as BK1, p = 1..14
 ```
 
-The header of `amx/BK1_amx.cpp` lists the environment variables (layout,
-dense path, batch size, random test data) and `amx/scripts/` holds the
-validation, tuning and throughput-sweep scripts.
+The same binary also runs the CPU baselines on the same data:
+`BK_KERNEL=neon` uses 4-wide NEON FMAs (GNU vector types) across the
+elements of a batch, and `BK_KERNEL=refv` is the reference with its loops
+interchanged for unit-stride inner loops. The header of `amx/BK1_amx.cpp`
+lists all environment variables (kernel, layout, dense path, batch size,
+random test data) and `amx/scripts/` holds the validation, tuning and
+throughput-sweep scripts.
