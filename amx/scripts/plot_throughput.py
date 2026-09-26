@@ -75,12 +75,20 @@ if drawn:
     ax.legend(fontsize=8, frameon=False, loc="best")
 else:
     ax.set_visible(False)
-for ax in axes[n:]:
+for ax in axes[n + 1:]:
     ax.set_visible(False)
 
-# --- the order legend, once, below the panels -------------------------------
+# --- the order legend, once: vertical in a spare panel, else below the figure -
 order_handles = [Line2D([], [], marker="o", ls="", color=ocolor[p]) for p in orders]
-bk.figure_legend(fig, order_handles, [f"p = {p}" for p in orders], ncol=min(14, len(orders)))
+order_labels = [f"p = {p}" for p in orders]
+if n < len(axes):
+    spare = axes[n]
+    spare.set_visible(True)
+    spare.axis("off")
+    spare.legend(order_handles, order_labels, loc="center", ncol=2, frameon=False, fontsize=10,
+                 title="polynomial order", title_fontsize=11, columnspacing=2.5, labelspacing=0.9)
+else:
+    bk.figure_legend(fig, order_handles, order_labels, ncol=min(14, len(orders)))
 
 # plateau table on stdout: GDoF/s per kernel and order
 print(f"{'p':>3}  " + "  ".join(f"{bk.label(k)[:14]:>14}" for k in kernels))
@@ -88,6 +96,6 @@ for p in orders:
     print(f"{p:>3}  " + "  ".join((f"{plateau[k][p]:>14.2f}" if p in plateau[k] else f"{'-':>14}") for k in kernels))
 
 fig.suptitle(title, y=1.0)
-fig.tight_layout(rect=(0, 0.04, 1, 1))
+fig.tight_layout(rect=(0, 0.04 if n >= len(axes) else 0, 1, 1))
 fig.savefig(dst, dpi=150, bbox_inches="tight")
 print(f"wrote {dst}")

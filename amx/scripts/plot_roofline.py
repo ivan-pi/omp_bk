@@ -124,6 +124,7 @@ for k in kernels:
     bk.kernel_line(ax1, k, ps, [plateau[k][p] for p in ps])
 ax1.set_yscale("log")
 ax1.set_xlabel("polynomial order p")
+ax1.xaxis.set_label_coords((sum(orders) / len(orders) - (orders[0] - 0.3)) / (orders[-1] + 4.5 - (orders[0] - 0.3)), -0.075)
 ax1.set_ylabel(f"GDoF/s (plateau: best of the {bk.PLATEAU_TOP} largest sizes)")
 ax1.set_title("throughput against the per-order ceilings", fontsize=11)
 ax1.set_xticks(orders)
@@ -180,10 +181,10 @@ ax2.set_xscale("log")
 ax2.set_yscale("log")
 ax2.set_xlim(ai_min, ai_max)
 ax2.set_ylim(ymin, ymax)
-ax2.set_xlabel(f"arithmetic intensity, flop / byte (sum-factorized flops, compulsory DRAM bytes); "
-               f"p = {orders[0]} to {orders[-1]} left to right")
+ax2.set_xlabel("arithmetic intensity (flop / byte)")
 ax2.set_ylabel("GFLOP/s")
-ax2.set_title("roofline (horizontal: compute peaks, diagonal: DRAM)", fontsize=11)
+ax2.set_title("roofline: sum-factorized flops over compulsory DRAM bytes\n"
+              f"(horizontal: compute peaks, diagonal: DRAM; p = {orders[0]} to {orders[-1]} left to right)", fontsize=10.5)
 ticks = [t for t in (1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 70, 100) if ai_min <= t <= ai_max]
 ax2.xaxis.set_major_locator(matplotlib.ticker.FixedLocator(ticks))
 ax2.xaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
@@ -193,14 +194,24 @@ for ax in (ax1, ax2):
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
 
-# --- one legend for the kernels, below both panels --------------------------
-handles = [Line2D([], [], color=bk.COLORS.get(k, "C7"), ls=bk.LINESTYLES.get(k, "-"), lw=1.6, marker="o", ms=3.5)
-           for k in kernels]
-labels = [bk.label(k) for k in kernels]
-if any(k.startswith("amx") for k in kernels):
-    handles.append(Line2D([], [], color=bk.COLORS["amx_soa"], ls="", marker="o", ms=4.5, mfc="none", alpha=0.7))
-    labels.append("AMX raw flops (useful / row fill)")
-bk.figure_legend(fig, handles, labels, ncol=4)
+# --- one legend for the kernels below both panels, one column per family:
+# baselines | NEON | AMX (matplotlib fills legend columns top to bottom)
+def handle(k):
+    return Line2D([], [], color=bk.COLORS.get(k, "C7"), ls=bk.LINESTYLES.get(k, "-"), lw=1.6, marker="o", ms=3.5)
+
+
+columns = [[(handle(k), bk.label(k)) for k in kernels if k in ("serial", "omp", "omp_v")],
+           [(handle(k), bk.label(k)) for k in kernels if k.startswith("neon")],
+           [(handle(k), bk.label(k)) for k in kernels if k.startswith("amx")]]
+if columns[2]:
+    columns[2].append((Line2D([], [], color=bk.COLORS["amx_soa"], ls="", marker="o", ms=4.5, mfc="none", alpha=0.7),
+                       "AMX raw flops (useful / row fill)"))
+columns.append([(handle(k), bk.label(k)) for k in kernels if k not in bk.KERNELS])
+columns = [c for c in columns if c]
+depth = max(len(c) for c in columns)
+blank = (Line2D([], [], ls="", marker=""), "")
+entries = [e for c in columns for e in c + [blank] * (depth - len(c))]
+bk.figure_legend(fig, [h for h, _ in entries], [l for _, l in entries], ncol=len(columns))
 
 fig.suptitle(title, y=1.0)
 fig.tight_layout(rect=(0, 0.08, 1, 1))
