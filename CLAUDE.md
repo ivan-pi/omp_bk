@@ -1,7 +1,8 @@
 # omp_bk
 
 OpenMP implementations of the CEED bake-off kernels BK1, BK3 and BK5; `amx/`
-holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`).
+holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`);
+`acc/` holds OpenACC versions of all three for `nvc++`.
 
 ## Build and check
 
@@ -11,6 +12,11 @@ holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`).
 - `amx/scripts/validate.sh` checks the AMX kernel against the serial
   reference on random data; the emulator also enforces the 128-byte
   alignment of pair/quad loads and stores, so run it after any layout change.
+- `make -C acc` builds the OpenACC kernels with `nvc++` (`-Minfo=acc` on);
+  `make -C acc CXX=g++` builds them with GCC's `-fopenacc` host fallback,
+  and `make -C acc host` the serial host build. `acc/scripts/validate.sh`
+  checks every order against the OpenMP executables (constant data) and
+  against the host build (random data, `BK_RANDOM=1`).
 
 ## C++ style
 

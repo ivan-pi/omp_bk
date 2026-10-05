@@ -7,3 +7,9 @@ bw_test
 amx_pipe
 accel_gemm
 *.o
+acc/BK1_acc
+acc/BK3_acc
+acc/BK5_acc
+acc/BK1_acc_host
+acc/BK3_acc_host
+acc/BK5_acc_host
