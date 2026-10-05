@@ -44,6 +44,28 @@ make CXX=clang++
 Each run prints the achieved `GDoF/s` and effective `GB/s`, followed by the
 solution norm (useful as a quick correctness check).
 
+## OpenACC versions
+
+`acc/BK1_acc.cpp`, `acc/BK3_acc.cpp` and `acc/BK5_acc.cpp` are the same
+kernels with OpenACC directives: a plain `acc parallel loop` over the
+elements, with the inner loop nests left to the compiler. They take the same
+arguments as the OpenMP executables and print the same two lines, so the
+scripts' parsing carries over. `BK_RANDOM=1` replaces the constant test data
+with seeded random data.
+
+```sh
+make -C acc                        # nvc++ -acc=gpu, prints the -Minfo=acc report
+make -C acc ACC="-acc=gpu -gpu=cc80"
+make -C acc ACC=-acc=multicore     # OpenACC on the host cores
+make -C acc host                   # BK?_acc_host: serial host build (-acc=host) for validate.sh
+make -C acc CXX=g++                # GCC -fopenacc (host fallback without an offload toolchain)
+./acc/BK1_acc <p> [nelmt] [ntests]
+
+make BK1 BK3 BK5 && make -C acc all host
+acc/scripts/validate.sh            # every order: constant data against BK1/BK3/BK5,
+                                   # random data against the host build; exit 1 on failure
+```
+
 ## Apple AMX version of BK1
 
 `amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX

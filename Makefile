@@ -30,6 +30,12 @@ amx_pipe: amx/bench/amx_pipe.cpp amx/amx.h
 accel_gemm: amx/bench/accel_gemm.cpp
 	$(CXX) $(CXXFLAGS) -DACCELERATE_NEW_LAPACK -o $@ $< -framework Accelerate
 
+# OpenACC versions of BK1, BK3 and BK5 (nvc++ by default; see acc/Makefile)
+.PHONY: acc
+acc:
+	$(MAKE) -C acc
+
 .PHONY: clean
 clean:
 	$(RM) BK1 BK3 BK5 BK1_amx bw_test amx_pipe accel_gemm *.o
+	$(MAKE) -C acc clean
