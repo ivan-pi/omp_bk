@@ -291,6 +291,7 @@ int run(const Options& o)
 
     const std::vector<T> B = bp::to_precision<T>(basis.B);
     const std::vector<T> D = bp::to_precision<T>(collocated ? basis.Dq_T : basis.Dq);
+    const std::vector<T> Dq = bp::to_precision<T>(basis.Dq);
     const std::vector<T> w1d = bp::to_precision<T>(basis.quad.w);
     const std::vector<T> mask = bp::dirichlet_mask<T>(mesh);
 
@@ -367,6 +368,7 @@ int run(const Options& o)
     A.fused = o.fused;
     A.B = B.data();
     A.D = D.data();
+    A.Dq = Dq.data();
     A.JxW = geo.JxW.data();
     A.G = geo.G.data();
     A.mass_diag = mass_diag.data();
@@ -385,6 +387,7 @@ int run(const Options& o)
     const int* d_l_to_e = R.l_to_e.data();
     const T* d_B = B.data();
     const T* d_D = D.data();
+    const T* d_Dq = Dq.data();
     const T* d_JxW = geo.JxW.data();
     const T* d_G = geo.G.data();
     const T* d_mass_diag = mass_diag.data();
@@ -415,6 +418,7 @@ int run(const Options& o)
                     o.tg3 ? "third-order (M + dt^2/6 K_e)" : "second-order (M)", o.dt, o.steps);
     }
 
+    const bool diagonal = collocated && cK == T(0);   // A = cM M with the lumped mass
     double volume = 0.0;
     double tg_linear = 0.0;
     double k_const = 0.0;
@@ -431,7 +435,7 @@ int run(const Options& o)
     // ---- everything below runs with the arrays resident on the device ------
     #pragma omp target data \
         map(to: d_e_to_l[:nE], d_l_offsets[:nL + 1], d_l_to_e[:nE]) \
-        map(to: d_B[:B.size()], d_D[:D.size()], d_JxW[:geo.JxW.size()], d_G[:geo.G.size()]) \
+        map(to: d_B[:B.size()], d_D[:D.size()], d_Dq[:Dq.size()], d_JxW[:geo.JxW.size()], d_G[:geo.G.size()]) \
         map(to: d_mass_diag[:nL], d_mask[:nL], d_dinv[:nL], d_f[:nL], d_w1d[:nq]) \
         map(tofrom: d_x[:nL]) \
         map(alloc: d_b[:nL], d_r[:nL], d_z[:nL], d_p[:nL], d_Ap[:nL], d_delta[:nL]) \
@@ -470,8 +474,22 @@ int run(const Options& o)
             tg_linear = max_abs(Ap) / (std::fabs(tg_a * e2) * max_abs(b));
         }
 
-        // right-hand side and solve(s)
+        // right-hand side and solve(s). The collocated mass matrix is diagonal,
+        // so A = cM M is solved with the assembled diagonal directly.
         const T* pc = o.jacobi ? d_dinv : nullptr;
+        const auto solve = [&](const T* rhs, T* sol, const bool zero_guess) {
+            if (diagonal) {
+                bp::Stopwatch clock;
+                clock.start();
+                bp::backend::pointwise(nL, T(1), d_dinv, rhs, sol);
+                clock.stop();
+                bp::CGResult res;
+                res.converged = true;
+                res.seconds = clock.seconds;
+                return res;
+            }
+            return bp::pcg<T>(A, cM, cK, pc, rhs, sol, w, o.rtol, o.maxit, zero_guess);
+        };
         const int nsolve = o.time_dependent() ? o.steps : 1;
         if (o.time_dependent() && !o.vtk.empty()) {
             vtk_ok = write_fields(step_file(o.vtk, 0), mesh, coords, x, exact, 0.0);
@@ -483,24 +501,29 @@ int run(const Options& o)
                 // A (u^{n+1} - u^n) = r_TG(u^n): the update starts from zero
                 A.advect(tg_a, tg_c, d_x, d_b);
                 bp::backend::fill(nL, T(0), d_delta);
-                res = bp::pcg<T>(A, cM, cK, pc, d_b, d_delta, w, o.rtol, o.maxit, true);
+                res = solve(d_b, d_delta, true);
                 bp::backend::axpby(nL, T(1), d_delta, T(1), d_x);
             } else if (o.problem == Problem::heat) {
                 // b = (M - (1 - theta) dt K) u^n, masked like the operator;
                 // the solve starts from u^n
                 A.apply(T(1), T(-(1.0 - o.theta) * o.dt), d_x, d_b);
-                res = bp::pcg<T>(A, cM, cK, pc, d_b, d_x, w, o.rtol, o.maxit, false);
+                res = solve(d_b, d_x, false);
             } else {
                 // b = M f (projection of the forcing / the initial function)
                 A.apply(T(1), T(0), d_f, d_b);
-                res = bp::pcg<T>(A, cM, cK, pc, d_b, d_x, w, o.rtol, o.maxit, true);
+                res = solve(d_b, d_x, true);
             }
             solve_seconds += res.seconds;
             solve_op_seconds += A.seconds() - op_before;
             total_iterations += res.iterations;
             ++solves;
             converged = converged && res.converged;
-            if (o.time_dependent()) {
+            if (diagonal && n == 0) {
+                std::printf("  diagonal operator: solved with the assembled lumped mass, no CG\n");
+            }
+            if (diagonal) {
+                // nothing per step to report
+            } else if (o.time_dependent()) {
                 std::printf("  step %3d: %4d iterations, ||r||/||b|| = %.2e\n",
                             n + 1, res.iterations, res.relative_residual);
                 if (!o.vtk.empty()) {
@@ -542,17 +565,19 @@ int run(const Options& o)
     }
     std::printf("error: max nodal |u - u_exact| = %.3e, ||u - u_exact||_M = %.3e\n",
                 err_max, err_M);
-    std::printf("solve: %ld CG iterations in %d solve%s, %.3f s, %.3f ms/iteration%s\n",
+    std::printf("solve: %ld CG iterations in %d solve%s, %.3f s, %.3f ms/%s%s\n",
                 total_iterations, solves, solves == 1 ? "" : "s", solve_seconds,
-                1e3 * solve_seconds / std::max(1L, total_iterations),
-                converged ? "" : " -- NOT CONVERGED");
+                1e3 * solve_seconds / std::max(1L, diagonal ? long(solves) : total_iterations),
+                diagonal ? "solve" : "iteration", converged ? "" : " -- NOT CONVERGED");
     std::printf("  operator %.3f s inside the solves, vector ops %.3f s\n",
                 solve_op_seconds, solve_seconds - solve_op_seconds);
     std::printf("  operator %ld applications in total %.3f s: gather %.3f, mass %.3f, stiffness %.3f, advect %.3f, scatter %.3f, mask %.3f\n",
                 A.applications, A.seconds(), A.t_gather.seconds, A.t_mass.seconds,
                 A.t_stiff.seconds, A.t_advect.seconds, A.t_scatter.seconds, A.t_mask.seconds);
-    std::printf("throughput: %.3f MDoF/s (nodes x CG iterations / solve time)\n",
-                1e-6 * double(nL) * double(total_iterations) / solve_seconds);
+    if (!diagonal) {
+        std::printf("throughput: %.3f MDoF/s (nodes x CG iterations / solve time)\n",
+                    1e-6 * double(nL) * double(total_iterations) / solve_seconds);
+    }
     return converged ? 0 : 2;
 }
 
@@ -598,8 +623,8 @@ int main(int argc, char** argv)
         usage();
         return 1;
     }
-    if (o.problem == Problem::transport && (o.collocated || o.warp != 0.0)) {
-        std::cerr << "transport needs the Gauss-Legendre family on the undeformed mesh\n";
+    if (o.problem == Problem::transport && o.warp != 0.0) {
+        std::cerr << "transport needs the undeformed mesh (constant velocity in reference coordinates)\n";
         return 1;
     }
     return dispatch<real>(o);

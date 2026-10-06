@@ -17,6 +17,11 @@
 // direction with a zero component skips that contraction entirely, which is
 // what makes lattice directions cheap.
 //
+// nm = nq - 1 is the Gauss-Legendre family (BK1/BK3: interpolate from the
+// GLL nodes to the quadrature points and back); nm = nq the collocated
+// family (BK5: the nodes are the quadrature points, B = I, so the
+// interpolation and projection steps are skipped).
+//
 // Shared by the bp mini-app (miniapp/); the map clauses are no-ops when the
 // arrays are already present in an enclosing target data region.
 
@@ -27,11 +32,11 @@
 namespace bk {
 namespace tg {
 
-template <typename T, int nq, typename index_t = int>
+template <typename T, int nq, int nm = nq - 1, typename index_t = int>
 void TaylorGalerkin(
     const std::size_t nelmt,
-    const T* __restrict__ basis,     // B(i, p) = l_i(xq_p), nm x nq, as BK1/BK3
-    const T* __restrict__ dbasis,    // D(n, p) = L_n'(xq_p), nq x nq, as BK3
+    const T* __restrict__ basis,     // B(i, p) = l_i(xq_p), nm x nq, as BK1/BK3; unused if nm == nq
+    const T* __restrict__ dbasis,    // D(n, p) = L_n'(xq_p), nq x nq, node-major as BK3
     const T* __restrict__ weights,   // 1-D quadrature weights, nq
     const T detJ,                    // |J| of the affine element
     const T et0, const T et1, const T et2,   // et = J^{-1} e
@@ -40,7 +45,8 @@ void TaylorGalerkin(
     const T* __restrict__ in,
     T* __restrict__ out)
 {
-    constexpr int nm = nq - 1;
+    static_assert(nm == nq - 1 || nm == nq, "Gauss-Legendre or collocated family");
+    constexpr bool collocated = (nm == nq);
 
     using nm_cview = ndview<const T, nm, nm, nm>;
     using nm_view  = ndview<T, nm, nm, nm>;
@@ -66,6 +72,16 @@ void TaylorGalerkin(
         const nm_cview e_in {in  + e * nm_cview::size};
         const nm_view  e_out{out + e * nm_view::size};
 
+        if constexpr (collocated) {
+            // the nodes are the quadrature points: u(p, q, r) is the input
+            for (index_t i = 0; i < nq; ++i) {
+                for (index_t j = 0; j < nq; ++j) {
+                    for (index_t k = 0; k < nq; ++k) {
+                        wsp1(i, j, k) = e_in(i, j, k);
+                    }
+                }
+            }
+        } else {
         // step-1 : copy in -> wsp0 (nm^3 sub-block of the nq^3 box)
         for (index_t i = 0; i < nm; ++i) {
             for (index_t j = 0; j < nm; ++j) {
@@ -109,6 +125,7 @@ void TaylorGalerkin(
                     wsp1(p, q, r) = tmp;
                 }
             }
+        }
         }
 
         // step-5 : the point operation. s = e.grad u = et . grad_xi u at every
@@ -177,6 +194,15 @@ void TaylorGalerkin(
             }
         }
 
+        if constexpr (collocated) {
+            for (index_t i = 0; i < nq; ++i) {
+                for (index_t j = 0; j < nq; ++j) {
+                    for (index_t k = 0; k < nq; ++k) {
+                        e_out(i, j, k) = wsp1(i, j, k);
+                    }
+                }
+            }
+        } else {
         // steps 7-9 : project back to the nodes with B^T, one direction at a
         // time (as BK1's steps 6-8)
         for (index_t k = 0; k < nm; ++k) {
@@ -220,6 +246,7 @@ void TaylorGalerkin(
                     e_out(i, j, k) = wsp0(i, j, k);
                 }
             }
+        }
         }
     }
 }

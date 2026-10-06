@@ -13,7 +13,7 @@ operator in every iteration.
 | `poisson` | K u = M f, homogeneous Dirichlet (BP3)                | BK3, BK1 for the rhs |
 | `poisson --gll` | the same, collocated on GLL points (BP5)        | BK5, lumped mass     |
 | `heat`    | (M + θ Δt K) uⁿ⁺¹ = (M − (1 − θ) Δt K) uⁿ, one solve per step | BK1 + BK3 (or lumped mass + BK5) |
-| `transport` | M (uⁿ⁺¹ − uⁿ) = r_TG(uⁿ), Taylor-Galerkin for u_t + e·∇u = 0; `--tg3`: M + Δt²/6 K_e | tg_kernel.h + BK1 (+ BK3) |
+| `transport` | M (uⁿ⁺¹ − uⁿ) = r_TG(uⁿ), Taylor-Galerkin for u_t + e·∇u = 0; `--tg3`: M + Δt²/6 K_e | tg_kernel.h + BK1 (+ BK3); `--gll`: lumped mass (+ BK5) |
 
 The mesh is a Cartesian partition of the unit cube into hexahedra, optionally
 deformed by a smooth map (`--warp`) so that the metric factors vary within
@@ -100,7 +100,15 @@ constant on the Cartesian mesh, and e·∇u is the combination of the three
 reference derivatives weighted by ẽ. A zero component skips that
 contraction, so an axis direction costs one derivative pass instead of
 three. The point operation is the two lines that scale e·∇u by a and by c;
-everything else is the generic sum factorisation.
+everything else is the generic sum factorisation. Like BK3 the kernel is
+templated on the node count: with `--gll` the nodes are the quadrature
+points, the interpolation and projection steps are compiled out, and the
+mass matrix is the lumped (diagonal) one, so the TG2 step is one kernel
+application and a pointwise divide with no CG at all; `--tg3` still needs
+CG for M + Δt²/6 K_e. The lumped mass is cheaper and less accurate: at
+p = 6 on 8³ elements with Δt = 2.5e-3 the error after 160 steps is 1.4e-4
+with the consistent mass and TG3, 5.2e-4 lumped with TG3, 2.8e-3 lumped
+with TG2.
 
 The `--tg3` solve reuses BK3 unchanged: the directional stiffness
 K_e = ∫ (e·∇φ)(e·∇u) is BK3 with the rank-one metric G = |J| w ẽẽᵀ, which

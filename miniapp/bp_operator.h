@@ -12,7 +12,8 @@
 // Poisson solve (cM = 0, cK = 1), the implicit diffusion step (cM = 1,
 // cK = theta dt) and the Taylor-Galerkin solves are all instances of this
 // one operator; `advect` applies the Taylor-Galerkin right-hand side kernel
-// through the same restriction.
+// through the same restriction.  When the operator is diagonal (collocated
+// family, cK = 0) the caller solves with the assembled diagonal directly.
 //
 // Two code paths apply it.  The E-vector path stores P x, runs each kernel
 // on it and scatters the result with its coefficient (the structure of the
@@ -53,12 +54,13 @@ struct Operator {
     // basis and metric (bp_basis.h, bp_geometry.h) in the kernels' layouts
     const T* B = nullptr;        // BK1/BK3 basis (nm x nq); unused when collocated
     const T* D = nullptr;        // BK3: Dq (n, p); BK5: Dq^T (p, n)
+    const T* Dq = nullptr;       // Dq (n, p) for the transport kernel in both families
     const T* JxW = nullptr;      // BK1 quadrature weights; unused when collocated
     const T* G = nullptr;
     const T* mass_diag = nullptr;   // collocated: the assembled lumped mass P^T JxW
     const T* mask = nullptr;        // nullptr: no Dirichlet condition
 
-    // transport (tg_kernel.h, Gauss-Legendre family on the Cartesian mesh)
+    // transport (tg_kernel.h on the Cartesian mesh)
     const T* w1d = nullptr;    // 1-D quadrature weights
     T detJ = 0;                // |J| of the (affine) elements
     T et[3] = {0, 0, 0};       // J^{-1} e
@@ -202,13 +204,10 @@ struct Operator {
     // kernel: int phi a (e.grad x) + int (e.grad phi) c (e.grad x).
     void advect(const T a, const T c, const T* x, T* y)
     {
-        assert(!collocated);
         ++applications;
         gather(x);
         t_advect.start();
-        if constexpr (!collocated) {   // not instantiated for the GLL family
-            bk::tg::TaylorGalerkin<T, nq>(nelmt, B, D, w1d, detJ, et[0], et[1], et[2], a, c, e_in, e_out);
-        }
+        bk::tg::TaylorGalerkin<T, nq, nm>(nelmt, B, Dq, w1d, detJ, et[0], et[1], et[2], a, c, e_in, e_out);
         t_advect.stop();
         scatter(T(1), e_out, y, false);
         apply_mask(y, true);
