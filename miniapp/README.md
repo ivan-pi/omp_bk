@@ -91,6 +91,17 @@ per-step files of a `heat` run form a time series.
 ./bp poisson -p 4 -n 8 --warp 0.1 --vtk poisson
 ```
 
+`miniapp/plot_vtk.py` (numpy and matplotlib) draws these files without
+ParaView: for one file the mid-plane slices of `u` and of the error on the
+node coordinates plus the centre-line profile against the exact solution,
+for the files of a `heat` run the profiles over time and the maximum error
+per step.
+
+```sh
+miniapp/plot_vtk.py poisson.vtk poisson.png
+miniapp/plot_vtk.py out/heat_00*.vtk heat_series.png
+```
+
 ## Structure
 
 ```
@@ -103,6 +114,7 @@ miniapp/
   bp_operator.h  A = cM M + cK K applied matrix-free, with phase timers
   bp_solver.h    preconditioned conjugate gradients
   bp_vtk.h       legacy VTK writer for the nodal fields
+  plot_vtk.py    matplotlib plots of those files (slices, profiles, time series)
   bp.cpp         problems, options, checks and report
 ```
 
