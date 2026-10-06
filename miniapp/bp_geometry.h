@@ -11,7 +11,10 @@
 //     JxW  = |J| w                            mass     (BK1, lumped GLL mass)
 //     G    = |J| w  J^{-1} J^{-T}  (symmetric) stiffness (BK3, BK5)
 //
-// so that  u^T K v = sum_q (grad_xi u)^T G (grad_xi v).
+// so that  u^T K v = sum_q (grad_xi u)^T G (grad_xi v).  With a direction e
+// given, G = |J| w (J^{-1} e)(J^{-1} e)^T instead, the rank-one metric of the
+// directional stiffness  int (e.grad u)(e.grad v)  of the Taylor-Galerkin
+// transport step; the same BK3/BK5 kernels then apply that operator.
 
 #include <array>
 #include <cassert>
@@ -78,7 +81,8 @@ inline void contract3(const int nm, const int nq,
 }
 
 template <typename T>
-Geometry<T> make_geometry(const Mesh& m, const Basis1D& b)
+Geometry<T> make_geometry(const Mesh& m, const Basis1D& b,
+                          const std::array<double, 3>* direction = nullptr)
 {
     const int nq = b.nq;
     const int nm = b.nm;
@@ -143,12 +147,25 @@ Geometry<T> make_geometry(const Mesh& m, const Basis1D& b)
                             jxw[idx] = wq;
                             // symmetric factors in the order rr, rs, rt, ss, st, tt
                             const int pairs[6][2] = {{0, 0}, {0, 1}, {0, 2}, {1, 1}, {1, 2}, {2, 2}};
+                            // et = J^{-1} e, the direction in reference coordinates
+                            double et[3] = {0.0, 0.0, 0.0};
+                            if (direction != nullptr) {
+                                for (int a = 0; a < 3; ++a) {
+                                    for (int d = 0; d < 3; ++d) {
+                                        et[a] += Ji[a][d] * (*direction)[d];
+                                    }
+                                }
+                            }
                             for (int f = 0; f < 6; ++f) {
                                 const int a = pairs[f][0];
                                 const int c = pairs[f][1];
                                 double s = 0.0;
-                                for (int d = 0; d < 3; ++d) {
-                                    s += Ji[a][d] * Ji[c][d];
+                                if (direction != nullptr) {
+                                    s = et[a] * et[c];
+                                } else {
+                                    for (int d = 0; d < 3; ++d) {
+                                        s += Ji[a][d] * Ji[c][d];
+                                    }
                                 }
                                 g[f * nq3 + idx] = wq * s;
                             }

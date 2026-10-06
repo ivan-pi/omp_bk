@@ -27,6 +27,7 @@
 #include "../bk1_kernel.h"
 #include "../bk3_kernel.h"
 #include "../bk5_kernel.h"
+#include "../tg_kernel.h"
 #include "bp_backend.h"
 
 namespace bp {
@@ -62,6 +63,11 @@ struct Operator {
     const T* G = nullptr;
     const T* mask = nullptr;   // nullptr: no Dirichlet condition
 
+    // transport (tg_kernel.h, Gauss-Legendre family on the Cartesian mesh)
+    const T* w1d = nullptr;    // 1-D quadrature weights
+    T detJ = 0;                // |J| of the (affine) elements
+    T et[3] = {0, 0, 0};       // J^{-1} e
+
     // E-vector work space
     T* e_in = nullptr;
     T* e_mass = nullptr;
@@ -73,12 +79,40 @@ struct Operator {
     Stopwatch t_combine;
     Stopwatch t_scatter;
     Stopwatch t_mask;
+    Stopwatch t_advect;
     long applications = 0;
 
     double seconds() const
     {
         return t_gather.seconds + t_mass.seconds + t_stiff.seconds
-             + t_combine.seconds + t_scatter.seconds + t_mask.seconds;
+             + t_combine.seconds + t_scatter.seconds + t_mask.seconds
+             + t_advect.seconds;
+    }
+
+    // y = mask o P^T R_e P x with R_e the Taylor-Galerkin right-hand side
+    // kernel: int phi a (e.grad x) + int (e.grad phi) c (e.grad x).
+    void advect(const T a, const T c, const T* x, T* y)
+    {
+        static_assert(!collocated, "the transport kernel uses the Gauss-Legendre family");
+        ++applications;
+        t_gather.start();
+        backend::gather(nL, nE, e_to_l, x, e_in);
+        t_gather.stop();
+        t_advect.start();
+        bk::tg::TaylorGalerkin<T, nq>(nelmt, B, D, w1d, detJ, et[0], et[1], et[2], a, c, e_in, e_stiff);
+        t_advect.stop();
+        t_scatter.start();
+        if (atomic_scatter) {
+            backend::scatter_add_atomic(nL, nE, e_to_l, e_stiff, y);
+        } else {
+            backend::scatter_add(nL, nE, l_offsets, l_to_e, e_stiff, y);
+        }
+        t_scatter.stop();
+        t_mask.start();
+        if (mask != nullptr) {
+            backend::pointwise_inplace(nL, mask, y);
+        }
+        t_mask.stop();
     }
 
     // out = M_e in

@@ -13,6 +13,7 @@ operator in every iteration.
 | `poisson` | K u = M f, homogeneous Dirichlet (BP3)                | BK3, BK1 for the rhs |
 | `poisson --gll` | the same, collocated on GLL points (BP5)        | BK5, lumped mass     |
 | `heat`    | (M + θ Δt K) uⁿ⁺¹ = (M − (1 − θ) Δt K) uⁿ, one solve per step | BK1 + BK3 (or lumped mass + BK5) |
+| `transport` | M (uⁿ⁺¹ − uⁿ) = r_TG(uⁿ), Taylor-Galerkin for u_t + e·∇u = 0; `--tg3`: M + Δt²/6 K_e | tg_kernel.h + BK1 (+ BK3) |
 
 The mesh is a Cartesian partition of the unit cube into hexahedra, optionally
 deformed by a smooth map (`--warp`) so that the metric factors vary within
@@ -26,7 +27,10 @@ nodes themselves (BK5). The manufactured solution is
 which solves −Δu = 3π² u at t = 0 and u_t = Δu with f = 0, so the `poisson`
 run checks the operators against an exact answer, the `heat` run also checks
 the time integration (θ = 1 backward Euler, θ = 0.5 Crank-Nicolson), and the
-`mass` run must return its own input.
+`mass` run must return its own input. The `transport` run moves a Gaussian
+bump exp(−|x − x₀ − e t|² / 2σ²) with a constant velocity e, placed so that
+it passes the centre of the cube half-way through the run and stays away
+from the walls.
 
 ## Build and run
 
@@ -45,8 +49,8 @@ elements, `--gll` collocated family, `--pc jacobi` diagonal preconditioner,
 `--atomic` scatter with atomic adds, `--fused` gather on the fly (below),
 `--warp a` mesh deformation (|a| < 0.18),
 `--tol`/`--maxit` CG control (`--tol 0` runs exactly `--maxit` iterations),
-`--dt`/`--steps`/`--theta` for `heat`, `--vtk <base>` to write the fields
-(below). `BP_PARALLEL` is not needed: without a
+`--dt`/`--steps`/`--theta` for `heat`, `--velocity ex,ey,ez`/`--sigma`/`--tg3`
+for `transport`, `--vtk <base>` to write the fields (below). `BP_PARALLEL` is not needed: without a
 device the `target` regions run on the host threads (`OMP_NUM_THREADS`).
 
 A run prints the problem size, the CG history, two sanity checks, the error
@@ -75,6 +79,33 @@ throughput: 4.43 MDoF/s (nodes x CG iterations / solve time)
   solution is close to an eigenvector of the discrete Laplacian and CG stops
   after a few iterations; use `--warp`, larger meshes or `--tol 0 --maxit N`
   for timing.
+
+## The Taylor-Galerkin transport step
+
+`tg_kernel.h` is a BK-style kernel for the explicit Taylor-Galerkin
+(Lax-Wendroff) step of u_t + e·∇u = 0 with a constant velocity, as in
+lattice-Boltzmann streaming:
+
+    r = ∫ φ a (e·∇u) + ∫ (e·∇φ) c (e·∇u),   a = −Δt,  c = −Δt²/2,
+    M (uⁿ⁺¹ − uⁿ) = r              (`--tg3`: (M + Δt²/6 K_e)(uⁿ⁺¹ − uⁿ) = r)
+
+The kernel has the loop structure of BK3 (interpolate, differentiate,
+point operation, integrate values and gradients, project back) but reads
+no metric data: the velocity enters as its reference image ẽ = J⁻¹e,
+constant on the Cartesian mesh, and e·∇u is the combination of the three
+reference derivatives weighted by ẽ. A zero component skips that
+contraction, so an axis direction costs one derivative pass instead of
+three. The point operation is the two lines that scale e·∇u by a and by c;
+everything else is the generic sum factorisation.
+
+The `--tg3` solve reuses BK3 unchanged: the directional stiffness
+K_e = ∫ (e·∇φ)(e·∇u) is BK3 with the rank-one metric G = |J| w ẽẽᵀ, which
+`make_geometry` produces when given the direction. Each run checks the
+kernel on the linear function u = e·x, for which r equals a|e|² M 1 on the
+interior nodes exactly (the flux term integrates to a wall contribution
+only); the reported ratio must be at round-off. The wall surface term of
+the integration by parts is not implemented: the bump must stay away from
+the boundary, as the defaults ensure.
 
 ## Plotting the fields
 
@@ -106,6 +137,7 @@ miniapp/plot_vtk.py out/heat_00*.vtk heat_series.png
 
 ```
 bk1_kernel.h, bk3_kernel.h, bk5_kernel.h   element kernels (shared with BK1/3/5.cpp)
+tg_kernel.h                                Taylor-Galerkin advection kernel (bp only)
 miniapp/
   bp_basis.h     GLL/GL points and weights, Lagrange basis and derivative matrices
   bp_mesh.h      Cartesian mesh, node numbering, element restriction, Dirichlet mask
