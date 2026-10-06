@@ -18,7 +18,7 @@ namespace backend {
 
 // E = P L
 template <typename T>
-void restrict_(const std::size_t nL, const std::size_t nE, const int* __restrict__ e_to_l,
+void gather(const std::size_t nL, const std::size_t nE, const int* __restrict__ e_to_l,
                const T* __restrict__ L, T* __restrict__ E)
 {
     #pragma omp target teams loop map(to: e_to_l[:nE], L[:nL]) map(from: E[:nE])
@@ -30,7 +30,7 @@ void restrict_(const std::size_t nL, const std::size_t nE, const int* __restrict
 // L = P^T E, deterministic: each L entry sums its own E entries, so the
 // result is bitwise reproducible from run to run.
 template <typename T>
-void prolong(const std::size_t nL, const std::size_t nE, const int* __restrict__ l_offsets,
+void scatter_add(const std::size_t nL, const std::size_t nE, const int* __restrict__ l_offsets,
              const int* __restrict__ l_to_e, const T* __restrict__ E,
              T* __restrict__ L)
 {
@@ -44,10 +44,10 @@ void prolong(const std::size_t nL, const std::size_t nE, const int* __restrict__
     }
 }
 
-// L = P^T E with atomic adds: the direct transpose of restrict_, no
-// transpose map needed, but the summation order varies between runs.
+// L = P^T E with atomic adds: the direct transpose of gather, no transpose
+// map needed, but the summation order varies between runs.
 template <typename T>
-void prolong_atomic(const std::size_t nL, const std::size_t nE,
+void scatter_add_atomic(const std::size_t nL, const std::size_t nE,
                     const int* __restrict__ e_to_l, const T* __restrict__ E,
                     T* __restrict__ L)
 {
@@ -60,6 +60,20 @@ void prolong_atomic(const std::size_t nL, const std::size_t nE,
     for (std::size_t s = 0; s < nE; ++s) {
         #pragma omp atomic update
         L[e_to_l[s]] += E[s];
+    }
+}
+
+// L_out += alpha * P^T (d o P L_in) with atomic adds: the collocated
+// (lumped) mass matrix applied with the gather on the fly.
+template <typename T>
+void fused_pointwise(const std::size_t nL, const std::size_t nE, const int* __restrict__ e_to_l,
+                     const T* __restrict__ d, const T alpha,
+                     const T* __restrict__ L_in, T* __restrict__ L_out)
+{
+    #pragma omp target teams distribute parallel for map(to: e_to_l[:nE], d[:nE], L_in[:nL]) map(tofrom: L_out[:nL])
+    for (std::size_t s = 0; s < nE; ++s) {
+        #pragma omp atomic update
+        L_out[e_to_l[s]] += alpha * d[s] * L_in[e_to_l[s]];
     }
 }
 

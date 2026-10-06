@@ -42,7 +42,8 @@ make bp                       # same flags as the kernels; -DBP_REAL=float for s
 
 Options: `-p` order (1..8, 1..7 with `--gll`), `-n <n>` or `-n <nx,ny,nz>`
 elements, `--gll` collocated family, `--pc jacobi` diagonal preconditioner,
-`--atomic` scatter with atomic adds, `--warp a` mesh deformation (|a| < 0.18),
+`--atomic` scatter with atomic adds, `--fused` gather on the fly (below),
+`--warp a` mesh deformation (|a| < 0.18),
 `--tol`/`--maxit` CG control (`--tol 0` runs exactly `--maxit` iterations),
 `--dt`/`--steps`/`--theta` for `heat`, `--vtk <base>` to write the fields
 (below). `BP_PARALLEL` is not needed: without a
@@ -58,7 +59,7 @@ precision 8 bytes, preconditioner none, scatter transpose map, warp 0.1
 checks: 1^T M 1 = 1 (volume 1), max |K 1| / max |K u| = 4.79e-16
 error: max nodal |u - u_exact| = 8.342e-06, ||u - u_exact||_M = 1.554e-06
 solve: 91 CG iterations in 1 solve, 0.321 s, 3.527 ms/iteration
-  operator 97 applications 0.280 s: restrict 0.030, mass 0.004, stiffness 0.180, combine 0.000, prolong+mask 0.066
+  operator 97 applications 0.280 s: gather 0.030, mass 0.004, stiffness 0.180, combine 0.000, scatter 0.058, mask 0.008
   vector ops 0.041 s
 throughput: 4.43 MDoF/s (nodes x CG iterations / solve time)
 ```
@@ -107,17 +108,51 @@ miniapp/
 
 One operator application `y = A x` is
 
-    E = P x                        restrict  (L-vector -> E-vector, a gather)
+    E = P x                        gather       (L-vector -> E-vector)
     E' = cM M_e E + cK K_e E       the kernels, element by element
-    y = mask ∘ Pᵀ E'               prolong   (E-vector -> L-vector, a scatter-add)
+    y = mask ∘ Pᵀ E'               scatter-add  (E-vector -> L-vector)
 
 The L-vector holds one value per global node, the E-vector one per element
 and local node. `P` is stored as an index array (`e_to_l`), and `Pᵀ` as its
 transpose in CSR form so each global node sums its own element entries: the
 result is deterministic. `--atomic` uses the direct transpose with atomic
-adds instead. Dirichlet conditions are imposed by masking: the boundary
-rows of `A x` and of the right-hand side are zeroed, and all iterates keep
-zero boundary values, so CG runs on the interior system.
+adds instead. (`P` is libCEED's element restriction; it only changes the
+storage layout and has nothing to do with multigrid.) Dirichlet conditions
+are imposed by masking: the boundary rows of `A x` and of the right-hand
+side are zeroed, and all iterates keep zero boundary values, so CG runs on
+the interior system.
+
+### E-vector or gather on the fly
+
+Each kernel header provides the per-element computation (`ElementKernel`)
+and two ways of running it over the mesh:
+
+- `SumFactorization`, the CEED bake-off structure: the E-vector is a stored
+  array, the kernel reads its slice and writes its slice, and the gather
+  and scatter are separate passes. The kernel's in/out traffic goes
+  through global memory twice.
+- `SumFactorizationFused` (`--fused`): every element gathers its input
+  box from the L-vector through `e_to_l`, runs the element kernel on
+  local arrays and adds its scaled output into the L-vector with atomic
+  updates. Nothing element-sized is stored; the cost is the atomics and a
+  summation order that varies between runs (the CG iteration count may
+  change by one). The combination `cM M + cK K` comes for free: each
+  kernel adds its own multiple into the same output.
+
+The timing breakdown separates the two: compare `gather + scatter + combine`
+of the E-vector path against the extra time inside `mass` and `stiffness`
+of the fused path. On a 4-core CPU host fallback at p = 4, 12³ elements,
+`heat` for 60 iterations:
+
+```
+E-vector, transpose map   7.5 ms/iter   gather 0.024 mass 0.076 stiffness 0.174 combine 0.024 scatter 0.025
+E-vector, atomic scatter  9.0 ms/iter   gather 0.021 mass 0.080 stiffness 0.212 combine 0.025 scatter 0.088
+fused                     7.9 ms/iter   gather 0     mass 0.115 stiffness 0.207 combine 0     scatter 0.018 (zeroing y)
+```
+
+On the CPU the atomics cost about what the stored E-vector saves; on a GPU
+the balance shifts with the bandwidth and the atomic throughput of the
+device, which is the point of measuring it.
 
 The Jacobi diagonal is assembled once at setup: the diagonal of a
 tensor-product element matrix `Bᵀ W B` is `(B ∘ B)ᵀ w`, and the six metric
@@ -133,9 +168,10 @@ the error checks.
 ## Porting to another programming model
 
 The device code is confined to the three kernel headers and
-`bp_backend.h`, which has eleven one-loop functions: `restrict_`,
-`prolong`, `prolong_atomic`, `copy`, `fill`, `scale`, `axpby`, `lincomb`,
-`pointwise`, `pointwise_inplace`, `dot`, plus `to_device`/`from_device`.
+`bp_backend.h`, which has twelve one-loop functions: `gather`,
+`scatter_add`, `scatter_add_atomic`, `fused_pointwise`, `copy`, `fill`,
+`scale`, `axpby`, `lincomb`, `pointwise`, `pointwise_inplace`, `dot`, plus
+`to_device`/`from_device`.
 An OpenACC, Kokkos or CUDA version replaces those files and the `target
 data` region in `bp.cpp` (device allocation and the initial copies) and
 keeps the rest. Things to carry over:
@@ -150,12 +186,13 @@ keeps the rest. Things to carry over:
   `bp_operator.h` are meaningful; with asynchronous launches, fence before
   stopping a timer.
 
-Exercises that fit a short tutorial: compare `--atomic` with the transpose
-map at several orders; compare `BP_REAL=float` and double at fixed
-iterations; fuse the mass and stiffness kernels for the `heat` operator so
-the interpolation to quadrature points happens once (an "BK3 + BK1"
-kernel); replace the Cartesian restriction by one read from a mesh file,
-nothing else needs to change.
+Exercises that fit a short tutorial: compare `--atomic`, the transpose
+map and `--fused` at several orders; compare `BP_REAL=float` and double at
+fixed iterations; fuse the mass and stiffness kernels for the `heat`
+operator so the interpolation to quadrature points happens once (a
+"BK3 + BK1" kernel); compute the global index arithmetically in the fused
+path instead of reading `e_to_l`; replace the Cartesian restriction by one
+read from a mesh file, nothing else needs to change.
 
 ## Why a hand-written CG
 

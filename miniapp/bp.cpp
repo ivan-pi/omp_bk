@@ -47,6 +47,7 @@ struct Options {
     bool collocated = false;
     bool jacobi = false;
     bool atomic = false;
+    bool fused = false;
     double warp = 0.0;
     double rtol = 1e-8;
     int maxit = 1000;
@@ -65,6 +66,7 @@ void usage()
         "  --gll             collocated GLL quadrature (BK5) instead of GL (BK1/BK3)\n"
         "  --pc jacobi|none  diagonal preconditioner, default none\n"
         "  --atomic          scatter with atomic adds instead of the transpose map\n"
+        "  --fused           gather on the fly: no E-vector, atomic scatter inside the kernels\n"
         "  --warp <a>        deform the mesh, |a| < 0.18, default 0\n"
         "  --tol <rtol>      CG relative residual tolerance, default 1e-8;\n"
         "                    0 runs exactly --maxit iterations (benchmark mode)\n"
@@ -96,6 +98,8 @@ bool parse(const int argc, char** argv, Options& o)
             o.collocated = true;
         } else if (a == "--atomic") {
             o.atomic = true;
+        } else if (a == "--fused") {
+            o.fused = true;
         } else if (a == "--pc" && i + 1 < argc) {
             const std::string pc = argv[++i];
             o.jacobi = (pc == "jacobi");
@@ -258,6 +262,7 @@ int run(const Options& o)
     A.l_offsets = R.l_offsets.data();
     A.l_to_e = R.l_to_e.data();
     A.atomic_scatter = o.atomic;
+    A.fused = o.fused;
     A.B = B.data();
     A.D = D.data();
     A.JxW = geo.JxW.data();
@@ -293,9 +298,12 @@ int run(const Options& o)
                 o.problem == Problem::mass ? "mass" : o.problem == Problem::poisson ? "poisson" : "heat",
                 o.p, nq, collocated ? "collocated GLL, BK5" : "Gauss-Legendre, BK1/BK3",
                 o.nelem[0], o.nelem[1], o.nelem[2], nL, nE);
-    std::printf("precision %zu bytes, preconditioner %s, scatter %s, warp %g\n",
+    std::printf("precision %zu bytes, preconditioner %s, operator %s, warp %g\n",
                 sizeof(T), o.jacobi ? "jacobi" : "none",
-                o.atomic ? "atomic" : "transpose map", o.warp);
+                o.fused ? "fused (gather on the fly, atomic scatter)"
+                        : o.atomic ? "E-vector, atomic scatter"
+                                   : "E-vector, transpose-map scatter",
+                o.warp);
 
     double volume = 0.0;
     double k_const = 0.0;
@@ -400,9 +408,9 @@ int run(const Options& o)
                 total_iterations, solves, solves == 1 ? "" : "s", solve_seconds,
                 1e3 * solve_seconds / std::max(1L, total_iterations),
                 converged ? "" : " -- NOT CONVERGED");
-    std::printf("  operator %ld applications %.3f s: restrict %.3f, mass %.3f, stiffness %.3f, combine %.3f, prolong+mask %.3f\n",
-                A.applications, op_seconds, A.t_restrict.seconds, A.t_mass.seconds,
-                A.t_stiff.seconds, A.t_combine.seconds, A.t_prolong.seconds);
+    std::printf("  operator %ld applications %.3f s: gather %.3f, mass %.3f, stiffness %.3f, combine %.3f, scatter %.3f, mask %.3f\n",
+                A.applications, op_seconds, A.t_gather.seconds, A.t_mass.seconds,
+                A.t_stiff.seconds, A.t_combine.seconds, A.t_scatter.seconds, A.t_mask.seconds);
     std::printf("  vector ops %.3f s\n", std::max(0.0, solve_seconds - op_seconds));
     std::printf("throughput: %.3f MDoF/s (nodes x CG iterations / solve time)\n",
                 1e-6 * double(nL) * double(total_iterations) / solve_seconds);
