@@ -44,7 +44,8 @@ Options: `-p` order (1..8, 1..7 with `--gll`), `-n <n>` or `-n <nx,ny,nz>`
 elements, `--gll` collocated family, `--pc jacobi` diagonal preconditioner,
 `--atomic` scatter with atomic adds, `--warp a` mesh deformation (|a| < 0.18),
 `--tol`/`--maxit` CG control (`--tol 0` runs exactly `--maxit` iterations),
-`--dt`/`--steps`/`--theta` for `heat`. `BP_PARALLEL` is not needed: without a
+`--dt`/`--steps`/`--theta` for `heat`, `--vtk <base>` to write the fields
+(below). `BP_PARALLEL` is not needed: without a
 device the `target` regions run on the host threads (`OMP_NUM_THREADS`).
 
 A run prints the problem size, the CG history, two sanity checks, the error
@@ -74,6 +75,21 @@ throughput: 4.43 MDoF/s (nodes x CG iterations / solve time)
   after a few iterations; use `--warp`, larger meshes or `--tol 0 --maxit N`
   for timing.
 
+## Plotting the fields
+
+`--vtk <base>` writes the solution `u`, the exact solution `u_exact` and
+their difference `error` at the GLL nodes as a legacy ASCII VTK file
+(`<base>.vtk`; the `heat` problem writes `<base>_0000.vtk` for the initial
+condition and one file per step). The file is a `STRUCTURED_GRID` of the
+nnode_x × nnode_y × nnode_z nodes with explicit coordinates, so warped
+meshes plot correctly; ParaView and VisIt open it directly, and the
+per-step files of a `heat` run form a time series.
+
+```sh
+./bp heat -p 3 -n 8 --steps 20 --theta 0.5 --vtk out/heat   # out/ must exist
+./bp poisson -p 4 -n 8 --warp 0.1 --vtk poisson
+```
+
 ## Structure
 
 ```
@@ -85,6 +101,7 @@ miniapp/
   bp_backend.h   OpenMP target: restriction, prolongation, vector operations, dot
   bp_operator.h  A = cM M + cK K applied matrix-free, with phase timers
   bp_solver.h    preconditioned conjugate gradients
+  bp_vtk.h       legacy VTK writer for the nodal fields
   bp.cpp         problems, options, checks and report
 ```
 

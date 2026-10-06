@@ -29,6 +29,7 @@
 #include "bp_backend.h"
 #include "bp_operator.h"
 #include "bp_solver.h"
+#include "bp_vtk.h"
 
 #ifndef BP_REAL
 #define BP_REAL double
@@ -52,6 +53,7 @@ struct Options {
     double dt = 1e-3;
     int steps = 10;
     double theta = 1.0;
+    std::string vtk;   // output base name; empty: no output
 };
 
 void usage()
@@ -68,7 +70,9 @@ void usage()
         "                    0 runs exactly --maxit iterations (benchmark mode)\n"
         "  --maxit <n>       CG iteration limit, default 1000\n"
         "  --dt <dt> --steps <n> --theta <t>   heat: time step, number of steps,\n"
-        "                    theta = 1 backward Euler (default), 0.5 Crank-Nicolson\n";
+        "                    theta = 1 backward Euler (default), 0.5 Crank-Nicolson\n"
+        "  --vtk <base>      write u, u_exact and the error to <base>.vtk (legacy ASCII\n"
+        "                    structured grid); heat writes <base>_<step>.vtk per step\n";
 }
 
 bool parse(const int argc, char** argv, Options& o)
@@ -98,6 +102,8 @@ bool parse(const int argc, char** argv, Options& o)
             if (!o.jacobi && pc != "none") {
                 return false;
             }
+        } else if (a == "--vtk" && i + 1 < argc) {
+            o.vtk = argv[++i];
         } else if (a == "-n" && i + 1 < argc) {
             const std::string n = argv[++i];
             if (std::sscanf(n.c_str(), "%d,%d,%d", &o.nelem[0], &o.nelem[1], &o.nelem[2]) == 1) {
@@ -145,6 +151,33 @@ double max_abs(const std::vector<T>& v)
         m = std::max(m, std::fabs(double(x)));
     }
     return m;
+}
+
+// Writes the solution x, the exact solution at time t and their difference.
+template <typename T>
+bool write_fields(const std::string& path, const bp::Mesh& mesh,
+                  const std::vector<std::array<double, 3>>& coords,
+                  const std::vector<T>& x, const double t)
+{
+    std::vector<T> ex(x.size());
+    std::vector<T> err(x.size());
+    for (std::size_t g = 0; g < x.size(); ++g) {
+        ex[g] = T(exact(coords[g], t));
+        err[g] = x[g] - ex[g];
+    }
+    const std::vector<bp::NamedField<T>> fields = {{"u", &x}, {"u_exact", &ex}, {"error", &err}};
+    const bool ok = bp::write_vtk(path, mesh, coords, fields, "bp solution, t = " + std::to_string(t));
+    if (!ok) {
+        std::fprintf(stderr, "could not write %s\n", path.c_str());
+    }
+    return ok;
+}
+
+std::string step_file(const std::string& base, const int step)
+{
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "_%04d", step);
+    return base + buf + ".vtk";
 }
 
 template <typename T, int nq, bool collocated>
@@ -274,6 +307,7 @@ int run(const Options& o)
     bool converged = true;
     double err_max = 0.0;
     double err_M = 0.0;
+    bool vtk_ok = true;
 
     // ---- everything below runs with the arrays resident on the device ------
     #pragma omp target data \
@@ -304,6 +338,9 @@ int run(const Options& o)
         // right-hand side and solve(s)
         const T* pc = o.jacobi ? d_dinv : nullptr;
         const int nsolve = (o.problem == Problem::heat) ? o.steps : 1;
+        if (o.problem == Problem::heat && !o.vtk.empty()) {
+            vtk_ok = write_fields(step_file(o.vtk, 0), mesh, coords, x, 0.0);
+        }
         for (int n = 0; n < nsolve; ++n) {
             if (o.problem == Problem::heat) {
                 // b = (M - (1 - theta) dt K) u^n, masked like the operator
@@ -320,6 +357,10 @@ int run(const Options& o)
             if (o.problem == Problem::heat) {
                 std::printf("  step %3d: %4d iterations, ||r||/||b|| = %.2e\n",
                             n + 1, res.iterations, res.relative_residual);
+                if (!o.vtk.empty()) {
+                    bp::backend::from_device(nL, d_x);
+                    vtk_ok = write_fields(step_file(o.vtk, n + 1), mesh, coords, x, o.dt * (n + 1)) && vtk_ok;
+                }
             } else {
                 std::printf("  CG: %d iterations, ||r||/||b|| = %.2e%s\n",
                             res.iterations, res.relative_residual,
@@ -330,6 +371,9 @@ int run(const Options& o)
         // errors against the manufactured solution: nodal maximum and the
         // M-norm sqrt(e^T M e), one more mass application
         bp::backend::from_device(nL, d_x);
+        if (o.problem != Problem::heat && !o.vtk.empty()) {
+            vtk_ok = write_fields(o.vtk + ".vtk", mesh, coords, x, 0.0);
+        }
         for (std::size_t g = 0; g < nL; ++g) {
             r[g] = x[g] - u_exact[g];
         }
@@ -340,6 +384,10 @@ int run(const Options& o)
         A.apply(T(1), T(0), d_r, d_Ap);
         A.mask = saved_mask;
         err_M = std::sqrt(double(bp::backend::dot(nL, d_r, d_Ap)));
+    }
+
+    if (!vtk_ok) {
+        return 1;
     }
 
     // ---- report ---------------------------------------------------------------
