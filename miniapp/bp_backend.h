@@ -151,8 +151,11 @@ void pointwise_inplace(const std::size_t n, const T* __restrict__ d, T* __restri
 template <typename T>
 T dot(const std::size_t n, const T* __restrict__ x, const T* __restrict__ y)
 {
+    // the reduction scalar must be mapped back explicitly: on a separate
+    // `target` directive it would otherwise be firstprivate (a combined
+    // `target teams loop reduction` maps it implicitly)
     T s = 0;
-    #pragma omp target map(to: x[:n], y[:n])
+    #pragma omp target map(to: x[:n], y[:n]) map(tofrom: s)
     #pragma omp teams loop reduction(+: s)
     for (std::size_t i = 0; i < n; ++i) {
         s += x[i] * y[i];
@@ -174,7 +177,7 @@ T cg_update(const std::size_t n, const T alpha, const T* __restrict__ p,
             const T* __restrict__ Ap, T* __restrict__ x, T* __restrict__ r)
 {
     T rr = 0;
-    #pragma omp target map(to: p[:n], Ap[:n]) map(tofrom: x[:n], r[:n])
+    #pragma omp target map(to: p[:n], Ap[:n]) map(tofrom: x[:n], r[:n], rr)
     #pragma omp teams loop reduction(+: rr)
     for (std::size_t i = 0; i < n; ++i) {
         x[i] += alpha * p[i];

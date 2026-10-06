@@ -36,4 +36,6 @@ diffusion problems) built on the same kernels.
   `#pragma omp target` with its `map` clauses on one line (continued with
   `\` when long), the `teams loop` / `teams distribute parallel for`
   directive with its `reduction` on the next; a combined directive is fine
-  only when it is short (one or two mapped arrays).
+  only when it is short (one or two mapped arrays). A reduction scalar
+  then needs an explicit `map(tofrom:)` on the `target` line, since a
+  scalar is firstprivate there by default.
