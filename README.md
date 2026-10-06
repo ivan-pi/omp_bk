@@ -44,6 +44,24 @@ make CXX=clang++
 Each run prints the achieved `GDoF/s` and effective `GB/s`, followed by the
 solution norm (useful as a quick correctness check).
 
+## Mini-app: bake-off problems with the kernels
+
+`miniapp/` turns the kernels into a solver: `bp` runs conjugate gradients on
+the mass problem (BP1), the Poisson problem with Gauss-Legendre (BP3) or
+collocated GLL quadrature (BP5), and an implicit diffusion equation whose
+operator `M + θ Δt K` needs both the mass and the stiffness kernel. The
+kernels live in `bk1_kernel.h`, `bk3_kernel.h` and `bk5_kernel.h`, shared
+with the benchmark drivers.
+
+```sh
+make bp
+./bp poisson -p 4 -n 16 --pc jacobi
+./bp heat -p 3 -n 8 --dt 1e-3 --steps 10 --theta 0.5
+```
+
+See `miniapp/README.md` for the problems, the options, the output and how
+the programming-model-specific parts are separated for porting.
+
 ## Apple AMX version of BK1
 
 `amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX
