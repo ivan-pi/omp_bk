@@ -86,14 +86,16 @@ struct Mesh {
         return J;
     }
 
+    // dX/dxi of the undeformed element: half its size in direction d.
+    double half_h(const int d) const { return 0.5 / nelem[d]; }
+
     // Undeformed coordinate of a reference point xi in [-1, 1] of element e.
     std::array<double, 3> undeformed(const std::array<int, 3>& e,
                                      const std::array<double, 3>& xi) const
     {
         std::array<double, 3> X{};
         for (int d = 0; d < 3; ++d) {
-            const double h = 1.0 / nelem[d];
-            X[d] = h * (e[d] + 0.5 * (1.0 + xi[d]));
+            X[d] = half_h(d) * (2.0 * e[d] + 1.0 + xi[d]);
         }
         return X;
     }

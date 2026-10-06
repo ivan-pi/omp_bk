@@ -147,11 +147,11 @@ void SumFactorizationFused(
         // Gather the element's input box; the derivative loops below read
         // it nq times per entry, so it lives in local memory.
         T s_in[nq * nq * nq];
-        const ndview<const T, nq, nq, nq> e_in{s_in};
+        const ndview<T, nq, nq, nq> e_in{s_in};
         for (index_t i = 0; i < nq; ++i) {
             for (index_t j = 0; j < nq; ++j) {
                 for (index_t k = 0; k < nq; ++k) {
-                    s_in[(i * nq + j) * nq + k] = L_in[e_idx(i, j, k)];
+                    e_in(i, j, k) = L_in[e_idx(i, j, k)];
                 }
             }
         }

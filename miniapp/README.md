@@ -62,10 +62,10 @@ precision 8 bytes, preconditioner none, scatter transpose map, warp 0.1
   CG: 91 iterations, ||r||/||b|| = 9.07e-09
 checks: 1^T M 1 = 1 (volume 1), max |K 1| / max |K u| = 4.79e-16
 error: max nodal |u - u_exact| = 8.342e-06, ||u - u_exact||_M = 1.554e-06
-solve: 91 CG iterations in 1 solve, 0.321 s, 3.527 ms/iteration
-  operator 97 applications 0.280 s: gather 0.030, mass 0.004, stiffness 0.180, combine 0.000, scatter 0.058, mask 0.008
-  vector ops 0.041 s
-throughput: 4.43 MDoF/s (nodes x CG iterations / solve time)
+solve: 91 CG iterations in 1 solve, 0.238 s, 2.621 ms/iteration
+  operator 0.160 s inside the solves, vector ops 0.078 s
+  operator 96 applications in total 0.166 s: gather 0.024, mass 0.002, stiffness 0.086, advect 0.000, scatter 0.029, mask 0.026
+throughput: 5.96 MDoF/s (nodes x CG iterations / solve time)
 ```
 
 - `1^T M 1` is the volume of the domain (1 for any warp) and `K 1` must vanish
@@ -74,6 +74,10 @@ throughput: 4.43 MDoF/s (nodes x CG iterations / solve time)
 - The errors decrease like h^(p+1) under refinement and exponentially in p;
   the `heat` error is dominated by the time step (first order for θ = 1,
   second for θ = 0.5).
+- The first operator line counts only the applications inside the CG
+  solves, so that line and the vector operations add up to the solve time;
+  the second is the phase breakdown over every application, including the
+  checks and the right-hand sides.
 - The throughput line is the CEED metric (degrees of freedom times
   iterations per second). On the uniform mesh the smooth manufactured
   solution is close to an eigenvector of the discrete Laplacian and CG stops
@@ -146,7 +150,8 @@ miniapp/
   bp_basis.h     GLL/GL points and weights, Lagrange basis and derivative matrices
   bp_mesh.h      Cartesian mesh, node numbering, element restriction, Dirichlet mask
   bp_geometry.h  metric factors JxW and G in the kernels' layouts, element diagonals
-  bp_backend.h   OpenMP target: restriction, prolongation, vector operations, dot
+  bp_backend.h   OpenMP target: gather, scatter-add, vector operations, dot
+  bp_timer.h     accumulating stopwatch for the phase breakdown
   bp_operator.h  A = cM M + cK K applied matrix-free, with phase timers
   bp_solver.h    preconditioned conjugate gradients
   bp_vtk.h       legacy VTK writer for the nodal fields
@@ -164,7 +169,10 @@ The L-vector holds one value per global node, the E-vector one per element
 and local node. `P` is stored as an index array (`e_to_l`), and `Pᵀ` as its
 transpose in CSR form so each global node sums its own element entries: the
 result is deterministic. `--atomic` uses the direct transpose with atomic
-adds instead. (`P` is libCEED's element restriction; it only changes the
+adds instead. Each kernel's output is scattered with its coefficient, so
+c_M M + c_K K is two kernel passes on one gathered E-vector and two
+accumulating scatters. The collocated (GLL) mass matrix is diagonal, so it
+is assembled once as an L-vector and applied without any restriction. (`P` is libCEED's element restriction; it only changes the
 storage layout and has nothing to do with multigrid.) Dirichlet conditions
 are imposed by masking: the boundary rows of `A x` and of the right-hand
 side are zeroed, and all iterates keep zero boundary values, so CG runs on
@@ -189,15 +197,15 @@ in their first and last step:
   change by one). The combination `cM M + cK K` comes for free: each
   kernel adds its own multiple into the same output.
 
-The timing breakdown separates the two: compare `gather + scatter + combine`
-of the E-vector path against the extra time inside `mass` and `stiffness`
-of the fused path. On a 4-core CPU host fallback at p = 4, 12³ elements,
-`heat` for 60 iterations:
+The timing breakdown separates the two: compare `gather + scatter` of the
+E-vector path against the extra time inside `mass` and `stiffness` of the
+fused path. On a 4-core CPU host fallback at p = 4, 12³ elements, `heat`
+for 60 iterations:
 
 ```
-E-vector, transpose map   7.5 ms/iter   gather 0.024 mass 0.076 stiffness 0.174 combine 0.024 scatter 0.025
-E-vector, atomic scatter  9.0 ms/iter   gather 0.021 mass 0.080 stiffness 0.212 combine 0.025 scatter 0.088
-fused                     7.9 ms/iter   gather 0     mass 0.115 stiffness 0.207 combine 0     scatter 0.018 (zeroing y)
+E-vector, transpose map    9.7 ms/iter   gather 0.030 mass 0.122 stiffness 0.283 scatter 0.072
+E-vector, atomic scatter  10.3 ms/iter   gather 0.026 mass 0.112 stiffness 0.259 scatter 0.149
+fused                      9.4 ms/iter   gather 0     mass 0.148 stiffness 0.309 scatter 0.016 (zeroing y)
 ```
 
 On the CPU the atomics cost about what the stored E-vector saves; on a GPU
@@ -219,9 +227,9 @@ the error checks.
 
 The device code is confined to the three kernel headers and
 `bp_backend.h`, which has twelve one-loop functions: `gather`,
-`scatter_add`, `scatter_add_atomic`, `fused_pointwise`, `copy`, `fill`,
-`scale`, `axpby`, `lincomb`, `pointwise`, `pointwise_inplace`, `dot`, plus
-`to_device`/`from_device`.
+`scatter_add`, `scatter_add_atomic`, `copy`, `fill`, `axpby`, `lincomb`,
+`pointwise`, `pointwise_add`, `pointwise_inplace`, `dot` and the fused
+conjugate-gradient update `cg_update`, plus `to_device`/`from_device`.
 An OpenACC, Kokkos or CUDA version replaces those files and the `target
 data` region in `bp.cpp` (device allocation and the initial copies) and
 keeps the rest. Things to carry over:

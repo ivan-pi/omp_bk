@@ -11,11 +11,13 @@
 //     JxW  = |J| w                            mass     (BK1, lumped GLL mass)
 //     G    = |J| w  J^{-1} J^{-T}  (symmetric) stiffness (BK3, BK5)
 //
-// so that  u^T K v = sum_q (grad_xi u)^T G (grad_xi v).  With a direction e
-// given, G = |J| w (J^{-1} e)(J^{-1} e)^T instead, the rank-one metric of the
-// directional stiffness  int (e.grad u)(e.grad v)  of the Taylor-Galerkin
-// transport step; the same BK3/BK5 kernels then apply that operator.
+// so that  u^T K v = sum_q (grad_xi u)^T G (grad_xi v).  More generally
+// G = |J| w J^{-1} C J^{-T} for a constant symmetric coefficient tensor C:
+// the identity gives the Laplacian, C = e e^T the directional stiffness
+// int (e.grad u)(e.grad v) of the Taylor-Galerkin transport step, and the
+// same BK3/BK5 kernels apply either.
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -36,15 +38,35 @@ struct Geometry {
     std::vector<T> diag_stiff;
 };
 
-// out(i, j, k) = sum_{p,q,r} A(i, p) B(j, q) C(k, r) w(p, q, r), with A, B, C
-// node-major [nm x nq] and w an nq^3 box: the sum-factorised evaluation
-// that the kernels perform, here on the host for the diagonals.
+using Tensor3 = std::array<std::array<double, 3>, 3>;
+
+inline Tensor3 identity_tensor()
+{
+    return {{{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}};
+}
+
+inline Tensor3 outer_product(const std::array<double, 3>& e)
+{
+    Tensor3 C{};
+    for (int a = 0; a < 3; ++a) {
+        for (int c = 0; c < 3; ++c) {
+            C[a][c] = e[a] * e[c];
+        }
+    }
+    return C;
+}
+
+// out(i, j, k) += scale * sum_{p,q,r} A(i, p) B(j, q) C(k, r) w(p, q, r), with
+// A, B, C node-major [nm x nq] and w an nq^3 box: the sum-factorised
+// evaluation that the kernels perform, here on the host for the diagonals.
+// t1 and t2 are scratch of nm nq^2 and nm^2 nq entries.
 inline void contract3(const int nm, const int nq,
                       const double* A, const double* B, const double* C,
-                      const double* w, const double scale, double* out)
+                      const double* w, const double scale, double* out,
+                      std::vector<double>& t1, std::vector<double>& t2)
 {
-    std::vector<double> t1(std::size_t(nm) * nq * nq);
-    std::vector<double> t2(std::size_t(nm) * nm * nq);
+    t1.resize(std::size_t(nm) * nq * nq);
+    t2.resize(std::size_t(nm) * nm * nq);
     for (int i = 0; i < nm; ++i) {
         for (int q = 0; q < nq; ++q) {
             for (int r = 0; r < nq; ++r) {
@@ -82,7 +104,7 @@ inline void contract3(const int nm, const int nq,
 
 template <typename T>
 Geometry<T> make_geometry(const Mesh& m, const Basis1D& b,
-                          const std::array<double, 3>* direction = nullptr)
+                          const Tensor3& C = identity_tensor())
 {
     const int nq = b.nq;
     const int nm = b.nm;
@@ -108,105 +130,114 @@ Geometry<T> make_geometry(const Mesh& m, const Basis1D& b,
         BD[s] = b.B[s] * b.DB[s];
     }
 
-    #pragma omp parallel for collapse(3)
-    for (int ex = 0; ex < m.nelem[0]; ++ex) {
-        for (int ey = 0; ey < m.nelem[1]; ++ey) {
-            for (int ez = 0; ez < m.nelem[2]; ++ez) {
-                const std::array<int, 3> ec = {ex, ey, ez};
-                const std::size_t e = m.element_id(ex, ey, ez);
-                std::vector<double> jxw(nq3);
-                std::vector<double> g(6 * nq3);   // factor-major (f, p, q, r)
-                for (int p = 0; p < nq; ++p) {
-                    for (int q = 0; q < nq; ++q) {
-                        for (int r = 0; r < nq; ++r) {
-                            const std::array<double, 3> xi = {b.quad.x[p], b.quad.x[q], b.quad.x[r]};
-                            const std::array<double, 3> X = m.undeformed(ec, xi);
-                            const auto Jp = m.physical_jacobian(X);
-                            // J = d(physical)/dX * dX/dxi, dX/dxi = diag(h / 2)
-                            double J[3][3];
-                            for (int a = 0; a < 3; ++a) {
-                                for (int c = 0; c < 3; ++c) {
-                                    J[a][c] = Jp[a][c] * 0.5 / m.nelem[c];
-                                }
-                            }
-                            const double det = J[0][0] * (J[1][1] * J[2][2] - J[1][2] * J[2][1])
-                                             - J[0][1] * (J[1][0] * J[2][2] - J[1][2] * J[2][0])
-                                             + J[0][2] * (J[1][0] * J[2][1] - J[1][1] * J[2][0]);
-                            double Ji[3][3];   // inverse by cofactors
-                            Ji[0][0] = (J[1][1] * J[2][2] - J[1][2] * J[2][1]) / det;
-                            Ji[0][1] = (J[0][2] * J[2][1] - J[0][1] * J[2][2]) / det;
-                            Ji[0][2] = (J[0][1] * J[1][2] - J[0][2] * J[1][1]) / det;
-                            Ji[1][0] = (J[1][2] * J[2][0] - J[1][0] * J[2][2]) / det;
-                            Ji[1][1] = (J[0][0] * J[2][2] - J[0][2] * J[2][0]) / det;
-                            Ji[1][2] = (J[0][2] * J[1][0] - J[0][0] * J[1][2]) / det;
-                            Ji[2][0] = (J[1][0] * J[2][1] - J[1][1] * J[2][0]) / det;
-                            Ji[2][1] = (J[0][1] * J[2][0] - J[0][0] * J[2][1]) / det;
-                            Ji[2][2] = (J[0][0] * J[1][1] - J[0][1] * J[1][0]) / det;
-                            const double wq = b.quad.w[p] * b.quad.w[q] * b.quad.w[r] * det;
-                            const std::size_t idx = (std::size_t(p) * nq + q) * nq + r;
-                            jxw[idx] = wq;
-                            // symmetric factors in the order rr, rs, rt, ss, st, tt
-                            const int pairs[6][2] = {{0, 0}, {0, 1}, {0, 2}, {1, 1}, {1, 2}, {2, 2}};
-                            // et = J^{-1} e, the direction in reference coordinates
-                            double et[3] = {0.0, 0.0, 0.0};
-                            if (direction != nullptr) {
-                                for (int a = 0; a < 3; ++a) {
-                                    for (int d = 0; d < 3; ++d) {
-                                        et[a] += Ji[a][d] * (*direction)[d];
-                                    }
-                                }
-                            }
-                            for (int f = 0; f < 6; ++f) {
-                                const int a = pairs[f][0];
-                                const int c = pairs[f][1];
-                                double s = 0.0;
-                                if (direction != nullptr) {
-                                    s = et[a] * et[c];
-                                } else {
-                                    for (int d = 0; d < 3; ++d) {
-                                        s += Ji[a][d] * Ji[c][d];
-                                    }
-                                }
-                                g[f * nq3 + idx] = wq * s;
-                            }
-                        }
-                    }
-                }
+    #pragma omp parallel
+    {
+        // per-thread scratch, reused by every element
+        std::vector<double> jxw(nq3);
+        std::vector<double> g(6 * nq3);   // factor-major (f, p, q, r)
+        std::vector<double> dm(nm3);
+        std::vector<double> dk(nm3);
+        std::vector<double> t1;
+        std::vector<double> t2;
 
-                // element diagonals
-                std::vector<double> dm(nm3, 0.0);
-                std::vector<double> dk(nm3, 0.0);
-                contract3(nm, nq, BB.data(), BB.data(), BB.data(), jxw.data(), 1.0, dm.data());
-                contract3(nm, nq, DD.data(), BB.data(), BB.data(), g.data() + 0 * nq3, 1.0, dk.data());
-                contract3(nm, nq, BD.data(), BD.data(), BB.data(), g.data() + 1 * nq3, 2.0, dk.data());
-                contract3(nm, nq, BD.data(), BB.data(), BD.data(), g.data() + 2 * nq3, 2.0, dk.data());
-                contract3(nm, nq, BB.data(), DD.data(), BB.data(), g.data() + 3 * nq3, 1.0, dk.data());
-                contract3(nm, nq, BB.data(), BD.data(), BD.data(), g.data() + 4 * nq3, 2.0, dk.data());
-                contract3(nm, nq, BB.data(), BB.data(), DD.data(), g.data() + 5 * nq3, 1.0, dk.data());
-
-                // store in the kernel layouts
-                for (std::size_t s = 0; s < nq3; ++s) {
-                    geo.JxW[e * nq3 + s] = T(jxw[s]);
-                }
-                for (int p = 0; p < nq; ++p) {
-                    for (int q = 0; q < nq; ++q) {
-                        for (int f = 0; f < 6; ++f) {
+        #pragma omp for collapse(3)
+        for (int ex = 0; ex < m.nelem[0]; ++ex) {
+            for (int ey = 0; ey < m.nelem[1]; ++ey) {
+                for (int ez = 0; ez < m.nelem[2]; ++ez) {
+                    const std::array<int, 3> ec = {ex, ey, ez};
+                    const std::size_t e = m.element_id(ex, ey, ez);
+                    for (int p = 0; p < nq; ++p) {
+                        for (int q = 0; q < nq; ++q) {
                             for (int r = 0; r < nq; ++r) {
-                                const std::size_t src = f * nq3 + (std::size_t(p) * nq + q) * nq + r;
-                                std::size_t dst = 0;
-                                if (b.collocated) {
-                                    dst = ((std::size_t(p) * nq + q) * 6 + f) * nq + r;   // BK5
-                                } else {
-                                    dst = src;                                            // BK3
+                                const std::array<double, 3> xi = {b.quad.x[p], b.quad.x[q], b.quad.x[r]};
+                                const std::array<double, 3> X = m.undeformed(ec, xi);
+                                const auto Jp = m.physical_jacobian(X);
+                                // J = d(physical)/dX * dX/dxi
+                                double J[3][3];
+                                for (int a = 0; a < 3; ++a) {
+                                    for (int c = 0; c < 3; ++c) {
+                                        J[a][c] = Jp[a][c] * m.half_h(c);
+                                    }
                                 }
-                                geo.G[e * 6 * nq3 + dst] = T(g[src]);
+                                const double det = J[0][0] * (J[1][1] * J[2][2] - J[1][2] * J[2][1])
+                                                 - J[0][1] * (J[1][0] * J[2][2] - J[1][2] * J[2][0])
+                                                 + J[0][2] * (J[1][0] * J[2][1] - J[1][1] * J[2][0]);
+                                double Ji[3][3];   // inverse by cofactors
+                                Ji[0][0] = (J[1][1] * J[2][2] - J[1][2] * J[2][1]) / det;
+                                Ji[0][1] = (J[0][2] * J[2][1] - J[0][1] * J[2][2]) / det;
+                                Ji[0][2] = (J[0][1] * J[1][2] - J[0][2] * J[1][1]) / det;
+                                Ji[1][0] = (J[1][2] * J[2][0] - J[1][0] * J[2][2]) / det;
+                                Ji[1][1] = (J[0][0] * J[2][2] - J[0][2] * J[2][0]) / det;
+                                Ji[1][2] = (J[0][2] * J[1][0] - J[0][0] * J[1][2]) / det;
+                                Ji[2][0] = (J[1][0] * J[2][1] - J[1][1] * J[2][0]) / det;
+                                Ji[2][1] = (J[0][1] * J[2][0] - J[0][0] * J[2][1]) / det;
+                                Ji[2][2] = (J[0][0] * J[1][1] - J[0][1] * J[1][0]) / det;
+                                const double wq = b.quad.w[p] * b.quad.w[q] * b.quad.w[r] * det;
+                                const std::size_t idx = (std::size_t(p) * nq + q) * nq + r;
+                                jxw[idx] = wq;
+                                // JiC = J^{-1} C, then the symmetric factors
+                                // (J^{-1} C J^{-T})_ac in the order rr, rs, rt, ss, st, tt
+                                double JiC[3][3];
+                                for (int a = 0; a < 3; ++a) {
+                                    for (int c = 0; c < 3; ++c) {
+                                        JiC[a][c] = 0.0;
+                                        for (int d = 0; d < 3; ++d) {
+                                            JiC[a][c] += Ji[a][d] * C[d][c];
+                                        }
+                                    }
+                                }
+                                const int pairs[6][2] = {{0, 0}, {0, 1}, {0, 2}, {1, 1}, {1, 2}, {2, 2}};
+                                for (int f = 0; f < 6; ++f) {
+                                    const int a = pairs[f][0];
+                                    const int c = pairs[f][1];
+                                    double s = 0.0;
+                                    for (int d = 0; d < 3; ++d) {
+                                        s += JiC[a][d] * Ji[c][d];
+                                    }
+                                    g[f * nq3 + idx] = wq * s;
+                                }
                             }
                         }
                     }
-                }
-                for (std::size_t s = 0; s < nm3; ++s) {
-                    geo.diag_mass[e * nm3 + s] = T(dm[s]);
-                    geo.diag_stiff[e * nm3 + s] = T(dk[s]);
+
+                    // element diagonals
+                    std::fill(dm.begin(), dm.end(), 0.0);
+                    std::fill(dk.begin(), dk.end(), 0.0);
+                    contract3(nm, nq, BB.data(), BB.data(), BB.data(), jxw.data(), 1.0, dm.data(), t1, t2);
+                    contract3(nm, nq, DD.data(), BB.data(), BB.data(), g.data() + 0 * nq3, 1.0, dk.data(), t1, t2);
+                    contract3(nm, nq, BD.data(), BD.data(), BB.data(), g.data() + 1 * nq3, 2.0, dk.data(), t1, t2);
+                    contract3(nm, nq, BD.data(), BB.data(), BD.data(), g.data() + 2 * nq3, 2.0, dk.data(), t1, t2);
+                    contract3(nm, nq, BB.data(), DD.data(), BB.data(), g.data() + 3 * nq3, 1.0, dk.data(), t1, t2);
+                    contract3(nm, nq, BB.data(), BD.data(), BD.data(), g.data() + 4 * nq3, 2.0, dk.data(), t1, t2);
+                    contract3(nm, nq, BB.data(), BB.data(), DD.data(), g.data() + 5 * nq3, 1.0, dk.data(), t1, t2);
+
+                    // store in the kernel layouts
+                    for (std::size_t s = 0; s < nq3; ++s) {
+                        geo.JxW[e * nq3 + s] = T(jxw[s]);
+                    }
+                    T* const Ge = geo.G.data() + e * 6 * nq3;
+                    if (b.collocated) {
+                        // BK5 reads (p, q, factor, r)
+                        for (int p = 0; p < nq; ++p) {
+                            for (int q = 0; q < nq; ++q) {
+                                for (int f = 0; f < 6; ++f) {
+                                    for (int r = 0; r < nq; ++r) {
+                                        const std::size_t src = f * nq3 + (std::size_t(p) * nq + q) * nq + r;
+                                        Ge[((std::size_t(p) * nq + q) * 6 + f) * nq + r] = T(g[src]);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // BK3 reads the factor-major layout as it is
+                        for (std::size_t s = 0; s < 6 * nq3; ++s) {
+                            Ge[s] = T(g[s]);
+                        }
+                    }
+                    for (std::size_t s = 0; s < nm3; ++s) {
+                        geo.diag_mass[e * nm3 + s] = T(dm[s]);
+                        geo.diag_stiff[e * nm3 + s] = T(dk[s]);
+                    }
                 }
             }
         }

@@ -18,7 +18,7 @@ BK5: BK5.cpp bk5_kernel.h bk_common.h
 # Mini-app: CG solves of the bake-off problems (mass, Poisson, diffusion)
 # with the same kernels.  BP_REAL=float selects single precision.
 BP_HEADERS = miniapp/bp_basis.h miniapp/bp_mesh.h miniapp/bp_geometry.h miniapp/bp_backend.h \
-             miniapp/bp_operator.h miniapp/bp_solver.h miniapp/bp_vtk.h
+             miniapp/bp_operator.h miniapp/bp_solver.h miniapp/bp_vtk.h miniapp/bp_timer.h
 bp: miniapp/bp.cpp $(BP_HEADERS) bk1_kernel.h bk3_kernel.h bk5_kernel.h tg_kernel.h bk_common.h
 	$(CXX) $(CXXFLAGS) -o $@ $<
 

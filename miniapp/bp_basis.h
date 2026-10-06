@@ -153,7 +153,6 @@ inline void lagrange_matrices(const std::vector<double>& nodes,
 //                                             point Lagrange basis; BK3 reads
 //                                             it as D(n, p), BK5 as D(p, n)
 struct Basis1D {
-    int p = 0;
     int nm = 0;
     int nq = 0;
     bool collocated = false;
@@ -169,7 +168,6 @@ inline Basis1D make_basis(const int p, const bool collocated)
 {
     assert(p >= 1);
     Basis1D b;
-    b.p = p;
     b.nm = p + 1;
     b.collocated = collocated;
     b.nodes = gauss_lobatto_legendre(b.nm);
