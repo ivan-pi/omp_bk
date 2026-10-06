@@ -9,8 +9,11 @@
 //
 // All pointers are host pointers that the caller has mapped in an enclosing
 // `target data` region, so the map clauses below only assert presence and
-// never move data (the same convention as the kernels).  Every function is
-// synchronous, which keeps the phase timers in bp_operator.h honest.
+// never move data (the same convention as the kernels).  The `target`
+// directive with the data environment and the directive with the
+// parallelism are kept on separate lines, except where the combined form
+// is short.  Every function is synchronous, which keeps the phase timers
+// in bp_operator.h honest.
 
 #include <cmath>
 #include <cstddef>
@@ -23,7 +26,8 @@ template <typename T>
 void gather(const std::size_t nL, const std::size_t nE, const int* __restrict__ e_to_l,
             const T* __restrict__ L, T* __restrict__ E)
 {
-    #pragma omp target teams loop map(to: e_to_l[:nE], L[:nL]) map(from: E[:nE])
+    #pragma omp target map(to: e_to_l[:nE], L[:nL]) map(from: E[:nE])
+    #pragma omp teams loop
     for (std::size_t s = 0; s < nE; ++s) {
         E[s] = L[e_to_l[s]];
     }
@@ -36,7 +40,8 @@ void scatter_add(const std::size_t nL, const std::size_t nE, const int* __restri
                  const int* __restrict__ l_to_e, const T alpha, const T* __restrict__ E,
                  T* __restrict__ L, const bool accumulate)
 {
-    #pragma omp target teams loop map(to: l_offsets[:nL + 1], l_to_e[:nE], E[:nE]) map(tofrom: L[:nL])
+    #pragma omp target map(to: l_offsets[:nL + 1], l_to_e[:nE], E[:nE]) map(tofrom: L[:nL])
+    #pragma omp teams loop
     for (std::size_t g = 0; g < nL; ++g) {
         T s = 0;
         for (int t = l_offsets[g]; t < l_offsets[g + 1]; ++t) {
@@ -68,7 +73,8 @@ void scatter_add_atomic(const std::size_t nL, const std::size_t nE, const int* _
     if (!accumulate) {
         fill(nL, T(0), L);
     }
-    #pragma omp target teams distribute parallel for map(to: e_to_l[:nE], E[:nE]) map(tofrom: L[:nL])
+    #pragma omp target map(to: e_to_l[:nE], E[:nE]) map(tofrom: L[:nL])
+    #pragma omp teams distribute parallel for
     for (std::size_t s = 0; s < nE; ++s) {
         #pragma omp atomic update
         L[e_to_l[s]] += alpha * E[s];
@@ -100,7 +106,8 @@ template <typename T>
 void lincomb(const std::size_t n, const T a, const T* __restrict__ x,
              const T b, const T* __restrict__ y, T* __restrict__ z)
 {
-    #pragma omp target teams loop map(to: x[:n], y[:n]) map(from: z[:n])
+    #pragma omp target map(to: x[:n], y[:n]) map(from: z[:n])
+    #pragma omp teams loop
     for (std::size_t i = 0; i < n; ++i) {
         z[i] = a * x[i] + b * y[i];
     }
@@ -111,7 +118,8 @@ template <typename T>
 void pointwise(const std::size_t n, const T a, const T* __restrict__ d,
                const T* __restrict__ x, T* __restrict__ y)
 {
-    #pragma omp target teams loop map(to: d[:n], x[:n]) map(from: y[:n])
+    #pragma omp target map(to: d[:n], x[:n]) map(from: y[:n])
+    #pragma omp teams loop
     for (std::size_t i = 0; i < n; ++i) {
         y[i] = a * d[i] * x[i];
     }
@@ -122,7 +130,8 @@ template <typename T>
 void pointwise_add(const std::size_t n, const T a, const T* __restrict__ d,
                    const T* __restrict__ x, T* __restrict__ y)
 {
-    #pragma omp target teams loop map(to: d[:n], x[:n]) map(tofrom: y[:n])
+    #pragma omp target map(to: d[:n], x[:n]) map(tofrom: y[:n])
+    #pragma omp teams loop
     for (std::size_t i = 0; i < n; ++i) {
         y[i] += a * d[i] * x[i];
     }
@@ -143,7 +152,8 @@ template <typename T>
 T dot(const std::size_t n, const T* __restrict__ x, const T* __restrict__ y)
 {
     T s = 0;
-    #pragma omp target teams loop reduction(+: s) map(to: x[:n], y[:n])
+    #pragma omp target map(to: x[:n], y[:n])
+    #pragma omp teams loop reduction(+: s)
     for (std::size_t i = 0; i < n; ++i) {
         s += x[i] * y[i];
     }
@@ -164,7 +174,8 @@ T cg_update(const std::size_t n, const T alpha, const T* __restrict__ p,
             const T* __restrict__ Ap, T* __restrict__ x, T* __restrict__ r)
 {
     T rr = 0;
-    #pragma omp target teams loop reduction(+: rr) map(to: p[:n], Ap[:n]) map(tofrom: x[:n], r[:n])
+    #pragma omp target map(to: p[:n], Ap[:n]) map(tofrom: x[:n], r[:n])
+    #pragma omp teams loop reduction(+: rr)
     for (std::size_t i = 0; i < n; ++i) {
         x[i] += alpha * p[i];
         r[i] -= alpha * Ap[i];

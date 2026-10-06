@@ -149,10 +149,11 @@ void SumFactorizationFused(
     using idx_cview = ndview<const int, nm, nm, nm>;
     using nq_cview  = ndview<const T, nq, nq, nq>;
 
-    #pragma omp target teams distribute parallel for \
+    #pragma omp target \
         map(to: basis[:nm*nq]) \
         map(to: JxW[:nelmt*nq*nq*nq], e_to_l[:nelmt*nm*nm*nm], L_in[:nL]) \
         map(tofrom: L_out[:nL])
+    #pragma omp teams distribute parallel for
     for (std::size_t e = 0; e < nelmt; ++e) {
 
         // B(mode i, quad point p) == basis[i * nq + p], shared by all directions

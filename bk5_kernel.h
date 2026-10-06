@@ -125,10 +125,11 @@ void SumFactorizationFused(
     const T* __restrict__ L_in,
           T* __restrict__ L_out)
 {
-    #pragma omp target teams distribute parallel for \
+    #pragma omp target \
         map(to: dbasis[:nq*nq]) \
         map(to: G[:nelmt*6*nq*nq*nq], e_to_l[:nelmt*nq*nq*nq], L_in[:nL]) \
         map(tofrom: L_out[:nL])
+    #pragma omp teams distribute parallel for
     for (std::size_t e = 0; e < nelmt; ++e) {
 
         // D(i, n) == dbasis[i * nq + n].

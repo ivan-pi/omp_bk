@@ -32,3 +32,8 @@ diffusion problems) built on the same kernels.
 - OpenMP regions take `if(parallel)` from the options so the same binary
   runs single-threaded (`BK_PARALLEL=0`); a flag only used by a pragma is
   marked `[[maybe_unused]]` for builds without OpenMP.
+- Offload directives keep the data environment and the parallelism apart:
+  `#pragma omp target` with its `map` clauses on one line (continued with
+  `\` when long), the `teams loop` / `teams distribute parallel for`
+  directive with its `reduction` on the next; a combined directive is fine
+  only when it is short (one or two mapped arrays).

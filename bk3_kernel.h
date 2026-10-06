@@ -220,11 +220,12 @@ void SumFactorizationFused(
 {
     using idx_cview = ndview<const int, nm, nm, nm>;
 
-    #pragma omp target teams distribute parallel for \
+    #pragma omp target \
         map(to: basis[:nm*nq]) \
         map(to: dbasis[:nq*nq]) \
         map(to: G[:nelmt*6*nq*nq*nq], e_to_l[:nelmt*nm*nm*nm], L_in[:nL]) \
         map(tofrom: L_out[:nL])
+    #pragma omp teams distribute parallel for
     for (std::size_t e = 0; e < nelmt; ++e) {
 
         // Views onto the mapped basis matrices. Constructed *inside* the
