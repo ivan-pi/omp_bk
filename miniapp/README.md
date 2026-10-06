@@ -124,16 +124,18 @@ the interior system.
 
 ### E-vector or gather on the fly
 
-Each kernel header provides the per-element computation (`ElementKernel`)
-and two ways of running it over the mesh:
+Each kernel header has two entry points with the same loop nest; the
+element loop and the contraction loops stay in one kernel body so a
+compiler can parallelise across elements, and the two bodies differ only
+in their first and last step:
 
 - `SumFactorization`, the CEED bake-off structure: the E-vector is a stored
   array, the kernel reads its slice and writes its slice, and the gather
   and scatter are separate passes. The kernel's in/out traffic goes
   through global memory twice.
-- `SumFactorizationFused` (`--fused`): every element gathers its input
-  box from the L-vector through `e_to_l`, runs the element kernel on
-  local arrays and adds its scaled output into the L-vector with atomic
+- `SumFactorizationFused` (`--fused`): the first step gathers the
+  element's input box from the L-vector through `e_to_l` and the last
+  step adds alpha times the output box into the L-vector with atomic
   updates. Nothing element-sized is stored; the cost is the atomics and a
   summation order that varies between runs (the CG iteration count may
   change by one). The combination `cM M + cK K` comes for free: each
