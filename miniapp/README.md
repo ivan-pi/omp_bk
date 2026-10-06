@@ -104,8 +104,12 @@ K_e = ∫ (e·∇φ)(e·∇u) is BK3 with the rank-one metric G = |J| w ẽẽ�
 kernel on the linear function u = e·x, for which r equals a|e|² M 1 on the
 interior nodes exactly (the flux term integrates to a wall contribution
 only); the reported ratio must be at round-off. The wall surface term of
-the integration by parts is not implemented: the bump must stay away from
-the boundary, as the defaults ensure.
+the integration by parts is not implemented and the walls carry u = 0, so
+the bump must stay away from them: its tail at the inflow wall is the one
+inconsistency with the exact solution, 4e-6 for the default σ = 0.06 and
+already 9e-4 for σ = 0.08, which then bounds the error of any resolution.
+The error of a converged run trails the bump as the dispersive ripple of
+the scheme and peaks each time the bump crosses an element boundary.
 
 ## Plotting the fields
 

@@ -60,7 +60,7 @@ struct Options {
     int steps = 10;
     double theta = 1.0;
     std::array<double, 3> velocity = {1.0, 0.0, 0.0};   // transport
-    double sigma = 0.08;                                 // width of the bump
+    double sigma = 0.06;                                 // width of the bump
     bool tg3 = false;                                    // M + dt^2/6 K_e
     std::string vtk;   // output base name; empty: no output
 };
@@ -93,7 +93,7 @@ void usage()
         "  --dt <dt> --steps <n> --theta <t>   heat: time step, number of steps,\n"
         "                    theta = 1 backward Euler (default), 0.5 Crank-Nicolson\n"
         "  --velocity <ex,ey,ez> --sigma <s> --tg3   transport: constant velocity\n"
-        "                    (default 1,0,0), bump width (0.08), third-order Taylor-Galerkin\n"
+        "                    (default 1,0,0), bump width (0.06), third-order Taylor-Galerkin\n"
         "  --vtk <base>      write u, u_exact and the error to <base>.vtk (legacy ASCII\n"
         "                    structured grid); heat writes <base>_<step>.vtk per step\n";
 }
@@ -319,7 +319,12 @@ int run(const Options& o)
         }
     }
     if (time_dependent) {
-        x = f;                               // initial condition u(x, 0)
+        // initial condition u(x, 0) with the homogeneous Dirichlet values on
+        // the walls (the exact transport solution is not exactly zero there;
+        // the bump's width keeps the inconsistency at round-off)
+        for (std::size_t g = 0; g < nL; ++g) {
+            x[g] = use_mask ? mask[g] * f[g] : f[g];
+        }
     }
 
     // work space
