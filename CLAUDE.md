@@ -2,12 +2,19 @@
 
 OpenMP implementations of the CEED bake-off kernels BK1, BK3 and BK5; `amx/`
 holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`).
+The BK1 kernel lives in `bk1_sumfact.h`, generic in the arithmetic type:
+`BK1.cpp` runs it in float, `BK1_ff.cpp` in float-float (`float_float.h`, a
+pair of floats with TwoSum/TwoProd arithmetic) next to double and float.
 
 ## Build and check
 
-- `make` builds BK1, BK3 and BK5; `make BK1_amx` builds the AMX kernel
+- `make` builds BK1, BK3, BK5 and BK1_ff; `make BK1_amx` builds the AMX kernel
   (software-emulated AMX off Apple Silicon); `make bw_test amx_pipe` builds
   the roofline micro-benchmarks in `amx/bench/` (`accel_gemm` is macOS only).
+- `BK1_ff` prints each precision's relative error against double; float-float
+  must stay near 1e-15 on random data. Never build it with `-ffast-math` (the
+  header rejects it), and on x86 add `-mfma`/`-march=native` so `std::fma` is
+  an instruction (the output line says `fma = hardware`).
 - `amx/scripts/validate.sh` checks the AMX kernel against the serial
   reference on random data; the emulator also enforces the 128-byte
   alignment of pair/quad loads and stores, so run it after any layout change.
