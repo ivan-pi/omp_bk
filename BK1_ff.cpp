@@ -51,7 +51,14 @@ const std::vector<T>& as_precision(const std::vector<double>& v, std::vector<T>&
     if constexpr (std::is_same_v<T, double>) {
         return v;
     } else {
-        storage.assign(v.begin(), v.end());
+        storage.resize(v.size());
+        for (std::size_t i = 0; i < v.size(); ++i) {
+            if constexpr (std::is_same_v<T, ffloat>) {
+                storage[i] = to_ffloat(v[i]);
+            } else {
+                storage[i] = static_cast<T>(v[i]);
+            }
+        }
         return storage;
     }
 }

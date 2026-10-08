@@ -3,9 +3,9 @@
 
 // bk1_sumfact.h -- the BK1 (mass operator) sum factorization, generic in the
 // arithmetic type T.  T is float or double for the plain kernels and ffloat
-// (float_float.h) for the float-float kernel: T needs construction from 0,
-// `+=` and `*`, `*=`, and must be trivially copyable so that the OpenMP maps
-// can move the arrays bitwise.
+// (float_float.h) for the float-float kernel: T{} must be zero, T needs
+// `+=`, `*` and `*=`, and it must be trivially copyable so that the OpenMP
+// maps can move the arrays bitwise.
 
 #include <algorithm>
 #include <chrono>
@@ -66,7 +66,7 @@ void SumFactorization(
         for (index_t p = 0; p < nq; ++p) {
             for (index_t k = 0; k < nm; ++k) {
                 for (index_t j = 0; j < nm; ++j) {
-                    T tmp = 0;
+                    T tmp{};
                     for (index_t i = 0; i < nm; ++i) {
                         tmp += wsp0(i, j, k) * B(i, p);
                     }
@@ -79,7 +79,7 @@ void SumFactorization(
         for (index_t q = 0; q < nq; ++q) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t k = 0; k < nm; ++k) {
-                    T tmp = 0;
+                    T tmp{};
                     for (index_t j = 0; j < nm; ++j) {
                         tmp += wsp1(p, j, k) * B(j, q);
                     }
@@ -92,7 +92,7 @@ void SumFactorization(
         for (index_t r = 0; r < nq; ++r) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t p = 0; p < nq; ++p) {
-                    T tmp = 0;
+                    T tmp{};
                     for (index_t k = 0; k < nm; ++k) {
                         tmp += wsp0(q, p, k) * B(k, r);
                     }
@@ -116,7 +116,7 @@ void SumFactorization(
         for (index_t k = 0; k < nm; ++k) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t p = 0; p < nq; ++p) {
-                    T tmp = 0;
+                    T tmp{};
                     for (index_t r = 0; r < nq; ++r) {
                         tmp += wsp1(p, q, r) * B(k, r);
                     }
@@ -129,7 +129,7 @@ void SumFactorization(
         for (index_t j = 0; j < nm; ++j) {
             for (index_t k = 0; k < nm; ++k) {
                 for (index_t p = 0; p < nq; ++p) {
-                    T tmp = 0;
+                    T tmp{};
                     for (index_t q = 0; q < nq; ++q) {
                         tmp += wsp0(q, p, k) * B(j, q);
                     }
@@ -142,7 +142,7 @@ void SumFactorization(
         for (index_t i = 0; i < nm; ++i) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
-                    T tmp = 0;
+                    T tmp{};
                     for (index_t p = 0; p < nq; ++p) {
                         tmp += wsp1(p, j, k) * B(i, p);
                     }

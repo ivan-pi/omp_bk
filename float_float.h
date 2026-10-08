@@ -25,10 +25,19 @@
 // explicit std::fma, so -ffp-contract=fast (the GPU compilers' default)
 // cannot fuse anything.  std::fma must be a hardware instruction for the
 // kernel to be fast; a libm fmaf is still exact.
+//
+// ffloat is a plain aggregate of two floats, deliberately without
+// constructors or conversion constructors: with those, nvc++ compiled the
+// OpenMP `teams loop` over elements across teams only, one thread per team
+// with the per-element arrays and every operator temporary in shared memory
+// (about 50x slower than float), while it mapped the float and double
+// instantiations one element per thread.  A value is zeroed with `T{}` and
+// built from a double with to_ffloat().
 
 #include <cfloat>
 #include <cmath>
 #include <limits>
+#include <type_traits>
 
 #if defined(__FAST_MATH__)
 #error "float-float arithmetic needs IEEE semantics: do not compile with -ffast-math / -Ofast"
@@ -52,18 +61,20 @@ struct ffloat {
     float hi;
     float lo;
 
-    ffloat() = default;
-    constexpr ffloat(float h, float l) : hi(h), lo(l) {}
-    // Exact split of a double into the leading 24 bits and the next 24 bits
-    // (for |x| within float's range); float and int arrive through double.
-    constexpr ffloat(double x)
-        : hi(static_cast<float>(x)),
-          lo(static_cast<float>(x - static_cast<double>(static_cast<float>(x)))) {}
-
     explicit constexpr operator double() const { return static_cast<double>(hi) + static_cast<double>(lo); }
 };
 
 static_assert(sizeof(ffloat) == 2 * sizeof(float), "ffloat is two packed floats");
+static_assert(std::is_aggregate_v<ffloat> && std::is_trivial_v<ffloat>,
+              "ffloat stays a plain aggregate: the offload compilers privatise it like a scalar");
+
+// Exact split of a double into the leading 24 bits and the next 24 bits
+// (for |x| within float's range).
+constexpr ffloat to_ffloat(double x)
+{
+    const float hi = static_cast<float>(x);
+    return ffloat{hi, static_cast<float>(x - static_cast<double>(hi))};
+}
 
 namespace ff {
 
