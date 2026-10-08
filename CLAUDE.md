@@ -11,8 +11,11 @@ pair of floats with TwoSum/TwoProd arithmetic) next to double and float.
 - `make` builds BK1, BK3, BK5 and BK1_ff; `make BK1_amx` builds the AMX kernel
   (software-emulated AMX off Apple Silicon); `make bw_test amx_pipe` builds
   the roofline micro-benchmarks in `amx/bench/` (`accel_gemm` is macOS only).
-- `BK1_ff` prints each precision's relative error against double; float-float
-  must stay near 1e-15 on random data. Never build it with `-ffast-math` (the
+- `BK1_ff` prints each precision's relative error against double (reduced in
+  double) and ends with an `ok`/`FAIL` check of the float-float result, exit
+  status 1 on failure (`BK_TOL`, default 1e-10; random data gives ~3e-15).
+  Run it for p = 1..8 after any change to `float_float.h` or the kernel
+  header. Never build it with `-ffast-math` (the
   header rejects it), and on x86 add `-mfma`/`-march=native` so `std::fma` is
   an instruction (the output line says `fma = hardware`).
 - `amx/scripts/validate.sh` checks the AMX kernel against the serial

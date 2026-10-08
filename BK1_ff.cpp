@@ -11,12 +11,19 @@
 //
 // The driver runs the same kernel in double, float and float-float on the
 // same data and prints, per precision, the throughput and the relative L2
-// error against the double result.  From the repository root:  make BK1_ff
+// error against the double result; the norms and errors are reduced in
+// native double (every value is widened first).  The run ends with the
+// float-float check: its error must stay below the tolerance, else the
+// line reads FAIL and the exit status is 1.  From the repository root:
+// make BK1_ff
 //
 // Run:  ./BK1_ff [p=2] [nelmt=524288] [ntests=5]
 //   BK_RANDOM=0  constant in = 3.0 and JxW = 1.0 (the BK1 data; the float
 //                line then prints BK1's norm).  Default: pseudo-random data
 //                with a fixed seed, in uniform on [-1, 1), JxW on [0.5, 1.5).
+//   BK_TOL=t     tolerance of the float-float check (default 1e-10: random
+//                data gives ~3e-15, the cancelling constant data at p = 1
+//                ~4e-13, and a broken ffloat operation 1e-7 or worse).
 //
 // The error-free transformations behind ffloat need strict IEEE rounding:
 // never build with -ffast-math, and on x86 add -mfma or -march=native so
@@ -24,6 +31,7 @@
 
 #include <iostream>
 #include <iomanip>
+#include <cassert>
 #include <cmath>
 #include <array>
 #include <vector>
@@ -67,10 +75,12 @@ std::vector<T> convert(const std::vector<double>& v)
     return w;
 }
 
-// ||x - ref|| / ||ref||, accumulated in double.
+// ||x - ref|| / ||ref||: every x[i] is widened to double (hi + lo for
+// ffloat) and both sums are accumulated in double.
 template <typename T>
 double relative_error(const std::vector<T>& x, const std::vector<double>& ref)
 {
+    assert(x.size() == ref.size());
     double num = 0;
     double den = 0;
     for (std::size_t i = 0; i < ref.size(); ++i) {
@@ -83,6 +93,7 @@ double relative_error(const std::vector<T>& x, const std::vector<double>& ref)
 
 // Run the kernel in precision T; return the result widened to double.  The
 // timing is the minimum wall time over ntests repetitions, as in BK1.cpp.
+// The printed norm is norm2's double accumulation of the widened values.
 template <typename T, int nq>
 std::vector<double> run_precision(
     const std::size_t nelmt, const int ntests,
@@ -143,8 +154,10 @@ std::vector<double> run_precision(
     return out64;
 }
 
+// Returns true when the float-float result is within tol of the double one.
 template <int nq>
-void run_test(const std::size_t nelmt, const int ntests, const bool random_data)
+bool run_test(const std::size_t nelmt, const int ntests, const bool random_data,
+              const double tol)
 {
     constexpr int nm = nq - 1;
 
@@ -174,7 +187,18 @@ void run_test(const std::size_t nelmt, const int ntests, const bool random_data)
     const std::vector<double> reference =
         run_precision<double, nq>(nelmt, ntests, basis, JxW, in, nullptr);
     run_precision<float,  nq>(nelmt, ntests, basis, JxW, in, &reference);
-    run_precision<ffloat, nq>(nelmt, ntests, basis, JxW, in, &reference);
+    const std::vector<double> ff =
+        run_precision<ffloat, nq>(nelmt, ntests, basis, JxW, in, &reference);
+
+    // The check: the float-float result against the double one, both reduced
+    // in double.  A tolerance far below float's ~1e-7 but above what the
+    // ~48-bit arithmetic reaches even under cancellation.
+    const double err = relative_error(ff, reference);
+    const bool ok = std::isfinite(err) && err <= tol;
+    std::cout << (ok ? "ok" : "FAIL")
+              << ": float-float vs double rel. error = " << std::setprecision(3) << err
+              << " (tol = " << tol << ")" << std::setprecision(6) << "\n";
+    return ok;
 }
 
 constexpr std::size_t default_nelmt = std::size_t(1) << 19;   // = 524288, as BK1
@@ -188,21 +212,23 @@ int main(int argc, char** argv)
         (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
     const int ntests = (argc > 3) ? std::atoi(argv[3]) : 5;
     const bool random_data = get_env("BK_RANDOM").value_or("1") != "0";
+    const double tol = std::atof(get_env("BK_TOL").value_or("1e-10").c_str());
 
     // Runtime p -> compile-time nq = p + 2, one instantiation per order.
+    bool ok = false;
     switch (p) {
-        case 1: run_test< 3>(nelmt, ntests, random_data); break;
-        case 2: run_test< 4>(nelmt, ntests, random_data); break;
-        case 3: run_test< 5>(nelmt, ntests, random_data); break;
-        case 4: run_test< 6>(nelmt, ntests, random_data); break;
-        case 5: run_test< 7>(nelmt, ntests, random_data); break;
-        case 6: run_test< 8>(nelmt, ntests, random_data); break;
-        case 7: run_test< 9>(nelmt, ntests, random_data); break;
-        case 8: run_test<10>(nelmt, ntests, random_data); break;
+        case 1: ok = run_test< 3>(nelmt, ntests, random_data, tol); break;
+        case 2: ok = run_test< 4>(nelmt, ntests, random_data, tol); break;
+        case 3: ok = run_test< 5>(nelmt, ntests, random_data, tol); break;
+        case 4: ok = run_test< 6>(nelmt, ntests, random_data, tol); break;
+        case 5: ok = run_test< 7>(nelmt, ntests, random_data, tol); break;
+        case 6: ok = run_test< 8>(nelmt, ntests, random_data, tol); break;
+        case 7: ok = run_test< 9>(nelmt, ntests, random_data, tol); break;
+        case 8: ok = run_test<10>(nelmt, ntests, random_data, tol); break;
         default:
             std::cerr << "unsupported polynomial order p = " << p
                       << " (supported: 1..8)\n";
             return 1;
     }
-    return 0;
+    return ok ? 0 : 1;
 }
