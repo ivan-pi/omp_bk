@@ -29,31 +29,34 @@ void SumFactorization(
     static_assert(std::is_trivially_copyable_v<T>, "T is mapped bitwise to the device");
     constexpr int nm = nq - 1;
 
-    using nm_cview = ndview<const T, nm, nm, nm>;
-    using nm_view  = ndview<T, nm, nm, nm>;
-    using nq_cview = ndview<const T, nq, nq, nq>;
+    // Plain index macros instead of accessor objects: the offload compilers
+    // then see nothing but arrays of T in the loop body.
+    // B(mode i, quad point p), shared by all directions.
+    #define B(i, p)          basis[(i) * nq + (p)]
+    // The two nq^3 work boxes of one element; steps address sub-slices of
+    // each box, and every step assigns its full output sub-slice, so no
+    // zeroing is needed.
+    #define wsp0(i, j, k)    wsp0[nq * nq * (i) + nq * (j) + (k)]
+    #define wsp1(i, j, k)    wsp1[nq * nq * (i) + nq * (j) + (k)]
+    // The fields of element e.
+    #define e_in(i, j, k)    in [nm * nm * nm * e + nm * nm * (i) + nm * (j) + (k)]
+    #define e_out(i, j, k)   out[nm * nm * nm * e + nm * nm * (i) + nm * (j) + (k)]
+    #define e_JxW(i, j, k)   JxW[nq * nq * nq * e + nq * nq * (i) + nq * (j) + (k)]
 
+    // Elements over teams; the inner `loop` constructs let the compiler use a
+    // team's threads inside an element where it maps elements to teams.
     #pragma omp target \
         map(to: basis[:nm*nq]) \
         map(to: JxW[:nelmt*nq*nq*nq], in[:nelmt*nm*nm*nm]) \
         map(from: out[:nelmt*nm*nm*nm])
-    #pragma omp teams loop
+    #pragma omp teams loop bind(teams)
     for (std::size_t e = 0; e < nelmt; ++e) {
 
-        // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
-        const ndview<const T, nm, nq> B{basis};
-
-        // Work arrays: two nq^3 boxes; steps address sub-slices of each box.
-        // Every step assigns its full output sub-slice, so no zeroing is needed.
-        T scratch[2 * nq * nq * nq];
-        const ndview<T, nq, nq, nq> wsp0{scratch};
-        const ndview<T, nq, nq, nq> wsp1{scratch + nq * nq * nq};
-
-        const nm_cview e_in {in  + e * nm_cview::size};
-        const nm_view  e_out{out + e * nm_view::size};
-        const nq_cview e_JxW{JxW + e * nq_cview::size};
+        T wsp0[nq * nq * nq];
+        T wsp1[nq * nq * nq];
 
         // step-1 : copy in -> wsp0 (nm^3 sub-block of the nq^3 box)
+        #pragma omp loop collapse(3) bind(thread)
         for (index_t i = 0; i < nm; ++i) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
@@ -63,6 +66,7 @@ void SumFactorization(
         }
 
         // step-2 : direction 0
+        #pragma omp loop collapse(3) bind(thread)
         for (index_t p = 0; p < nq; ++p) {
             for (index_t k = 0; k < nm; ++k) {
                 for (index_t j = 0; j < nm; ++j) {
@@ -76,6 +80,7 @@ void SumFactorization(
         }
 
         // step-3 : direction 1
+        #pragma omp loop collapse(3) bind(thread)
         for (index_t q = 0; q < nq; ++q) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t k = 0; k < nm; ++k) {
@@ -89,6 +94,7 @@ void SumFactorization(
         }
 
         // step-4 : direction 2
+        #pragma omp loop collapse(3) bind(thread)
         for (index_t r = 0; r < nq; ++r) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t p = 0; p < nq; ++p) {
@@ -104,6 +110,7 @@ void SumFactorization(
         // Reverse operations
 
         // step-5 : multiply with weights and determinant of Jacobi
+        #pragma omp loop collapse(3) bind(thread)
         for (index_t r = 0; r < nq; ++r) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t p = 0; p < nq; ++p) {
@@ -113,6 +120,7 @@ void SumFactorization(
         }
 
         // step-6 : direction 2
+        #pragma omp loop collapse(3) bind(thread)
         for (index_t k = 0; k < nm; ++k) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t p = 0; p < nq; ++p) {
@@ -126,6 +134,7 @@ void SumFactorization(
         }
 
         // step-7 : direction 1
+        #pragma omp loop collapse(3) bind(thread)
         for (index_t j = 0; j < nm; ++j) {
             for (index_t k = 0; k < nm; ++k) {
                 for (index_t p = 0; p < nq; ++p) {
@@ -139,6 +148,7 @@ void SumFactorization(
         }
 
         // step-8 : direction 0
+        #pragma omp loop collapse(3) bind(thread)
         for (index_t i = 0; i < nm; ++i) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
@@ -152,6 +162,7 @@ void SumFactorization(
         }
 
         // step-9 : copy wsp0 -> out
+        #pragma omp loop collapse(3) bind(thread)
         for (index_t i = 0; i < nm; ++i) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
@@ -160,6 +171,13 @@ void SumFactorization(
             }
         }
     }
+
+    #undef B
+    #undef wsp0
+    #undef wsp1
+    #undef e_in
+    #undef e_out
+    #undef e_JxW
 }
 
 // Benchmark harness shared by the drivers: keep the arrays mapped on the
