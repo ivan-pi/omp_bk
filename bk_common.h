@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -65,6 +66,27 @@ std::array<T, rows * cols> make_test_basis()
         for (int b = 0; b < cols; b++)
             m[a * cols + b] = std::cos(T(a * cols + b));
     return m;
+}
+
+// Pseudo-random test data (BK_RANDOM=1 in the drivers): a deterministic LCG
+// fills `in` with values in [-1, 1] and `JxW` with 1.5 + [-1, 1].  Every
+// draw is a 24-bit integer scaled by a power of two, so float and double
+// receive bit-identical values.
+template <typename T>
+void fill_random_test_data(std::vector<T>& in, std::vector<T>& JxW,
+                           uint32_t seed = 12345u)
+{
+    uint32_t s = seed;
+    auto next = [&] {
+        s = 1664525u * s + 1013904223u;
+        return T(s >> 8) / T(1 << 23) - T(1);
+    };
+    for (auto& v : in) {
+        v = next();
+    }
+    for (auto& v : JxW) {
+        v = T(1.5) + next();
+    }
 }
 
 inline std::optional<std::string> get_env(const char* name)

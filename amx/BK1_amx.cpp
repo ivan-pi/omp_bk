@@ -1022,18 +1022,8 @@ void run_test(const std::size_t nelmt, const int ntests)
     std::vector<T> in (nelmt * nm3, T(3.0));
     std::vector<T> out(nelmt * nm3);
 
-    if (get_env("BK_RANDOM")) {          // deterministic LCG, values in [-1, 1]
-        uint32_t s = 12345u;
-        auto next = [&] {
-            s = 1664525u * s + 1013904223u;
-            return T(s >> 8) / T(1 << 23) - T(1);
-        };
-        for (auto& v : in) {
-            v = next();
-        }
-        for (auto& v : JxW) {
-            v = T(1.5) + next();
-        }
+    if (get_env("BK_RANDOM")) {
+        fill_random_test_data(in, JxW);
     }
 
     const std::size_t size_inout = in.size();

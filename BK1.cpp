@@ -3,9 +3,6 @@
 #include <array>
 #include <vector>
 #include <cstdlib>
-#include <chrono>
-#include <limits>
-#include <algorithm>
 #include <cstddef>
 
 #include "bk_common.h"
@@ -29,31 +26,10 @@ void run_test(const std::size_t nelmt, const int ntests)
 
     const std::size_t size_inout = in.size();
     const std::size_t size_JxW   = JxW.size();
-    const std::size_t size_basis = basis.size();
 
-    const T* d_basis = basis.data();
-    const T* d_JxW   = JxW.data();
-    const T* d_in    = in.data();
-    T*       d_out   = out.data();
-
-    //---------------------------Serial Kernel---------------------------------
     // minimum wall time over ntests repetitions
-    using std::chrono::high_resolution_clock;
-    using std::chrono::duration;
-
-    double elapsed = std::numeric_limits<double>::max();
-
-    #pragma omp target data \
-        map(to: d_basis[:size_basis]) \
-        map(to: d_JxW[:size_JxW], d_in[:size_inout]) \
-        map(tofrom: d_out[:size_inout])
-    for (int t = 0; t < ntests; ++t) {
-        auto start = high_resolution_clock::now();
-        SumFactorization<T, nq>(nelmt, d_basis, d_JxW, d_in, d_out);
-        auto stop = high_resolution_clock::now();
-        duration<double> rep_time = stop - start;
-        elapsed = std::min(elapsed, rep_time.count());
-    }
+    const double elapsed = time_sumfact<T, nq>(
+        nelmt, ntests, basis.data(), JxW.data(), in.data(), out.data());
 
     // Performance in GDoF/s
     const auto dof_rate = [&](double seconds) {

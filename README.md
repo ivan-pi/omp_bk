@@ -53,27 +53,26 @@ solution norm (useful as a quick correctness check).
 short chain of fp32 adds, multiplies and fused multiply-adds built on the
 error-free transformations TwoSum and TwoProd. On GPUs whose fp64 rate is
 1/32 or 1/64 of fp32, this recovers near-double accuracy at about 18 fp32
-flops per multiply-add (27 with `-DFF_IEEE_ADD`, the accurate addition) while
-moving the same 8 bytes per value as double. The kernel source is unchanged:
-it is the same template that `BK1` instantiates with `float`.
+flops per multiply-add while moving the same 8 bytes per value as double.
+The kernel source is unchanged: it is the same template that `BK1`
+instantiates with `float`.
 
-The driver runs double, float and float-float on the same data and prints
-the throughput of each and its relative L2 error against the double result
-(float ~1e-7, float-float ~3e-15 on random data). Norms and errors are
-reduced in native double after widening every value. The last line is the
-check of the float-float result: `ok` or `FAIL` against a tolerance
+The driver runs double, float and float-float on the same data, prints one
+row per precision and the relative L2 error of float (~1e-7) and float-float
+(~3e-15) against the double result, all reduced in double. The last line is
+the check of the float-float result, `ok` or `FAIL` against a tolerance
 (default 1e-10, `BK_TOL=...`), with exit status 1 on failure:
 
 ```sh
-./BK1_ff <p> [nelmt] [ntests]     # same arguments as BK1
-BK_RANDOM=0 ./BK1_ff 2            # BK1's constant data; the float line prints BK1's norm
+./BK1_ff <p> [nelmt] [ntests]     # same arguments and constant data as BK1; the float row prints BK1's norm
+BK_RANDOM=1 ./BK1_ff 2            # pseudo-random data (the same as BK1_amx's)
 for p in 1 2 3 4 5 6 7 8; do ./BK1_ff $p 4096 1 | tail -1; done   # the check per order
 ```
 
 The error-free transformations need strict IEEE semantics: the header
-refuses `-ffast-math`, and `std::fma` must be an instruction for the kernel
-to be fast (the output says `fma = hardware` or `library call`; on x86 add
-`-mfma` or `-march=native` to `CXXFLAGS`).
+refuses `-ffast-math`, anything subtler shows up as `FAIL`, and the Makefile
+selects the native instruction set so `std::fma` is an instruction (the
+first output line says `fma = hardware`).
 
 ## Apple AMX version of BK1
 

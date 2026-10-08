@@ -5,29 +5,24 @@
 // bits, with every + and * expanded into fp32 adds, multiplies and fused
 // multiply-adds.  The point is hardware whose fp64 rate is a small fraction
 // of fp32 (consumer GPUs): float-float costs about 18 fp32 flops per
-// multiply-add (27 with -DFF_IEEE_ADD), which is cheaper than fp64 at 1/32
-// or 1/64 of the fp32 rate, and it reads and writes the same 8 bytes per
-// value.
+// multiply-add, which is cheaper than fp64 at 1/32 or 1/64 of the fp32
+// rate, and it reads and writes the same 8 bytes per value.
 //
 // The driver runs the same kernel in double, float and float-float on the
-// same data and prints, per precision, the throughput and the relative L2
-// error against the double result; the norms and errors are reduced in
-// native double (every value is widened first).  The run ends with the
-// float-float check: its error must stay below the tolerance, else the
-// line reads FAIL and the exit status is 1.  From the repository root:
-// make BK1_ff
+// same data and prints one row per precision (throughput and norm), then the
+// relative L2 error of float and of float-float against the double result.
+// Norms and errors are reduced in native double after widening every value.
+// The last line is the check: the float-float error must stay below the
+// tolerance, else it reads FAIL and the exit status is 1.
+// From the repository root:  make BK1_ff
 //
 // Run:  ./BK1_ff [p=2] [nelmt=524288] [ntests=5]
-//   BK_RANDOM=0  constant in = 3.0 and JxW = 1.0 (the BK1 data; the float
-//                line then prints BK1's norm).  Default: pseudo-random data
-//                with a fixed seed, in uniform on [-1, 1), JxW on [0.5, 1.5).
-//   BK_TOL=t     tolerance of the float-float check (default 1e-10: random
-//                data gives ~3e-15, the cancelling constant data at p = 1
-//                ~4e-13, and a broken ffloat operation 1e-7 or worse).
-//
-// The error-free transformations behind ffloat need strict IEEE rounding:
-// never build with -ffast-math, and on x86 add -mfma or -march=native so
-// std::fma is an instruction (the output states whether it is).
+//   BK_RANDOM=1  pseudo-random in/JxW (bk_common.h) instead of the constant
+//                3.0/1.0 of BK1; with the constant data the float row prints
+//                BK1's norm.
+//   BK_TOL=t     tolerance of the check (default 1e-10: random data gives
+//                ~3e-15, the cancelling constant data at p = 1 ~4e-13, and a
+//                broken ffloat operation 1e-7 or worse).
 
 #include <iostream>
 #include <iomanip>
@@ -36,11 +31,7 @@
 #include <array>
 #include <vector>
 #include <cstdlib>
-#include <chrono>
-#include <limits>
-#include <algorithm>
 #include <cstddef>
-#include <random>
 #include <string>
 #include <type_traits>
 
@@ -52,31 +43,21 @@ using namespace bk;
 
 namespace {
 
+// The double test data as seen by precision T: a reference for T = double,
+// otherwise a rounded (float) or split (ffloat) copy held in `storage`.
 template <typename T>
-const char* precision_name()
+const std::vector<T>& as_precision(const std::vector<double>& v, std::vector<T>& storage)
 {
-    if (std::is_same_v<T, double>) {
-        return "double";
+    if constexpr (std::is_same_v<T, double>) {
+        return v;
+    } else {
+        storage.assign(v.begin(), v.end());
+        return storage;
     }
-    if (std::is_same_v<T, float>) {
-        return "float";
-    }
-    return "float-float";
 }
 
-// Round (or split) the double-precision test data to the working type.
-template <typename T>
-std::vector<T> convert(const std::vector<double>& v)
-{
-    std::vector<T> w(v.size());
-    for (std::size_t i = 0; i < v.size(); ++i) {
-        w[i] = T(v[i]);
-    }
-    return w;
-}
-
-// ||x - ref|| / ||ref||: every x[i] is widened to double (hi + lo for
-// ffloat) and both sums are accumulated in double.
+// ||x - ref|| / ||ref||, every x[i] widened to double (hi + lo for ffloat),
+// both sums accumulated in double.
 template <typename T>
 double relative_error(const std::vector<T>& x, const std::vector<double>& ref)
 {
@@ -91,67 +72,35 @@ double relative_error(const std::vector<T>& x, const std::vector<double>& ref)
     return std::sqrt(num) / std::sqrt(den);
 }
 
-// Run the kernel in precision T; return the result widened to double.  The
-// timing is the minimum wall time over ntests repetitions, as in BK1.cpp.
-// The printed norm is norm2's double accumulation of the widened values.
+// Time the kernel in precision T, print its row and return its output.
 template <typename T, int nq>
-std::vector<double> run_precision(
-    const std::size_t nelmt, const int ntests,
+std::vector<T> run_precision(
+    const char* label, const std::size_t nelmt, const int ntests,
     const std::vector<double>& basis64,
     const std::vector<double>& JxW64,
-    const std::vector<double>& in64,
-    const std::vector<double>* reference)
+    const std::vector<double>& in64)
 {
-    const std::vector<T> basis = convert<T>(basis64);
-    const std::vector<T> JxW   = convert<T>(JxW64);
-    const std::vector<T> in    = convert<T>(in64);
-    std::vector<T>       out(in.size());
+    std::vector<T> basis_T;
+    std::vector<T> JxW_T;
+    std::vector<T> in_T;
+    const std::vector<T>& basis = as_precision<T>(basis64, basis_T);
+    const std::vector<T>& JxW   = as_precision<T>(JxW64, JxW_T);
+    const std::vector<T>& in    = as_precision<T>(in64, in_T);
+    std::vector<T> out(in.size());
 
-    const std::size_t size_inout = in.size();
-    const std::size_t size_JxW   = JxW.size();
-    [[maybe_unused]] const std::size_t size_basis = basis.size();   // only in the map clause
-
-    const T* d_basis = basis.data();
-    const T* d_JxW   = JxW.data();
-    const T* d_in    = in.data();
-    T*       d_out   = out.data();
-
-    using std::chrono::high_resolution_clock;
-    using std::chrono::duration;
-
-    double elapsed = std::numeric_limits<double>::max();
-
-    #pragma omp target data \
-        map(to: d_basis[:size_basis]) \
-        map(to: d_JxW[:size_JxW], d_in[:size_inout]) \
-        map(tofrom: d_out[:size_inout])
-    for (int t = 0; t < ntests; ++t) {
-        auto start = high_resolution_clock::now();
-        SumFactorization<T, nq>(nelmt, d_basis, d_JxW, d_in, d_out);
-        auto stop = high_resolution_clock::now();
-        duration<double> rep_time = stop - start;
-        elapsed = std::min(elapsed, rep_time.count());
-    }
+    const double elapsed = time_sumfact<T, nq>(
+        nelmt, ntests, basis.data(), JxW.data(), in.data(), out.data());
 
     // GDoF/s, and GB/s for read in + write out + read JxW at sizeof(T) bytes
-    const double dof_rate  = 1.0e-9 * size_inout / elapsed;
-    const double byte_rate = 1.0e-9 * sizeof(T) * (2 * size_inout + size_JxW) / elapsed;
+    const double dof_rate  = 1.0e-9 * in.size() / elapsed;
+    const double byte_rate = 1.0e-9 * sizeof(T) * (2 * in.size() + JxW.size()) / elapsed;
 
-    std::cout << std::left << std::setw(12) << precision_name<T>() << std::right
+    std::cout << std::left << std::setw(12) << label << std::right
               << " GDoF/s = " << std::setw(9) << dof_rate
               << " GB/s = "   << std::setw(9) << byte_rate
-              << " norm = "   << std::setprecision(10) << norm2(out.data(), out.size())
-              << std::setprecision(3);
-    if (reference != nullptr) {
-        std::cout << " rel. error = " << relative_error(out, *reference);
-    }
-    std::cout << std::setprecision(6) << "\n";
-
-    std::vector<double> out64(out.size());
-    for (std::size_t i = 0; i < out.size(); ++i) {
-        out64[i] = static_cast<double>(out[i]);
-    }
-    return out64;
+              << " norm = "   << std::setprecision(10) << norm2(out) << std::setprecision(6)
+              << "\n";
+    return out;
 }
 
 // Returns true when the float-float result is within tol of the double one.
@@ -165,17 +114,8 @@ bool run_test(const std::size_t nelmt, const int ntests, const bool random_data,
     const std::vector<double> basis(b.begin(), b.end());
     std::vector<double> JxW(nelmt * nq * nq * nq, 1.0);
     std::vector<double> in (nelmt * nm * nm * nm, 3.0);
-
     if (random_data) {
-        std::mt19937 gen(20240601u);
-        std::uniform_real_distribution<double> u_in(-1.0, 1.0);
-        std::uniform_real_distribution<double> u_JxW(0.5, 1.5);
-        for (double& x : in) {
-            x = u_in(gen);
-        }
-        for (double& x : JxW) {
-            x = u_JxW(gen);
-        }
+        fill_random_test_data(in, JxW);
     }
 
     std::cout << "SumFactorization -> nelmt = " << nelmt
@@ -184,20 +124,18 @@ bool run_test(const std::size_t nelmt, const int ntests, const bool random_data,
               << " fma = " << (ffloat_hardware_fma ? "hardware" : "library call")
               << "\n";
 
-    const std::vector<double> reference =
-        run_precision<double, nq>(nelmt, ntests, basis, JxW, in, nullptr);
-    run_precision<float,  nq>(nelmt, ntests, basis, JxW, in, &reference);
-    const std::vector<double> ff =
-        run_precision<ffloat, nq>(nelmt, ntests, basis, JxW, in, &reference);
+    const std::vector<double> ref =
+        run_precision<double, nq>("double", nelmt, ntests, basis, JxW, in);
+    const double err_float =
+        relative_error(run_precision<float, nq>("float", nelmt, ntests, basis, JxW, in), ref);
+    const double err_ff =
+        relative_error(run_precision<ffloat, nq>("float-float", nelmt, ntests, basis, JxW, in), ref);
 
-    // The check: the float-float result against the double one, both reduced
-    // in double.  A tolerance far below float's ~1e-7 but above what the
-    // ~48-bit arithmetic reaches even under cancellation.
-    const double err = relative_error(ff, reference);
-    const bool ok = std::isfinite(err) && err <= tol;
-    std::cout << (ok ? "ok" : "FAIL")
-              << ": float-float vs double rel. error = " << std::setprecision(3) << err
-              << " (tol = " << tol << ")" << std::setprecision(6) << "\n";
+    const bool ok = err_ff <= tol;
+    std::cout << "float        rel. error vs double = " << err_float << "\n"
+              << (ok ? "ok" : "FAIL")
+              << ": float-float rel. error vs double = " << err_ff
+              << " (tol = " << tol << ")\n";
     return ok;
 }
 
@@ -211,7 +149,7 @@ int main(int argc, char** argv)
     const std::size_t nelmt =
         (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
     const int ntests = (argc > 3) ? std::atoi(argv[3]) : 5;
-    const bool random_data = get_env("BK_RANDOM").value_or("1") != "0";
+    const bool random_data = get_env("BK_RANDOM").has_value();
     const double tol = std::atof(get_env("BK_TOL").value_or("1e-10").c_str());
 
     // Runtime p -> compile-time nq = p + 2, one instantiation per order.

@@ -7,7 +7,10 @@
 // `+=` and `*`, `*=`, and must be trivially copyable so that the OpenMP maps
 // can move the arrays bitwise.
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
+#include <limits>
 #include <type_traits>
 
 #include "bk_common.h"
@@ -157,6 +160,39 @@ void SumFactorization(
             }
         }
     }
+}
+
+// Benchmark harness shared by the drivers: keep the arrays mapped on the
+// device across ntests runs of the kernel and return the minimum wall time
+// of one run in seconds.
+template <typename T, int nq>
+double time_sumfact(
+    const std::size_t nelmt, const int ntests,
+    const T* basis, const T* JxW, const T* in, T* out)
+{
+    constexpr int nm = nq - 1;
+    // the extents only appear in the map clauses
+    [[maybe_unused]] const std::size_t size_inout = nelmt * nm * nm * nm;
+    [[maybe_unused]] const std::size_t size_JxW   = nelmt * nq * nq * nq;
+    [[maybe_unused]] constexpr std::size_t size_basis = nm * nq;
+
+    using std::chrono::high_resolution_clock;
+    using std::chrono::duration;
+
+    double elapsed = std::numeric_limits<double>::max();
+
+    #pragma omp target data \
+        map(to: basis[:size_basis]) \
+        map(to: JxW[:size_JxW], in[:size_inout]) \
+        map(tofrom: out[:size_inout])
+    for (int t = 0; t < ntests; ++t) {
+        const auto start = high_resolution_clock::now();
+        SumFactorization<T, nq>(nelmt, basis, JxW, in, out);
+        const auto stop = high_resolution_clock::now();
+        const duration<double> rep_time = stop - start;
+        elapsed = std::min(elapsed, rep_time.count());
+    }
+    return elapsed;
 }
 
 } // namespace bk
