@@ -1,12 +1,25 @@
 CXX=g++
-CXXFLAGS=-Wall -pedantic -O3 -std=c++17 -mcpu=native -fopenmp
+# Native ISA: -march=native on x86 (where -mcpu= is only a tuning alias and
+# would leave std::fma a library call), -mcpu=native on AArch64 (Apple clang
+# does not accept -march=native).
+ifeq ($(shell uname -m),x86_64)
+ARCHFLAGS=-march=native
+else
+ARCHFLAGS=-mcpu=native
+endif
+CXXFLAGS=-Wall -pedantic -O3 -std=c++17 $(ARCHFLAGS) -fopenmp
 
 
 .PHONY: all
-all: BK1 BK3 BK5
+all: BK1 BK3 BK5 BK1_ff
 
 
-BK1: BK1.cpp
+BK1: BK1.cpp bk1_sumfact.h bk_common.h
+	$(CXX) $(CXXFLAGS) -o $@ $<
+
+# BK1 in float-float arithmetic (float_float.h) next to double and float;
+# never with -ffast-math (the header rejects it).
+BK1_ff: BK1_ff.cpp float_float.h bk1_sumfact.h bk_common.h
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
 BK3: BK3.cpp
@@ -32,4 +45,4 @@ accel_gemm: amx/bench/accel_gemm.cpp
 
 .PHONY: clean
 clean:
-	$(RM) BK1 BK3 BK5 BK1_amx bw_test amx_pipe accel_gemm *.o
+	$(RM) BK1 BK3 BK5 BK1_ff BK1_amx bw_test amx_pipe accel_gemm *.o

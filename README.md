@@ -8,6 +8,7 @@ OpenMP `target`-offload implementations of the CEED "bake-off" kernels
 | `BK1`   | Mass matrix                                |
 | `BK3`   | Poisson (stiffness) matrix                 |
 | `BK5`   | Collocated Laplacian at quadrature points  |
+| `BK1_ff`| Mass matrix in float-float arithmetic (see below) |
 
 ## Requirements
 
@@ -19,7 +20,7 @@ OpenMP `target`-offload implementations of the CEED "bake-off" kernels
 ## Build
 
 ```sh
-make            # builds BK1, BK3, BK5
+make            # builds BK1, BK3, BK5, BK1_ff
 make clean      # removes the executables
 ```
 
@@ -43,6 +44,35 @@ make CXX=clang++
 
 Each run prints the achieved `GDoF/s` and effective `GB/s`, followed by the
 solution norm (useful as a quick correctness check).
+
+## Float-float version of BK1
+
+`BK1_ff` runs the BK1 kernel of `bk1_sumfact.h` with the arithmetic type
+`ffloat` from `float_float.h`: a value is the unevaluated sum of two floats
+(~48 significant bits, float's exponent range), and every `+` and `*` is a
+short chain of fp32 adds, multiplies and fused multiply-adds built on the
+error-free transformations TwoSum and TwoProd. On GPUs whose fp64 rate is
+1/32 or 1/64 of fp32, this recovers near-double accuracy at about 18 fp32
+flops per multiply-add while moving the same 8 bytes per value as double.
+The kernel source is unchanged: it is the same template that `BK1`
+instantiates with `float`.
+
+The driver runs double, float and float-float on the same data, prints one
+row per precision and the relative L2 error of float (~1e-7) and float-float
+(~3e-15) against the double result, all reduced in double. The last line is
+the check of the float-float result, `ok` or `FAIL` against a tolerance
+(default 1e-10, `BK_TOL=...`), with exit status 1 on failure:
+
+```sh
+./BK1_ff <p> [nelmt] [ntests]     # same arguments and constant data as BK1; the float row prints BK1's norm
+BK_RANDOM=1 ./BK1_ff 2            # pseudo-random data (the same as BK1_amx's)
+for p in 1 2 3 4 5 6 7 8; do ./BK1_ff $p 4096 1 | tail -1; done   # the check per order
+```
+
+The error-free transformations need strict IEEE semantics: the header
+refuses `-ffast-math`, anything subtler shows up as `FAIL`, and the Makefile
+selects the native instruction set so `std::fma` is an instruction (the
+first output line says `fma = hardware`).
 
 ## Apple AMX version of BK1
 
