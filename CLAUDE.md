@@ -13,8 +13,10 @@ arrays at team scope and a `parallel for collapse(3)` per step (team size
 from the constexpr `ff_team_size`), and `SumFactorizationFFPlane<nq, batch>`
 a batch of elements per team of `batch * nq * nq` threads, each owning a
 register column, with five phases (default batch from `ff_plane_batch`,
-`-DFF_PLANE_BATCH=n` overrides). The driver runs and checks all of them;
-they must agree bit for bit, as every output is summed in index order.
+`-DFF_PLANE_BATCH=n` overrides); `SumFactorizationFFPlaneLoop` is the same
+kernel with `teams loop` and nested `loop` constructs, sharing the phase
+functions `plane_phase_a..e`. The driver runs and checks all of them; they
+must agree bit for bit, as every output is summed in index order.
 
 ## Build and check
 

@@ -81,9 +81,15 @@ one element per team and with a batch of elements per team (`ff-plane xN`),
 which fills the team at low order; the default batch fills about 128
 threads (`ff_plane_batch`: 14 at nq = 3, 8 at nq = 4, 1 from nq = 9) and
 `make BK1_ff CPPFLAGS=-DFF_PLANE_BATCH=n` forces one batch for every order.
-All float-float kernels sum every output in the same index order and give
-the same result bit for bit. On the host the team kernels open parallel
-regions per team and are slow; they are meant for the GPU.
+`ff-loop` (`SumFactorizationFFPlaneLoop`) is the same plane kernel written
+with `teams loop` and a nested `loop` per phase instead of a parallel
+region and worksharing loops: the descriptive form that nvc++ lowers like
+OpenACC gang and vector loops, with the barriers between phases placed by
+the compiler. It shares the phase bodies with `ff-plane` and takes the same
+batch. All float-float kernels sum every output in the same index order and
+give the same result bit for bit. On the host the team kernels are slow,
+`ff-teams` and `ff-plane` open parallel regions per team and `ff-loop`
+runs a team on one thread; they are meant for the GPU.
 
 The driver runs double, float and the float-float kernels on the same
 data, prints one row per kernel and the relative L2 error of float (~1e-7)
