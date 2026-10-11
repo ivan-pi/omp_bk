@@ -13,9 +13,10 @@
 // ok or FAIL (exit status 1) against BK_TOL (default 1e-10).  The host
 // reference is single-threaded and takes a while at the default element
 // count and high orders.
-// From the repository root:  make BK1_ff_cuda   (needs nvcc with the CCCL
-// of CUDA 13.2 or later; CCCL=/path/to/a/cccl/checkout puts a newer CCCL
-// ahead of the toolkit's)
+// From the repository root:  make BK1_ff_cuda   (needs nvcc 12.x or later
+// with the CCCL of CUDA 13.2 or later; CCCL=/path/to/a/cccl/checkout puts a
+// newer CCCL ahead of the toolkit's).  BK1_ff_cuda_plain.cu is the same
+// driver on the classic runtime API, for any nvcc.
 //
 // Run:  ./BK1_ff_cuda [p=2] [nelmt=524288] [ntests=5] [nelmtPerBatch]
 //   nelmtPerBatch  elements per block (default: fills about 128 threads,
@@ -32,21 +33,15 @@
 #include <cuda/stream>
 
 #include <algorithm>
-#include <array>
-#include <cmath>
 #include <cstddef>
-#include <cstdlib>
 #include <exception>
-#include <stdexcept>
-#include <iomanip>
 #include <iostream>
+#include <stdexcept>
 #include <string>
-#include <type_traits>
 #include <vector>
 
 #include "bk1_ff_cuda.cuh"
-#include "bk_common.h"
-#include "bk1_sumfact.h"
+#include "bk1_ff_driver_common.h"
 
 namespace {
 
@@ -73,72 +68,42 @@ struct MassOperatorFFKernel {
     }
 };
 
-// ||x - ref|| / ||ref|| in double.
-double relative_error(const std::vector<double>& x, const std::vector<double>& ref)
-{
-    double num = 0.0;
-    double den = 0.0;
-    for (std::size_t i = 0; i < ref.size(); ++i) {
-        const double d = x[i] - ref[i];
-        num += d * d;
-        den += ref[i] * ref[i];
-    }
-    return std::sqrt(num) / std::sqrt(den);
-}
-
 template <int nq>
-bool run_test(const std::size_t nelmt, const int ntests, const unsigned int nelmtPerBatch,
-              const bool random_data, const double tol)
+bool run_test(const bk::ffdrv::Args& args)
 {
     using traits = bk::mass_operator_ff_traits<nq>;
-    constexpr int nm = traits::nm;
-    constexpr int nq3 = traits::nq3;
-    constexpr int nm3 = traits::nm3;
-
-    // Test data and the double reference on the host.
-    const std::array<double, nm * nq> b = bk::make_test_basis<double, nm, nq>();
-    const std::vector<double> basis(b.begin(), b.end());
-    std::vector<double> JxW(nelmt * nq3, 1.0);
-    std::vector<double> in(nelmt * nm3, 3.0);
-    if (random_data) {
-        bk::fill_random_test_data(in, JxW);
-    }
-    std::vector<double> ref(in.size());
-    bk::SumFactorization<double, nq>(nelmt, basis.data(), JxW.data(), in.data(), ref.data());
+    const unsigned int batch = (args.batch > 0) ? args.batch : static_cast<unsigned int>(traits::default_batch());
+    const bk::ffdrv::TestData<nq> data(args.nelmt, args.random_data);
 
     // Device buffers, copied from the host data in stream order.
     cuda::device_ref device = cuda::devices[0];
     cuda::stream stream{device};
     auto pool = cuda::device_default_memory_pool(device);
-    auto d_basis = cuda::make_buffer<double>(stream, pool, basis);
-    auto d_JxW   = cuda::make_buffer<double>(stream, pool, JxW);
-    auto d_in    = cuda::make_buffer<double>(stream, pool, in);
-    auto d_out   = cuda::make_buffer<double>(stream, pool, in.size(), cuda::no_init);
+    auto d_basis = cuda::make_buffer<double>(stream, pool, data.basis);
+    auto d_JxW   = cuda::make_buffer<double>(stream, pool, data.JxW);
+    auto d_in    = cuda::make_buffer<double>(stream, pool, data.in);
+    auto d_out   = cuda::make_buffer<double>(stream, pool, data.in.size(), cuda::no_init);
     stream.sync();
 
     // Launch configuration: a block per batch of elements, every point of
     // the nq x nq plane a thread, a grid-stride loop over the batches.
-    const std::size_t nbatches = (nelmt + nelmtPerBatch - 1) / nelmtPerBatch;
+    const std::size_t nbatches = (args.nelmt + batch - 1) / batch;
     const int sms = cuda::device_attributes::multiprocessor_count(device);
-    const int nblocks = static_cast<int>(std::min<std::size_t>(nbatches, static_cast<std::size_t>(sms) * 32));
-    const int block = traits::block_size(static_cast<int>(nelmtPerBatch));
-    const std::size_t smem_floats = traits::shared_floats(static_cast<int>(nelmtPerBatch));
+    const int grid = static_cast<int>(std::min<std::size_t>(nbatches, static_cast<std::size_t>(sms) * 32));
+    const int block = traits::block_size(static_cast<int>(batch));
+    const std::size_t smem_floats = traits::shared_floats(static_cast<int>(batch));
     const auto config = cuda::make_config(
-        cuda::grid_dims(nblocks), cuda::block_dims(block),
+        cuda::grid_dims(grid), cuda::block_dims(block),
         cuda::dynamic_shared_memory<float[]>(smem_floats, cuda::non_portable));
-
-    std::cout << "SumFactorization -> nelmt = " << nelmt << " nq = " << nq
-              << " data = " << (random_data ? "random" : "constant")
-              << " device = " << device.name()
-              << " batch = " << nelmtPerBatch << " block = " << block
-              << " grid = " << nblocks << " smem = " << smem_floats * sizeof(float) << " B\n";
+    bk::ffdrv::print_header(args.nelmt, nq, args.random_data, device.name(), batch, block, grid,
+                            smem_floats * sizeof(float));
 
     // Minimum time over ntests runs.
     double elapsed = 1e300;
-    for (int t = 0; t < ntests; ++t) {
+    for (int t = 0; t < args.ntests; ++t) {
         cuda::timed_event start{stream};
         cuda::launch(stream, config, MassOperatorFFKernel<nq>{},
-                     static_cast<unsigned int>(nelmt), nelmtPerBatch, d_basis, d_JxW, d_in, d_out);
+                     static_cast<unsigned int>(args.nelmt), batch, d_basis, d_JxW, d_in, d_out);
         cuda::timed_event stop{stream};
         stop.sync();
         const cuda::std::chrono::nanoseconds ns = stop - start;
@@ -148,7 +113,7 @@ bool run_test(const std::size_t nelmt, const int ntests, const unsigned int nelm
     // The result back to the host (cudaMemcpyAsync rather than
     // cuda::copy_bytes, whose header <cuda/algorithm> is newer than some
     // toolkits' CCCL).
-    std::vector<double> out(in.size());
+    std::vector<double> out(data.in.size());
     const cudaError_t copy_status = cudaMemcpyAsync(
         out.data(), d_out.data(), out.size() * sizeof(double), cudaMemcpyDeviceToHost, stream.get());
     if (copy_status != cudaSuccess) {
@@ -156,60 +121,21 @@ bool run_test(const std::size_t nelmt, const int ntests, const unsigned int nelm
     }
     stream.sync();
 
-    const double dof_rate  = 1.0e-9 * static_cast<double>(in.size()) / elapsed;
-    const double byte_rate = 1.0e-9 * sizeof(double) * static_cast<double>(2 * in.size() + JxW.size()) / elapsed;
-    const double err = relative_error(out, ref);
-    const bool ok = err <= tol;
-    std::cout << std::left << std::setw(12) << "float-float" << std::right
-              << " GDoF/s = " << std::setw(9) << dof_rate
-              << " GB/s = "   << std::setw(9) << byte_rate
-              << " norm = "   << std::setprecision(10) << bk::norm2(out) << std::setprecision(6) << "\n"
-              << (ok ? "ok" : "FAIL") << ": float-float rel. error vs double = " << err
-              << " (tol = " << tol << ")\n";
-    return ok;
+    return bk::ffdrv::report("float-float", elapsed, out, data.JxW.size(), data.ref, args.tol);
 }
-
-constexpr std::size_t default_nelmt = std::size_t(1) << 19;   // = 524288, as BK1
 
 } // namespace
 
 int main(int argc, char** argv)
 try {
-    const int p = (argc > 1) ? std::atoi(argv[1]) : 2;
-    const std::size_t nelmt =
-        (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
-    const int ntests = (argc > 3) ? std::atoi(argv[3]) : 5;
-    const unsigned int batch_arg = (argc > 4) ? static_cast<unsigned int>(std::atoi(argv[4])) : 0u;
-    const bool random_data = bk::get_env("BK_RANDOM").has_value();
-    const double tol = std::atof(bk::get_env("BK_TOL").value_or("1e-10").c_str());
-
+    const bk::ffdrv::Args args = bk::ffdrv::parse_args(argc, argv);
     if (cuda::devices.size() == 0) {
         std::cerr << "no CUDA device\n";
         return 1;
     }
-
-    // Runtime p -> compile-time nq = p + 2, one instantiation per order.
-    const auto run = [&](auto nq_tag) {
-        constexpr int nq = decltype(nq_tag)::value;
-        const unsigned int batch = (batch_arg > 0)
-            ? batch_arg : static_cast<unsigned int>(bk::mass_operator_ff_traits<nq>::default_batch());
-        return run_test<nq>(nelmt, ntests, batch, random_data, tol);
-    };
-    bool ok = false;
-    switch (p) {
-        case 1: ok = run(std::integral_constant<int,  3>{}); break;
-        case 2: ok = run(std::integral_constant<int,  4>{}); break;
-        case 3: ok = run(std::integral_constant<int,  5>{}); break;
-        case 4: ok = run(std::integral_constant<int,  6>{}); break;
-        case 5: ok = run(std::integral_constant<int,  7>{}); break;
-        case 6: ok = run(std::integral_constant<int,  8>{}); break;
-        case 7: ok = run(std::integral_constant<int,  9>{}); break;
-        case 8: ok = run(std::integral_constant<int, 10>{}); break;
-        default:
-            std::cerr << "unsupported polynomial order p = " << p
-                      << " (supported: 1..8)\n";
-            return 1;
-    }
+    const bool ok = bk::ffdrv::dispatch(args.p, [&](auto nq_tag) {
+        return run_test<decltype(nq_tag)::value>(args);
+    });
     return ok ? 0 : 1;
 }
 catch (const std::exception& e) {

@@ -22,9 +22,10 @@ double storage, float-float inside), compiled only under nvcc;
 `float_float.h` is host and device callable for it. `make check_ff_cuda`
 runs that kernel on the host through `cuda/cuda_shim.h` against the double
 reference (`ok`/`FAIL`); run it after any change to the CUDA header.
-`make BK1_ff_cuda` builds the GPU driver `cuda/BK1_ff_cuda.cu` (nvcc, CUDA
-13.2+, the cuda::launch runtime API) which times the kernel and checks it
-the same way.
+`make BK1_ff_cuda_plain` (any nvcc, classic runtime API) and
+`make BK1_ff_cuda` (CCCL runtime API of CUDA 13.2+, `cuda::launch`) build
+the GPU drivers, which share `cuda/bk1_ff_driver_common.h`, time the kernel
+and check it the same way.
 
 ## Build and check
 

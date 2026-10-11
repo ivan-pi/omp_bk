@@ -47,8 +47,12 @@ check_ff_cuda: cuda/check_ff_cuda.cpp cuda/cuda_shim.h bk1_ff_cuda.cuh float_flo
 
 # The CUDA float-float kernel on the GPU, timed and checked against the
 # double reference on the host; needs nvcc (CUDA 13.2+) and a GPU.
-BK1_ff_cuda: cuda/BK1_ff_cuda.cu bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
-	$(NVCC) $(NVCCFLAGS) -I. -o $@ $<
+BK1_ff_cuda: cuda/BK1_ff_cuda.cu cuda/bk1_ff_driver_common.h bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
+	$(NVCC) $(NVCCFLAGS) -I. -Icuda -o $@ $<
+
+# The same on the classic CUDA runtime API, for any nvcc (11.8 included).
+BK1_ff_cuda_plain: cuda/BK1_ff_cuda_plain.cu cuda/bk1_ff_driver_common.h bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
+	$(NVCC) $(NVCCFLAGS) -I. -Icuda -o $@ $<
 
 # Apple AMX version of BK1 (software-emulated AMX on any other machine)
 BK1_amx: amx/BK1_amx.cpp amx/amx.h bk_common.h
@@ -67,4 +71,4 @@ accel_gemm: amx/bench/accel_gemm.cpp
 
 .PHONY: clean
 clean:
-	$(RM) BK1 BK3 BK5 BK1_ff BK1_amx check_ff_cuda BK1_ff_cuda bw_test amx_pipe accel_gemm *.o
+	$(RM) BK1 BK3 BK5 BK1_ff BK1_amx check_ff_cuda BK1_ff_cuda BK1_ff_cuda_plain bw_test amx_pipe accel_gemm *.o

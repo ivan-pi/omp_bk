@@ -124,15 +124,19 @@ Boxes and global arrays are addressed through accessor lambdas. The header is em
 it needs no special flags: the error-free transformations survive nvcc's
 default contraction, and `--use_fast_math` only flushes subnormal lo parts.
 The header comment lists the launch geometry and the known cost.
-`make BK1_ff_cuda` (nvcc from CUDA 13.2 or later, `NVARCH=native` by
-default) builds `cuda/BK1_ff_cuda.cu`, which runs the kernel on the GPU
-through the CCCL runtime API: the kernel is a functor whose call operator
-takes the launch configuration as a template parameter and reads the block
-and thread ranks and the dynamic shared memory from it; the driver takes
-the arguments of `BK1_ff` plus the elements per block, times the kernel
-with CUDA events and checks it against the host double reference
-(`ok`/`FAIL`). `make check_ff_cuda && ./check_ff_cuda` builds and runs the
-same kernel on the host
+Two drivers run the kernel on the GPU, take the arguments of `BK1_ff`
+plus the elements per block, time the kernel with CUDA events and check it
+against the host double reference (`ok`/`FAIL`); they share
+`cuda/bk1_ff_driver_common.h`. `make BK1_ff_cuda_plain` builds
+`cuda/BK1_ff_cuda_plain.cu` on the classic CUDA runtime API, for any nvcc
+(`NVCC=...` selects one, `NVARCH=native` is the default architecture).
+`make BK1_ff_cuda` builds `cuda/BK1_ff_cuda.cu` on the CCCL runtime API of
+CUDA 13.2 or later (`CCCL=/path/to/cccl` puts a newer CCCL checkout ahead
+of the toolkit's): the kernel is a functor whose call operator takes the
+launch configuration as a template parameter and reads the block and
+thread ranks and the dynamic shared memory from it.
+`make check_ff_cuda && ./check_ff_cuda` builds and runs the same kernel on
+the host
 through `cuda/cuda_shim.h`, a stand-in for the CUDA keywords with one
 thread per block, and checks it against the double reference for
 nq = 3..10, constant and random data and batches with a short last batch
