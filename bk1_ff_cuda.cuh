@@ -81,7 +81,10 @@
 // contraction loop (factor 1) halves the throughput, and a register cap
 // (-maxrregcount) spills inside the chains and halves it too.
 // -DFF_CUDA_CONTRACTION_UNROLL=n unrolls the contraction loops by n
-// instead, bounding the hoisting to n iterations.
+// instead, bounding the hoisting to n iterations.  With the full unroll,
+// phase A loads the whole input column before its arithmetic (nm global
+// loads in flight together, which the few warps per SM at high order
+// need); with a partial factor it splits each value where it is used.
 #ifndef FF_CUDA_CONTRACTION_UNROLL
 #define FF_CUDA_CONTRACTION_UNROLL 0
 #endif
@@ -217,14 +220,34 @@ __device__ inline void mass_operator_ff_body(
                 ch[p] = 0.0f;
                 cl[p] = 0.0f;
             }
-            #pragma unroll unroll_nm
-            for (int i = 0; i < nm; ++i) {
-                float uh;
-                float ul;
-                ff::split(in_at(e, i, j, k), uh, ul);
+            if constexpr (FF_CUDA_CONTRACTION_UNROLL == 0) {
+                // the whole input column is loaded before the arithmetic,
+                // so that its nm global loads are in flight together
+                float uh[nm];
+                float ul[nm];
                 #pragma unroll
-                for (int p = 0; p < nq; ++p) {
-                    ff::mul_add(ch[p], cl[p], uh, ul, basis_hi(i, p), basis_lo(i, p));
+                for (int i = 0; i < nm; ++i) {
+                    ff::split(in_at(e, i, j, k), uh[i], ul[i]);
+                }
+                #pragma unroll
+                for (int i = 0; i < nm; ++i) {
+                    #pragma unroll
+                    for (int p = 0; p < nq; ++p) {
+                        ff::mul_add(ch[p], cl[p], uh[i], ul[i], basis_hi(i, p), basis_lo(i, p));
+                    }
+                }
+            } else {
+                // a partially unrolled contraction loop would push a column
+                // array to local memory: split each value where it is used
+                #pragma unroll unroll_nm
+                for (int i = 0; i < nm; ++i) {
+                    float uh;
+                    float ul;
+                    ff::split(in_at(e, i, j, k), uh, ul);
+                    #pragma unroll
+                    for (int p = 0; p < nq; ++p) {
+                        ff::mul_add(ch[p], cl[p], uh, ul, basis_hi(i, p), basis_lo(i, p));
+                    }
                 }
             }
             #pragma unroll
