@@ -16,31 +16,34 @@
 //
 // Mapping: one block works through batches of nelmtPerBatch elements
 // (grid-stride over the batches).  Within a batch a thread owns one point of
-// an element's plane and the column through it, held in registers, and each
-// step contracts along that column with the basis read from shared memory
-// as a warp broadcast.  The boxes between the steps are two pairs of
-// hi/lo float arrays in dynamic shared memory with compact layouts:
+// an element's plane and the whole column through it along the first index,
+// held in registers as hi and lo of nq values, and the five phases are those
+// of the OpenMP plane kernel (plane_phase_a..e in BK1_ff.cpp): the
+// contraction index is the outer loop, the column index the inner one, and
+// the basis is read from shared memory as a warp broadcast.  The boxes
+// between the phases are two pairs of hi/lo float arrays in dynamic shared
+// memory, each nq^3 per element with the one layout (a, b, c) ->
+// (a * nq + b) * nq + c of the OpenMP kernels:
 //
-//   step A (1+2): thread (e,j,k): in(i,j,k) from global -> contract i -> wsp1(e,p,j,k)
-//   step B (3):   thread (e,p,k): wsp1(e,p,j,k)  -> contract j -> wsp0(e,q,p,k)
-//   step C (4+5): thread (e,q,p): wsp0(e,q,p,k)  -> contract k, * JxW -> wsp1(e,r,q,p)
-//   step D (6):   thread (e,q,p): wsp1(e,r,q,p)  -> contract r -> wsp0(e,k,q,p)
-//   step E (7):   thread (e,k,p): wsp0(e,k,q,p)  -> contract q -> wsp1(e,k,j,p)
-//   step F (8+9): thread (e,j,k): wsp1(e,k,j,p)  -> contract p -> out(i,j,k) to global
+//   A: thread (e,j,k): in(i,j,k) from global -> contract i -> w0(p,j,k)
+//   B: thread (e,q,k): w0(p,j,k)  -> contract j -> w1(p,q,k)
+//   C: thread (e,q,r): w1(p,q,k)  -> contract k, * JxW(p,q,r) -> w0(p,q,r)
+//   D: thread (e,q,k): w0(p,q,r)  -> contract r -> w1(p,q,k)
+//   E: thread (e,j,k): w1(p,q,k)  -> contract q -> x[p], contract p -> out(i,j,k)
 //
-// Steps A and F read and write global memory directly, so the copy steps of
-// the double kernel and two of its barriers are gone.  Every output is still
-// summed in index order, with the same operand order as the OpenMP kernels
-// of BK1_ff.cpp.  The boxes and the batch's global arrays are addressed
-// through accessor lambdas that capture the pointers by value, one pair per
-// layout for hi and lo, so no index arithmetic appears in the steps.
+// Phases A and E read and write global memory directly, so the copy steps of
+// the double kernel and two of its barriers are gone.  Every output is
+// summed in index order with the operand order of the OpenMP kernels, so the
+// results agree with them bit for bit.  The boxes and the batch's global
+// arrays are addressed through accessor lambdas that capture the pointers by
+// value and return the element.
 //
 // Shared memory: mass_operator_ff_shared_bytes(nq, nelmtPerBatch) bytes of
 // dynamic shared memory, the same byte count as the double kernel's.  Above
 // 48 KB the launch needs cudaFuncSetAttribute(...,
 // cudaFuncAttributeMaxDynamicSharedMemorySize, bytes).  A block of
 // nelmtPerBatch * nq * nq threads (rounded up to whole warps) gives every
-// point of step C a thread; the other steps use nm * nm or nm * nq points
+// point of phase C a thread; the other phases use nm * nm or nq * nm points
 // per element and leave the rest idle.
 //
 // Flags: the error-free transformations need no option.  nvcc's default
@@ -52,11 +55,9 @@
 // Example build:  nvcc -O3 -std=c++17 -arch=sm_90 -x cu -c driver.cpp
 // (the driver includes this header and float_float.h).
 //
-// Known costs left for later: the split is one fp64 subtract per loaded
+// Known cost left for later: the split is one fp64 subtract per loaded
 // value, which on a 1/64-rate GPU is ~30% of the arithmetic at nq = 4 and
-// ~13% at nq = 10 (a bit-level split with integer operations would avoid
-// it); the column loads of steps C and F stride by nm and nq across the
-// warp and cause bank conflicts for even nm or nq.
+// ~13% at nq = 10 (a bit-level split with integer operations would avoid it).
 
 #if defined(__CUDACC__)
 
@@ -95,24 +96,18 @@ __global__ void MassOperatorFF(
     float* s_wsp1_hi  = s_wsp0_lo + nelmtPerBatch * nq3;
     float* s_wsp1_lo  = s_wsp1_hi + nelmtPerBatch * nq3;
 
-    // Accessors: the boxes with the layout of each step, as hi and lo, the
-    // basis, and (inside the batch loop) the batch's global arrays.  Each is
-    // a lambda that captures its pointer by value and returns the element.
-    const auto w1_pjk_hi = [=](int e, int p, int j, int k) -> float& { return s_wsp1_hi[((e * nq + p) * nm + j) * nm + k]; };
-    const auto w1_pjk_lo = [=](int e, int p, int j, int k) -> float& { return s_wsp1_lo[((e * nq + p) * nm + j) * nm + k]; };
-    const auto w0_qpk_hi = [=](int e, int q, int p, int k) -> float& { return s_wsp0_hi[((e * nq + q) * nq + p) * nm + k]; };
-    const auto w0_qpk_lo = [=](int e, int q, int p, int k) -> float& { return s_wsp0_lo[((e * nq + q) * nq + p) * nm + k]; };
-    const auto w1_rqp_hi = [=](int e, int r, int q, int p) -> float& { return s_wsp1_hi[((e * nq + r) * nq + q) * nq + p]; };
-    const auto w1_rqp_lo = [=](int e, int r, int q, int p) -> float& { return s_wsp1_lo[((e * nq + r) * nq + q) * nq + p]; };
-    const auto w0_kqp_hi = [=](int e, int k, int q, int p) -> float& { return s_wsp0_hi[((e * nm + k) * nq + q) * nq + p]; };
-    const auto w0_kqp_lo = [=](int e, int k, int q, int p) -> float& { return s_wsp0_lo[((e * nm + k) * nq + q) * nq + p]; };
-    const auto w1_kjp_hi = [=](int e, int k, int j, int p) -> float& { return s_wsp1_hi[((e * nm + k) * nm + j) * nq + p]; };
-    const auto w1_kjp_lo = [=](int e, int k, int j, int p) -> float& { return s_wsp1_lo[((e * nm + k) * nm + j) * nq + p]; };
-    const auto basis_hi  = [=](int i, int p) -> float { return s_basis_hi[i * nq + p]; };
-    const auto basis_lo  = [=](int i, int p) -> float { return s_basis_lo[i * nq + p]; };
+    // Accessors: the two boxes as hi and lo, nq^3 per element, the basis,
+    // and (inside the batch loop) the batch's global arrays.  Each is a
+    // lambda that captures its pointer by value and returns the element.
+    const auto w0_hi = [=](int e, int a, int b, int c) -> float& { return s_wsp0_hi[((e * nq + a) * nq + b) * nq + c]; };
+    const auto w0_lo = [=](int e, int a, int b, int c) -> float& { return s_wsp0_lo[((e * nq + a) * nq + b) * nq + c]; };
+    const auto w1_hi = [=](int e, int a, int b, int c) -> float& { return s_wsp1_hi[((e * nq + a) * nq + b) * nq + c]; };
+    const auto w1_lo = [=](int e, int a, int b, int c) -> float& { return s_wsp1_lo[((e * nq + a) * nq + b) * nq + c]; };
+    const auto basis_hi = [=](int i, int p) -> float { return s_basis_hi[i * nq + p]; };
+    const auto basis_lo = [=](int i, int p) -> float { return s_basis_lo[i * nq + p]; };
 
     // A thread's point: element e of the batch and (a, b) in a plane of
-    // na x nb points per element, from the thread index of a step.
+    // na x nb points per element, from the thread index of a phase.
     struct Point {
         int e;
         int a;
@@ -124,9 +119,10 @@ __global__ void MassOperatorFF(
         return Point{e, r / nb, r - (r / nb) * nb};
     };
 
-    // The register column: the input of a step (nm or nq values) as hi and lo.
-    float rh[nq];
-    float rl[nq];
+    // The register column: the output of a phase as hi and lo, and the
+    // input column of phase A.
+    float ch[nq];
+    float cl[nq];
 
     // The basis, split once per block.
     for (int i = threadIdx.x; i < nm * nq; i += blockDim.x) {
@@ -145,145 +141,157 @@ __global__ void MassOperatorFF(
         const double* __restrict__ b_JxW = d_JxW + static_cast<std::size_t>(eb) * nelmtPerBatch * nq3;
         double*       __restrict__ b_out = d_out + static_cast<std::size_t>(eb) * nelmtPerBatch * nm3;
         const auto in_at  = [=](int e, int i, int j, int k) -> double  { return b_in [((e * nm + i) * nm + j) * nm + k]; };
-        const auto JxW_at = [=](int e, int r, int q, int p) -> double  { return b_JxW[((e * nq + r) * nq + q) * nq + p]; };
+        const auto JxW_at = [=](int e, int p, int q, int r) -> double  { return b_JxW[((e * nq + p) * nq + q) * nq + r]; };
         const auto out_at = [=](int e, int i, int j, int k) -> double& { return b_out[((e * nm + i) * nm + j) * nm + k]; };
 
-        // step A : load and split the column in(:, j, k), contract direction 0
+        // phase A : load and split the column in(:, j, k), contract direction 0
         for (int tid = threadIdx.x; tid < nb * nm * nm; tid += blockDim.x) {
             const auto [e, j, k] = decompose(tid, nm, nm);
+            float uh[nm];
+            float ul[nm];
             #pragma unroll
             for (int i = 0; i < nm; ++i) {
-                ff::split(in_at(e, i, j, k), rh[i], rl[i]);
+                ff::split(in_at(e, i, j, k), uh[i], ul[i]);
             }
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
-                float th = 0.0f;
-                float tl = 0.0f;
-                #pragma unroll
-                for (int i = 0; i < nm; ++i) {
-                    ff::mul_add(th, tl, rh[i], rl[i], basis_hi(i, p), basis_lo(i, p));
-                }
-                w1_pjk_hi(e, p, j, k) = th;
-                w1_pjk_lo(e, p, j, k) = tl;
-            }
-        }
-        __syncthreads();
-
-        // step B : direction 1
-        for (int tid = threadIdx.x; tid < nb * nq * nm; tid += blockDim.x) {
-            const auto [e, p, k] = decompose(tid, nq, nm);
-            #pragma unroll
-            for (int j = 0; j < nm; ++j) {
-                rh[j] = w1_pjk_hi(e, p, j, k);
-                rl[j] = w1_pjk_lo(e, p, j, k);
-            }
-            #pragma unroll
-            for (int q = 0; q < nq; ++q) {
-                float th = 0.0f;
-                float tl = 0.0f;
-                #pragma unroll
-                for (int j = 0; j < nm; ++j) {
-                    ff::mul_add(th, tl, rh[j], rl[j], basis_hi(j, q), basis_lo(j, q));
-                }
-                w0_qpk_hi(e, q, p, k) = th;
-                w0_qpk_lo(e, q, p, k) = tl;
-            }
-        }
-        __syncthreads();
-
-        // step C : direction 2, then the weights and determinant of Jacobi,
-        // each JxW value split at its single use
-        for (int tid = threadIdx.x; tid < nb * nq * nq; tid += blockDim.x) {
-            const auto [e, q, p] = decompose(tid, nq, nq);
-            #pragma unroll
-            for (int k = 0; k < nm; ++k) {
-                rh[k] = w0_qpk_hi(e, q, p, k);
-                rl[k] = w0_qpk_lo(e, q, p, k);
-            }
-            #pragma unroll
-            for (int r = 0; r < nq; ++r) {
-                float th = 0.0f;
-                float tl = 0.0f;
-                #pragma unroll
-                for (int k = 0; k < nm; ++k) {
-                    ff::mul_add(th, tl, rh[k], rl[k], basis_hi(k, r), basis_lo(k, r));
-                }
-                float jh;
-                float jl;
-                ff::split(JxW_at(e, r, q, p), jh, jl);
-                ff::mul(th, tl, jh, jl);
-                w1_rqp_hi(e, r, q, p) = th;
-                w1_rqp_lo(e, r, q, p) = tl;
-            }
-        }
-        __syncthreads();
-
-        // Reverse operations
-
-        // step D : direction 2 back
-        for (int tid = threadIdx.x; tid < nb * nq * nq; tid += blockDim.x) {
-            const auto [e, q, p] = decompose(tid, nq, nq);
-            #pragma unroll
-            for (int r = 0; r < nq; ++r) {
-                rh[r] = w1_rqp_hi(e, r, q, p);
-                rl[r] = w1_rqp_lo(e, r, q, p);
-            }
-            #pragma unroll
-            for (int k = 0; k < nm; ++k) {
-                float th = 0.0f;
-                float tl = 0.0f;
-                #pragma unroll
-                for (int r = 0; r < nq; ++r) {
-                    ff::mul_add(th, tl, rh[r], rl[r], basis_hi(k, r), basis_lo(k, r));
-                }
-                w0_kqp_hi(e, k, q, p) = th;
-                w0_kqp_lo(e, k, q, p) = tl;
-            }
-        }
-        __syncthreads();
-
-        // step E : direction 1 back
-        for (int tid = threadIdx.x; tid < nb * nm * nq; tid += blockDim.x) {
-            const auto [e, k, p] = decompose(tid, nm, nq);
-            #pragma unroll
-            for (int q = 0; q < nq; ++q) {
-                rh[q] = w0_kqp_hi(e, k, q, p);
-                rl[q] = w0_kqp_lo(e, k, q, p);
-            }
-            #pragma unroll
-            for (int j = 0; j < nm; ++j) {
-                float th = 0.0f;
-                float tl = 0.0f;
-                #pragma unroll
-                for (int q = 0; q < nq; ++q) {
-                    ff::mul_add(th, tl, rh[q], rl[q], basis_hi(j, q), basis_lo(j, q));
-                }
-                w1_kjp_hi(e, k, j, p) = th;
-                w1_kjp_lo(e, k, j, p) = tl;
-            }
-        }
-        __syncthreads();
-
-        // step F : direction 0 back, join and store the column out(:, j, k)
-        for (int tid = threadIdx.x; tid < nb * nm * nm; tid += blockDim.x) {
-            const auto [e, j, k] = decompose(tid, nm, nm);
-            #pragma unroll
-            for (int p = 0; p < nq; ++p) {
-                rh[p] = w1_kjp_hi(e, k, j, p);
-                rl[p] = w1_kjp_lo(e, k, j, p);
+                ch[p] = 0.0f;
+                cl[p] = 0.0f;
             }
             #pragma unroll
             for (int i = 0; i < nm; ++i) {
-                float th = 0.0f;
-                float tl = 0.0f;
                 #pragma unroll
                 for (int p = 0; p < nq; ++p) {
-                    ff::mul_add(th, tl, rh[p], rl[p], basis_hi(i, p), basis_lo(i, p));
+                    ff::mul_add(ch[p], cl[p], uh[i], ul[i], basis_hi(i, p), basis_lo(i, p));
                 }
-                out_at(e, i, j, k) = ff::join(th, tl);
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                w0_hi(e, p, j, k) = ch[p];
+                w0_lo(e, p, j, k) = cl[p];
             }
         }
-        // the next batch's step A overwrites wsp1 while step F may still read it
+        __syncthreads();
+
+        // phase B : contract direction 1
+        for (int tid = threadIdx.x; tid < nb * nq * nm; tid += blockDim.x) {
+            const auto [e, q, k] = decompose(tid, nq, nm);
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                ch[p] = 0.0f;
+                cl[p] = 0.0f;
+            }
+            #pragma unroll
+            for (int j = 0; j < nm; ++j) {
+                const float bh = basis_hi(j, q);
+                const float bl = basis_lo(j, q);
+                #pragma unroll
+                for (int p = 0; p < nq; ++p) {
+                    ff::mul_add(ch[p], cl[p], w0_hi(e, p, j, k), w0_lo(e, p, j, k), bh, bl);
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                w1_hi(e, p, q, k) = ch[p];
+                w1_lo(e, p, q, k) = cl[p];
+            }
+        }
+        __syncthreads();
+
+        // phase C : contract direction 2, then the weights and determinant of
+        // Jacobi, each JxW value split at its single use
+        for (int tid = threadIdx.x; tid < nb * nq * nq; tid += blockDim.x) {
+            const auto [e, q, r] = decompose(tid, nq, nq);
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                ch[p] = 0.0f;
+                cl[p] = 0.0f;
+            }
+            #pragma unroll
+            for (int k = 0; k < nm; ++k) {
+                const float bh = basis_hi(k, r);
+                const float bl = basis_lo(k, r);
+                #pragma unroll
+                for (int p = 0; p < nq; ++p) {
+                    ff::mul_add(ch[p], cl[p], w1_hi(e, p, q, k), w1_lo(e, p, q, k), bh, bl);
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                float jh;
+                float jl;
+                ff::split(JxW_at(e, p, q, r), jh, jl);
+                ff::mul(ch[p], cl[p], jh, jl);
+                w0_hi(e, p, q, r) = ch[p];
+                w0_lo(e, p, q, r) = cl[p];
+            }
+        }
+        __syncthreads();
+
+        // phase D : contract direction 2 back
+        for (int tid = threadIdx.x; tid < nb * nq * nm; tid += blockDim.x) {
+            const auto [e, q, k] = decompose(tid, nq, nm);
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                ch[p] = 0.0f;
+                cl[p] = 0.0f;
+            }
+            #pragma unroll
+            for (int r = 0; r < nq; ++r) {
+                const float bh = basis_hi(k, r);
+                const float bl = basis_lo(k, r);
+                #pragma unroll
+                for (int p = 0; p < nq; ++p) {
+                    ff::mul_add(ch[p], cl[p], w0_hi(e, p, q, r), w0_lo(e, p, q, r), bh, bl);
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                w1_hi(e, p, q, k) = ch[p];
+                w1_lo(e, p, q, k) = cl[p];
+            }
+        }
+        __syncthreads();
+
+        // phase E : contract direction 1 back, then direction 0 back in
+        // registers, join and store the column out(:, j, k)
+        for (int tid = threadIdx.x; tid < nb * nm * nm; tid += blockDim.x) {
+            const auto [e, j, k] = decompose(tid, nm, nm);
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                ch[p] = 0.0f;
+                cl[p] = 0.0f;
+            }
+            #pragma unroll
+            for (int q = 0; q < nq; ++q) {
+                const float bh = basis_hi(j, q);
+                const float bl = basis_lo(j, q);
+                #pragma unroll
+                for (int p = 0; p < nq; ++p) {
+                    ff::mul_add(ch[p], cl[p], w1_hi(e, p, q, k), w1_lo(e, p, q, k), bh, bl);
+                }
+            }
+            float yh[nm];
+            float yl[nm];
+            #pragma unroll
+            for (int i = 0; i < nm; ++i) {
+                yh[i] = 0.0f;
+                yl[i] = 0.0f;
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                #pragma unroll
+                for (int i = 0; i < nm; ++i) {
+                    ff::mul_add(yh[i], yl[i], ch[p], cl[p], basis_hi(i, p), basis_lo(i, p));
+                }
+            }
+            #pragma unroll
+            for (int i = 0; i < nm; ++i) {
+                out_at(e, i, j, k) = ff::join(yh[i], yl[i]);
+            }
+        }
+        // the next batch's phase A overwrites w0 while phase E may still read w1,
+        // and phase B of the next batch reads w0: one barrier covers both
         __syncthreads();
     }
 }

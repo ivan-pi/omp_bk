@@ -114,15 +114,18 @@ first output line says `fma = hardware`).
 `bk1_ff_cuda.cuh` holds the same float-float kernel as a CUDA kernel,
 `MassOperatorFF<nq>`, with double storage at the boundary: one block works
 through batches of `nelmtPerBatch` elements, a thread owns one point of an
-element's plane with the column through it in registers, and the boxes
-between the steps are hi/lo float pairs in dynamic shared memory
-(`mass_operator_ff_shared_bytes(nq, nelmtPerBatch)` bytes, the same count
-as a double kernel's). The first and last steps read and write global
-memory directly. The header is empty unless compiled by nvcc, and it needs
-no special flags: the error-free transformations survive nvcc's default
-contraction, and `--use_fast_math` only flushes subnormal lo parts. The
-header comment lists the launch geometry and the known costs. It is not
-built by the Makefile and has only been syntax-checked here.
+element's plane with the column through it in registers, the five phases
+are those of the OpenMP plane kernel, and the boxes between the phases are
+hi/lo float pairs in dynamic shared memory with the one nq^3 layout of the
+OpenMP kernels (`mass_operator_ff_shared_bytes(nq, nelmtPerBatch)` bytes,
+the same count as a double kernel's). Boxes and global arrays are addressed
+through accessor lambdas. The header is empty unless compiled by nvcc, and
+it needs no special flags: the error-free transformations survive nvcc's
+default contraction, and `--use_fast_math` only flushes subnormal lo parts.
+The header comment lists the launch geometry and the known cost. It is not
+built by the Makefile; it was checked on the host through a stand-in for
+the CUDA keywords (one thread per block) against the double reference, and
+agrees with the OpenMP kernels bit for bit.
 
 ## Apple AMX version of BK1
 
