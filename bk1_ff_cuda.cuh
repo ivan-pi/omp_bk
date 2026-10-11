@@ -59,6 +59,9 @@
 // Example build:  nvcc -O3 -std=c++17 -arch=sm_90 -x cu -c driver.cpp
 // (the driver includes this header and float_float.h).
 //
+// Phase E's second contraction (p into i) keeps both loops unrolled: the
+// column ch[p] and the output yh[i] are both register arrays.
+//
 // Known cost left for later: the split is one fp64 subtract per loaded
 // value, which on a 1/64-rate GPU is ~30% of the arithmetic at nq = 4 and
 // ~13% at nq = 10 (a bit-level split with integer operations would avoid it).
@@ -68,6 +71,16 @@
 #include <cstddef>
 
 #include "float_float.h"
+
+// The loops over a register column are always fully unrolled, which is
+// what keeps the column in registers.  The loops over the contraction
+// index are fully unrolled up to this order and left to the compiler
+// above it: fully unrolled, a phase of order 10 is nq * nm = 90 multiply-
+// adds of 15 instructions, and five such phases strain the instruction
+// cache.  -DFF_CUDA_FULL_UNROLL_NQ=n moves the threshold.
+#ifndef FF_CUDA_FULL_UNROLL_NQ
+#define FF_CUDA_FULL_UNROLL_NQ 10
+#endif
 
 namespace bk {
 
@@ -125,6 +138,9 @@ __device__ inline void mass_operator_ff_body(
     constexpr int nm = traits::nm;
     constexpr int nq3 = traits::nq3;
     constexpr int nm3 = traits::nm3;
+    // unroll factor of the contraction loops: full, or the compiler's choice
+    [[maybe_unused]] constexpr int unroll_nm = (nq <= FF_CUDA_FULL_UNROLL_NQ) ? nm : 1;
+    [[maybe_unused]] constexpr int unroll_nq = (nq <= FF_CUDA_FULL_UNROLL_NQ) ? nq : 1;
 
     // Shared memory: the split basis and the two hi/lo box pairs, laid out
     // as traits::shared_floats counts them.
@@ -191,22 +207,19 @@ __device__ inline void mass_operator_ff_body(
         // phase A : load and split the column in(:, j, k), contract direction 0
         for (int tid = static_cast<int>(thread_rank); tid < nb * nm * nm; tid += static_cast<int>(block_size)) {
             const auto [e, j, k] = decompose(tid, nm, nm);
-            float uh[nm];
-            float ul[nm];
-            #pragma unroll
-            for (int i = 0; i < nm; ++i) {
-                ff::split(in_at(e, i, j, k), uh[i], ul[i]);
-            }
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
                 ch[p] = 0.0f;
                 cl[p] = 0.0f;
             }
-            #pragma unroll
+            #pragma unroll unroll_nm
             for (int i = 0; i < nm; ++i) {
+                float uh;
+                float ul;
+                ff::split(in_at(e, i, j, k), uh, ul);
                 #pragma unroll
                 for (int p = 0; p < nq; ++p) {
-                    ff::mul_add(ch[p], cl[p], uh[i], ul[i], basis_hi(i, p), basis_lo(i, p));
+                    ff::mul_add(ch[p], cl[p], uh, ul, basis_hi(i, p), basis_lo(i, p));
                 }
             }
             #pragma unroll
@@ -225,7 +238,7 @@ __device__ inline void mass_operator_ff_body(
                 ch[p] = 0.0f;
                 cl[p] = 0.0f;
             }
-            #pragma unroll
+            #pragma unroll unroll_nm
             for (int j = 0; j < nm; ++j) {
                 const float bh = basis_hi(j, q);
                 const float bl = basis_lo(j, q);
@@ -251,7 +264,7 @@ __device__ inline void mass_operator_ff_body(
                 ch[p] = 0.0f;
                 cl[p] = 0.0f;
             }
-            #pragma unroll
+            #pragma unroll unroll_nm
             for (int k = 0; k < nm; ++k) {
                 const float bh = basis_hi(k, r);
                 const float bl = basis_lo(k, r);
@@ -280,7 +293,7 @@ __device__ inline void mass_operator_ff_body(
                 ch[p] = 0.0f;
                 cl[p] = 0.0f;
             }
-            #pragma unroll
+            #pragma unroll unroll_nq
             for (int r = 0; r < nq; ++r) {
                 const float bh = basis_hi(k, r);
                 const float bl = basis_lo(k, r);
@@ -306,7 +319,7 @@ __device__ inline void mass_operator_ff_body(
                 ch[p] = 0.0f;
                 cl[p] = 0.0f;
             }
-            #pragma unroll
+            #pragma unroll unroll_nq
             for (int q = 0; q < nq; ++q) {
                 const float bh = basis_hi(j, q);
                 const float bl = basis_lo(j, q);

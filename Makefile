@@ -17,6 +17,9 @@ NVCCFLAGS=-O3 -std=c++17 -arch=$(NVARCH) -Xcompiler -Wall,-Wno-unknown-pragmas
 # toolkit's own copy when that is too old for the runtime API.
 CCCL=
 NVCCFLAGS+=$(if $(CCCL),-I$(CCCL)/libcudacxx/include -I$(CCCL)/cub -I$(CCCL)/thrust,)
+# NVCCEXTRA adds flags, e.g. NVCCEXTRA='-Xptxas -v -DFF_CUDA_FULL_UNROLL_NQ=6'
+NVCCEXTRA=
+NVCCFLAGS+=$(NVCCEXTRA)
 
 
 .PHONY: all
