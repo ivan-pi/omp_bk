@@ -117,14 +117,22 @@ through batches of `nelmtPerBatch` elements, a thread owns one point of an
 element's plane with the column through it in registers, the five phases
 are those of the OpenMP plane kernel, and the boxes between the phases are
 hi/lo float pairs in dynamic shared memory with the one nq^3 layout of the
-OpenMP kernels (`mass_operator_ff_shared_bytes(nq, nelmtPerBatch)` bytes,
-the same count as a double kernel's). Boxes and global arrays are addressed
-through accessor lambdas. The header is empty unless compiled by nvcc, and
+OpenMP kernels. `mass_operator_ff_traits<nq>` holds the sizes per element
+and the launch geometry: threads per element, block size, dynamic shared
+memory bytes (the same count as a double kernel's) and the default batch.
+Boxes and global arrays are addressed through accessor lambdas. The header is empty unless compiled by nvcc, and
 it needs no special flags: the error-free transformations survive nvcc's
 default contraction, and `--use_fast_math` only flushes subnormal lo parts.
-The header comment lists the launch geometry and the known cost. The real
-kernel needs nvcc and a GPU and is not built by the Makefile, but
-`make check_ff_cuda && ./check_ff_cuda` builds and runs it on the host
+The header comment lists the launch geometry and the known cost.
+`make BK1_ff_cuda` (nvcc from CUDA 13.2 or later, `NVARCH=native` by
+default) builds `cuda/BK1_ff_cuda.cu`, which runs the kernel on the GPU
+through the CCCL runtime API: the kernel is a functor whose call operator
+takes the launch configuration as a template parameter and reads the block
+and thread ranks and the dynamic shared memory from it; the driver takes
+the arguments of `BK1_ff` plus the elements per block, times the kernel
+with CUDA events and checks it against the host double reference
+(`ok`/`FAIL`). `make check_ff_cuda && ./check_ff_cuda` builds and runs the
+same kernel on the host
 through `cuda/cuda_shim.h`, a stand-in for the CUDA keywords with one
 thread per block, and checks it against the double reference for
 nq = 3..10, constant and random data and batches with a short last batch

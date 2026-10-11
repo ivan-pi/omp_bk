@@ -8,6 +8,11 @@ else
 ARCHFLAGS=-mcpu=native
 endif
 CXXFLAGS=-Wall -pedantic -O3 -std=c++17 $(ARCHFLAGS) -fopenmp
+# The CUDA driver (make BK1_ff_cuda): nvcc from CUDA 13.2 or later for the
+# cuda::launch runtime API; NVARCH selects the GPU (native = the one present).
+NVCC=nvcc
+NVARCH=native
+NVCCFLAGS=-O3 -std=c++17 -arch=$(NVARCH) -Xcompiler -Wall,-Wno-unknown-pragmas
 
 
 .PHONY: all
@@ -36,6 +41,11 @@ BK5: BK5.cpp
 check_ff_cuda: cuda/check_ff_cuda.cpp cuda/cuda_shim.h bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
 	$(CXX) $(CXXFLAGS) -Wno-unknown-pragmas -D__CUDACC__ -I. -Icuda -o $@ $<
 
+# The CUDA float-float kernel on the GPU, timed and checked against the
+# double reference on the host; needs nvcc (CUDA 13.2+) and a GPU.
+BK1_ff_cuda: cuda/BK1_ff_cuda.cu bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
+	$(NVCC) $(NVCCFLAGS) -I. -o $@ $<
+
 # Apple AMX version of BK1 (software-emulated AMX on any other machine)
 BK1_amx: amx/BK1_amx.cpp amx/amx.h bk_common.h
 	$(CXX) $(CXXFLAGS) -o $@ $<
@@ -53,4 +63,4 @@ accel_gemm: amx/bench/accel_gemm.cpp
 
 .PHONY: clean
 clean:
-	$(RM) BK1 BK3 BK5 BK1_ff BK1_amx check_ff_cuda bw_test amx_pipe accel_gemm *.o
+	$(RM) BK1 BK3 BK5 BK1_ff BK1_amx check_ff_cuda BK1_ff_cuda bw_test amx_pipe accel_gemm *.o

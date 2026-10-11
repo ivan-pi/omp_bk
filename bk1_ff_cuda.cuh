@@ -15,7 +15,10 @@
 // kernel moves the same 8 bytes per value as double.
 //
 // Mapping: one block works through batches of nelmtPerBatch elements
-// (grid-stride over the batches).  Within a batch a thread owns one point of
+// (grid-stride over the batches).  The body is a __device__ function used
+// by the __global__ MassOperatorFF here and by the kernel functor of
+// cuda/BK1_ff_cuda.cu, which takes the launch configuration as a template
+// parameter (cuda::launch).  Within a batch a thread owns one point of
 // an element's plane and the whole column through it along the first index,
 // held in registers as hi and lo of nq values, and the five phases are those
 // of the OpenMP plane kernel (plane_phase_a..e in BK1_ff.cpp): the
@@ -38,13 +41,14 @@
 // arrays are addressed through accessor lambdas that capture the pointers by
 // value and return the element.
 //
-// Shared memory: mass_operator_ff_shared_bytes(nq, nelmtPerBatch) bytes of
-// dynamic shared memory, the same byte count as the double kernel's.  Above
-// 48 KB the launch needs cudaFuncSetAttribute(...,
-// cudaFuncAttributeMaxDynamicSharedMemorySize, bytes).  A block of
-// nelmtPerBatch * nq * nq threads (rounded up to whole warps) gives every
-// point of phase C a thread; the other phases use nm * nm or nq * nm points
-// per element and leave the rest idle.
+// Launch geometry: mass_operator_ff_traits<nq> gives the block size, a
+// thread per point of the nq x nq plane of each element of the batch
+// rounded up to whole warps (phases A, B, D and E use nm * nm or nq * nm
+// points per element and leave the rest idle), the bytes of dynamic shared
+// memory, the same count as the double kernel's (above 48 KB a plain
+// launch needs cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicShared-
+// MemorySize, bytes); cuda::launch takes cuda::non_portable), and the
+// default batch.
 //
 // Flags: the error-free transformations need no option.  nvcc's default
 // -fmad=true cannot contract anything because no expression has the form
@@ -67,28 +71,63 @@
 
 namespace bk {
 
-// Bytes of dynamic shared memory for MassOperatorFF<nq> with a batch of
-// nelmtPerBatch elements: the split basis and two hi/lo box pairs.
-constexpr std::size_t mass_operator_ff_shared_bytes(const int nq, const int nelmtPerBatch)
-{
-    return sizeof(float) * (2 * (nq - 1) * nq + 4 * static_cast<std::size_t>(nelmtPerBatch) * nq * nq * nq);
-}
+// The sizes of the kernel for one order and its launch geometry for a
+// batch of elements per block: the sizes per element, the threads per
+// element (one per point of the nq x nq plane), the block size, the
+// dynamic shared memory (the split basis and two hi/lo box pairs) and the
+// default batch, which fills about `threads` threads per block as
+// ff_plane_batch of BK1_ff.cpp.
+template <int nq_>
+struct mass_operator_ff_traits {
+    static_assert(nq_ >= 2, "nq = p + 2 with p >= 0");
+    static constexpr int nq = nq_;               // quadrature points per direction
+    static constexpr int nm = nq - 1;            // modes per direction
+    static constexpr int nq3 = nq * nq * nq;     // quadrature points per element (JxW values)
+    static constexpr int nm3 = nm * nm * nm;     // degrees of freedom per element (in, out values)
+    static constexpr int basis_size = nm * nq;   // B(mode, quad point)
+    static constexpr int plane = nq * nq;        // threads per element
+    static constexpr int warp = 32;
 
+    static constexpr int block_size(const int nelmtPerBatch)
+    {
+        return ((nelmtPerBatch * plane + warp - 1) / warp) * warp;
+    }
+    static constexpr std::size_t shared_floats(const int nelmtPerBatch)
+    {
+        return 2 * basis_size + 4 * static_cast<std::size_t>(nelmtPerBatch) * nq3;
+    }
+    static constexpr std::size_t shared_bytes(const int nelmtPerBatch)
+    {
+        return sizeof(float) * shared_floats(nelmtPerBatch);
+    }
+    static constexpr int default_batch(const int threads = 128)
+    {
+        return (threads / plane > 1) ? threads / plane : 1;
+    }
+};
+
+// The kernel body, shared by the __global__ entry below and the kernel
+// functor of cuda/BK1_ff_cuda.cu: `shared` is the block's dynamic shared
+// memory, and the four counts are the block's rank and the grid size, the
+// thread's rank in the block and the block size.
 template <int nq>
-__global__ void MassOperatorFF(
+__device__ inline void mass_operator_ff_body(
     const unsigned int nelmt, const unsigned int nelmtPerBatch,
     const double* __restrict__ d_basis,
     const double* __restrict__ d_JxW,
     const double* __restrict__ d_in,
-    double* __restrict__ d_out)
+    double* __restrict__ d_out,
+    float* shared,
+    const unsigned int block_rank, const unsigned int grid_size,
+    const unsigned int thread_rank, const unsigned int block_size)
 {
-    static_assert(nq >= 2, "nq = p + 2 with p >= 0");
-    constexpr int nm = nq - 1;
-    constexpr int nq3 = nq * nq * nq;
-    constexpr int nm3 = nm * nm * nm;
+    using traits = mass_operator_ff_traits<nq>;
+    constexpr int nm = traits::nm;
+    constexpr int nq3 = traits::nq3;
+    constexpr int nm3 = traits::nm3;
 
-    // Shared memory: the split basis and the two hi/lo box pairs.
-    extern __shared__ float shared[];
+    // Shared memory: the split basis and the two hi/lo box pairs, laid out
+    // as traits::shared_floats counts them.
     float* s_basis_hi = shared;
     float* s_basis_lo = s_basis_hi + nm * nq;
     float* s_wsp0_hi  = s_basis_lo + nm * nq;
@@ -130,13 +169,13 @@ __global__ void MassOperatorFF(
     float cl[nq];
 
     // The basis, split once per block.
-    for (int i = threadIdx.x; i < nm * nq; i += blockDim.x) {
+    for (int i = static_cast<int>(thread_rank); i < nm * nq; i += static_cast<int>(block_size)) {
         ff::split(d_basis[i], s_basis_hi[i], s_basis_lo[i]);
     }
     __syncthreads();
 
     const unsigned int nbatches = (nelmt + nelmtPerBatch - 1) / nelmtPerBatch;
-    for (unsigned int eb = blockIdx.x; eb < nbatches; eb += gridDim.x) {
+    for (unsigned int eb = block_rank; eb < nbatches; eb += grid_size) {
 
         // the last batch may be short
         const int remaining = static_cast<int>(nelmt - eb * nelmtPerBatch);
@@ -150,7 +189,7 @@ __global__ void MassOperatorFF(
         const auto out_at = [=](int e, int i, int j, int k) -> double& { return b_out[((e * nm + i) * nm + j) * nm + k]; };
 
         // phase A : load and split the column in(:, j, k), contract direction 0
-        for (int tid = threadIdx.x; tid < nb * nm * nm; tid += blockDim.x) {
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nm * nm; tid += static_cast<int>(block_size)) {
             const auto [e, j, k] = decompose(tid, nm, nm);
             float uh[nm];
             float ul[nm];
@@ -179,7 +218,7 @@ __global__ void MassOperatorFF(
         __syncthreads();
 
         // phase B : contract direction 1
-        for (int tid = threadIdx.x; tid < nb * nq * nm; tid += blockDim.x) {
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nq * nm; tid += static_cast<int>(block_size)) {
             const auto [e, q, k] = decompose(tid, nq, nm);
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
@@ -205,7 +244,7 @@ __global__ void MassOperatorFF(
 
         // phase C : contract direction 2, then the weights and determinant of
         // Jacobi, each JxW value split at its single use
-        for (int tid = threadIdx.x; tid < nb * nq * nq; tid += blockDim.x) {
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nq * nq; tid += static_cast<int>(block_size)) {
             const auto [e, q, r] = decompose(tid, nq, nq);
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
@@ -234,7 +273,7 @@ __global__ void MassOperatorFF(
         __syncthreads();
 
         // phase D : contract direction 2 back
-        for (int tid = threadIdx.x; tid < nb * nq * nm; tid += blockDim.x) {
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nq * nm; tid += static_cast<int>(block_size)) {
             const auto [e, q, k] = decompose(tid, nq, nm);
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
@@ -260,7 +299,7 @@ __global__ void MassOperatorFF(
 
         // phase E : contract direction 1 back, then direction 0 back in
         // registers, join and store the column out(:, j, k)
-        for (int tid = threadIdx.x; tid < nb * nm * nm; tid += blockDim.x) {
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nm * nm; tid += static_cast<int>(block_size)) {
             const auto [e, j, k] = decompose(tid, nm, nm);
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
@@ -299,6 +338,22 @@ __global__ void MassOperatorFF(
         // and phase B of the next batch reads w0: one barrier covers both
         __syncthreads();
     }
+}
+
+// The kernel as a __global__ function: launch with
+// mass_operator_ff_traits<nq>::shared_bytes(nelmtPerBatch) bytes of
+// dynamic shared memory (cuda/check_ff_cuda.cpp runs this form on the host).
+template <int nq>
+__global__ void MassOperatorFF(
+    const unsigned int nelmt, const unsigned int nelmtPerBatch,
+    const double* __restrict__ d_basis,
+    const double* __restrict__ d_JxW,
+    const double* __restrict__ d_in,
+    double* __restrict__ d_out)
+{
+    extern __shared__ float shared[];
+    mass_operator_ff_body<nq>(nelmt, nelmtPerBatch, d_basis, d_JxW, d_in, d_out, shared,
+                              blockIdx.x, gridDim.x, threadIdx.x, blockDim.x);
 }
 
 } // namespace bk

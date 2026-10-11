@@ -43,7 +43,7 @@ double relative_error(const std::size_t nelmt, const unsigned batch, const bool 
     std::vector<double> ref(in.size());
     std::vector<double> out(in.size(), -1.0);
     bk::SumFactorization<double, nq>(nelmt, basis.data(), JxW.data(), in.data(), ref.data());
-    if (bk::mass_operator_ff_shared_bytes(nq, batch) > sizeof(bk::shared)) {
+    if (bk::mass_operator_ff_traits<nq>::shared_bytes(static_cast<int>(batch)) > sizeof(bk::shared)) {
         return -1.0;
     }
     bk::MassOperatorFF<nq>(static_cast<unsigned>(nelmt), batch,
