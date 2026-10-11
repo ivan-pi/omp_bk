@@ -99,6 +99,11 @@ __global__ void MassOperatorFF(
     // Accessors: the two boxes as hi and lo, nq^3 per element, the basis,
     // and (inside the batch loop) the batch's global arrays.  Each is a
     // lambda that captures its pointer by value and returns the element.
+    // No __device__ on these lambdas (nor on decompose below): nvcc gives
+    // the closure of a lambda the execution space of the innermost
+    // enclosing function, so inside a __global__ function they are device
+    // lambdas; an explicit annotation is only for lambdas written in host
+    // code and passed to the device (--extended-lambda).
     const auto w0_hi = [=](int e, int a, int b, int c) -> float& { return s_wsp0_hi[((e * nq + a) * nq + b) * nq + c]; };
     const auto w0_lo = [=](int e, int a, int b, int c) -> float& { return s_wsp0_lo[((e * nq + a) * nq + b) * nq + c]; };
     const auto w1_hi = [=](int e, int a, int b, int c) -> float& { return s_wsp1_hi[((e * nq + a) * nq + b) * nq + c]; };
