@@ -130,6 +130,26 @@ struct mass_operator_ff_traits {
 // functor of cuda/BK1_ff_cuda.cu: `shared` is the block's dynamic shared
 // memory, and the four counts are the block's rank and the grid size, the
 // thread's rank in the block and the block size.
+// A thread's point: element e of the batch and (a, b) in a plane of
+// na x nb points per element, from the thread index of a phase.  The plane
+// sizes are template parameters so that the divisions are by constants,
+// multiply-and-shift sequences rather than the ~20-instruction integer
+// division of the GPU, whatever the compiler inlines.
+struct ff_point {
+    int e;
+    int a;
+    int b;
+};
+
+template <int na, int nb>
+__host__ __device__ constexpr ff_point ff_decompose(const int tid)
+{
+    static_assert(na > 0 && nb > 0, "plane sizes are positive");
+    const int e = tid / (na * nb);
+    const int r = tid - e * (na * nb);
+    return ff_point{e, r / nb, r - (r / nb) * nb};
+}
+
 template <int nq>
 __device__ inline void mass_operator_ff_body(
     const unsigned int nelmt, const unsigned int nelmtPerBatch,
@@ -162,7 +182,7 @@ __device__ inline void mass_operator_ff_body(
     // Accessors: the two boxes as hi and lo, nq^3 per element, the basis,
     // and (inside the batch loop) the batch's global arrays.  Each is a
     // lambda that captures its pointer by value and returns the element.
-    // No __device__ on these lambdas (nor on decompose below): nvcc gives
+    // No __device__ on these lambdas: nvcc gives
     // the closure of a lambda the execution space of the innermost
     // enclosing function, so inside a __global__ function they are device
     // lambdas; an explicit annotation is only for lambdas written in host
@@ -173,19 +193,6 @@ __device__ inline void mass_operator_ff_body(
     const auto w1_lo = [=](int e, int a, int b, int c) -> float& { return s_wsp1_lo[((e * nq + a) * nq + b) * nq + c]; };
     const auto basis_hi = [=](int i, int p) -> float { return s_basis_hi[i * nq + p]; };
     const auto basis_lo = [=](int i, int p) -> float { return s_basis_lo[i * nq + p]; };
-
-    // A thread's point: element e of the batch and (a, b) in a plane of
-    // na x nb points per element, from the thread index of a phase.
-    struct Point {
-        int e;
-        int a;
-        int b;
-    };
-    const auto decompose = [](int tid, int na, int nb) -> Point {
-        const int e = tid / (na * nb);
-        const int r = tid - e * (na * nb);
-        return Point{e, r / nb, r - (r / nb) * nb};
-    };
 
     // The register column: the output of a phase as hi and lo, and the
     // input column of phase A.
@@ -214,7 +221,7 @@ __device__ inline void mass_operator_ff_body(
 
         // phase A : load and split the column in(:, j, k), contract direction 0
         for (int tid = static_cast<int>(thread_rank); tid < nb * nm * nm; tid += static_cast<int>(block_size)) {
-            const auto [e, j, k] = decompose(tid, nm, nm);
+            const auto [e, j, k] = ff_decompose<nm, nm>(tid);
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
                 ch[p] = 0.0f;
@@ -260,7 +267,7 @@ __device__ inline void mass_operator_ff_body(
 
         // phase B : contract direction 1
         for (int tid = static_cast<int>(thread_rank); tid < nb * nq * nm; tid += static_cast<int>(block_size)) {
-            const auto [e, q, k] = decompose(tid, nq, nm);
+            const auto [e, q, k] = ff_decompose<nq, nm>(tid);
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
                 ch[p] = 0.0f;
@@ -286,7 +293,7 @@ __device__ inline void mass_operator_ff_body(
         // phase C : contract direction 2, then the weights and determinant of
         // Jacobi, each JxW value split at its single use
         for (int tid = static_cast<int>(thread_rank); tid < nb * nq * nq; tid += static_cast<int>(block_size)) {
-            const auto [e, q, r] = decompose(tid, nq, nq);
+            const auto [e, q, r] = ff_decompose<nq, nq>(tid);
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
                 ch[p] = 0.0f;
@@ -315,7 +322,7 @@ __device__ inline void mass_operator_ff_body(
 
         // phase D : contract direction 2 back
         for (int tid = static_cast<int>(thread_rank); tid < nb * nq * nm; tid += static_cast<int>(block_size)) {
-            const auto [e, q, k] = decompose(tid, nq, nm);
+            const auto [e, q, k] = ff_decompose<nq, nm>(tid);
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
                 ch[p] = 0.0f;
@@ -341,7 +348,7 @@ __device__ inline void mass_operator_ff_body(
         // phase E : contract direction 1 back, then direction 0 back in
         // registers, join and store the column out(:, j, k)
         for (int tid = static_cast<int>(thread_rank); tid < nb * nm * nm; tid += static_cast<int>(block_size)) {
-            const auto [e, j, k] = decompose(tid, nm, nm);
+            const auto [e, j, k] = ff_decompose<nm, nm>(tid);
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
                 ch[p] = 0.0f;
