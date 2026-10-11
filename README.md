@@ -71,8 +71,9 @@ spread over the team's threads with `parallel for collapse(3)`, and the end
 of each parallel region is the barrier between steps. The team size is a
 constexpr of nq (`ff_team_size`: nq^3 rounded up to whole warps, 1024 at
 nq = 10). `ff-plane` (`SumFactorizationFFPlane`) is the layout of the
-production codes: a plane of nq x nq threads per element, each thread
-owning the column through its point in registers (hi and lo of nq values),
+production codes: a plane of nq x nq threads per element (the team rounded
+up to whole warps), each thread owning the column through its point in
+registers (hi and lo of nq values),
 five phases with a barrier between them, the contraction index as the outer
 loop so that every input value and basis entry is loaded once per column,
 and the basis read as a warp broadcast. The plane kernel runs twice, with

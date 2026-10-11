@@ -244,17 +244,26 @@ void SumFactorizationFF(
 // The same kernel with one team per element
 // ---------------------------------------------------------------------------
 
+// n rounded up to whole warps.  Every team size below goes through this:
+// a team is scheduled in warps anyway, and the threads of a padded team
+// beyond n simply get no iterations of the worksharing loops.  A team
+// smaller than one warp is also unsafe in practice: with nvc++ 25.3 the
+// plane kernel with one element per team gave nan at nq = 4 and 5 (teams
+// of 16 and 25 threads) and correct results from nq = 6 (36 threads), as if
+// the barriers between phases were elided inside a single warp.
+constexpr int ff_round_to_warps(const int n)
+{
+    constexpr int warp = 32;
+    return ((n + warp - 1) / warp) * warp;
+}
+
 // Threads per team of SumFactorizationFFTeams: one per point of the nq^3
 // box, the largest output of any step, rounded up to whole warps.  At
 // nq = 10 this is the CUDA maximum of 1024; at nq <= 4 it is one or two
 // warps, which underfills an SM (several elements per team would be the
 // cure).  thread_limit is an upper bound: fewer threads only mean more
 // iterations per thread in the collapsed loops.
-constexpr int ff_team_size(const int nq)
-{
-    constexpr int warp = 32;
-    return ((nq * nq * nq + warp - 1) / warp) * warp;
-}
+constexpr int ff_team_size(const int nq) { return ff_round_to_warps(nq * nq * nq); }
 
 // SumFactorizationFF with the elements distributed over teams and the
 // threads of a team over the points of each step: the work arrays are
@@ -477,7 +486,8 @@ constexpr int ff_plane_batch([[maybe_unused]] const int nq)
 #endif
 }
 
-// batch elements per team of batch * nq * nq threads.  A thread owns one
+// batch elements per team of batch * nq * nq threads, rounded up to whole
+// warps (ff_round_to_warps).  A thread owns one
 // point of an element's plane and the whole column through it along the
 // first index, held in registers as hi and lo of nq values.  Each phase
 // contracts either along the register column, with no shared-memory
@@ -512,7 +522,7 @@ void SumFactorizationFFPlane(
     constexpr int nq3 = nq * nq * nq;
     constexpr int nm3 = nm * nm * nm;
     // the team size only appears in the thread_limit clause
-    [[maybe_unused]] constexpr int team_size = batch * nq * nq;
+    [[maybe_unused]] constexpr int team_size = ff_round_to_warps(batch * nq * nq);
     static_assert(team_size <= 1024, "a CUDA block holds at most 1024 threads");
 
     const std::size_t nteams = (nelmt + batch - 1) / batch;
