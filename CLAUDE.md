@@ -18,8 +18,10 @@ kernel with `teams loop` and nested `loop` constructs, sharing the phase
 functions `plane_phase_a..e`. The driver runs and checks all of them; they
 must agree bit for bit, as every output is summed in index order.
 `bk1_ff_cuda.cuh` is the same kernel as a CUDA kernel (`MassOperatorFF<nq>`,
-double storage, float-float inside), compiled only under nvcc and not built
-by the Makefile; `float_float.h` is host and device callable for it.
+double storage, float-float inside), compiled only under nvcc;
+`float_float.h` is host and device callable for it. `make check_ff_cuda`
+runs that kernel on the host through `cuda/cuda_shim.h` against the double
+reference (`ok`/`FAIL`); run it after any change to the CUDA header.
 
 ## Build and check
 

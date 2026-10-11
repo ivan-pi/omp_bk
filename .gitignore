@@ -4,6 +4,7 @@ BK3
 BK5
 BK1_ff
 BK1_amx
+check_ff_cuda
 bw_test
 amx_pipe
 accel_gemm

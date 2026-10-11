@@ -122,10 +122,15 @@ the same count as a double kernel's). Boxes and global arrays are addressed
 through accessor lambdas. The header is empty unless compiled by nvcc, and
 it needs no special flags: the error-free transformations survive nvcc's
 default contraction, and `--use_fast_math` only flushes subnormal lo parts.
-The header comment lists the launch geometry and the known cost. It is not
-built by the Makefile; it was checked on the host through a stand-in for
-the CUDA keywords (one thread per block) against the double reference, and
-agrees with the OpenMP kernels bit for bit.
+The header comment lists the launch geometry and the known cost. The real
+kernel needs nvcc and a GPU and is not built by the Makefile, but
+`make check_ff_cuda && ./check_ff_cuda` builds and runs it on the host
+through `cuda/cuda_shim.h`, a stand-in for the CUDA keywords with one
+thread per block, and checks it against the double reference for
+nq = 3..10, constant and random data and batches with a short last batch
+(`ok`/`FAIL`, exit status 1 on failure); it agrees with the OpenMP kernels
+bit for bit. The stand-in checks indexing, phases and batching, not the
+execution by many threads.
 
 ## Apple AMX version of BK1
 

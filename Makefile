@@ -30,6 +30,12 @@ BK3: BK3.cpp
 BK5: BK5.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
+# The CUDA float-float kernel (bk1_ff_cuda.cuh) run on the host through a
+# stand-in for the CUDA keywords and checked against the double reference;
+# exit status 1 on failure.  The real kernel needs nvcc and a GPU.
+check_ff_cuda: cuda/check_ff_cuda.cpp cuda/cuda_shim.h bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
+	$(CXX) $(CXXFLAGS) -Wno-unknown-pragmas -D__CUDACC__ -I. -Icuda -o $@ $<
+
 # Apple AMX version of BK1 (software-emulated AMX on any other machine)
 BK1_amx: amx/BK1_amx.cpp amx/amx.h bk_common.h
 	$(CXX) $(CXXFLAGS) -o $@ $<
@@ -47,4 +53,4 @@ accel_gemm: amx/bench/accel_gemm.cpp
 
 .PHONY: clean
 clean:
-	$(RM) BK1 BK3 BK5 BK1_ff BK1_amx bw_test amx_pipe accel_gemm *.o
+	$(RM) BK1 BK3 BK5 BK1_ff BK1_amx check_ff_cuda bw_test amx_pipe accel_gemm *.o
