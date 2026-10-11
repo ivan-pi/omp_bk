@@ -4,10 +4,17 @@ OpenMP implementations of the CEED bake-off kernels BK1, BK3 and BK5; `amx/`
 holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`).
 The BK1 kernel lives in `bk1_sumfact.h`, generic in the arithmetic type
 (float or double); `BK1.cpp` runs it in float. `BK1_ff.cpp` holds its own
-float-float kernel with the same interface in double: values are split into
+float-float kernels with the same interface in double: values are split into
 hi/lo float pairs inside the kernel, the work arrays are separate hi and lo
 float arrays, and the TwoSum/TwoProd helpers come from `float_float.h`, a
-private header of that driver only.
+private header of that driver only. `SumFactorizationFF` runs one element
+per thread, `SumFactorizationFFTeams` one element per team with the work
+arrays at team scope and a `parallel for collapse(3)` per step (team size
+from the constexpr `ff_team_size`), and `SumFactorizationFFPlane<nq, batch>`
+a batch of elements per team of `batch * nq * nq` threads, each owning a
+register column, with five phases (default batch from `ff_plane_batch`,
+`-DFF_PLANE_BATCH=n` overrides). The driver runs and checks all of them;
+they must agree bit for bit, as every output is summed in index order.
 
 ## Build and check
 
