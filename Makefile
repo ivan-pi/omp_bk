@@ -13,6 +13,10 @@ CXXFLAGS=-Wall -pedantic -O3 -std=c++17 $(ARCHFLAGS) -fopenmp
 NVCC=nvcc
 NVARCH=native
 NVCCFLAGS=-O3 -std=c++17 -arch=$(NVARCH) -Xcompiler -Wall,-Wno-unknown-pragmas
+# CCCL=/path/to/cccl puts a checkout of CCCL (3.2 or later) ahead of the
+# toolkit's own copy when that is too old for the runtime API.
+CCCL=
+NVCCFLAGS+=$(if $(CCCL),-I$(CCCL)/libcudacxx/include -I$(CCCL)/cub -I$(CCCL)/thrust,)
 
 
 .PHONY: all

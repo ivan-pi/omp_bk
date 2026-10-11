@@ -13,7 +13,9 @@
 // ok or FAIL (exit status 1) against BK_TOL (default 1e-10).  The host
 // reference is single-threaded and takes a while at the default element
 // count and high orders.
-// From the repository root:  make BK1_ff_cuda   (needs nvcc, CUDA 13.2+)
+// From the repository root:  make BK1_ff_cuda   (needs nvcc with the CCCL
+// of CUDA 13.2 or later; CCCL=/path/to/a/cccl/checkout puts a newer CCCL
+// ahead of the toolkit's)
 //
 // Run:  ./BK1_ff_cuda [p=2] [nelmt=524288] [ntests=5] [nelmtPerBatch]
 //   nelmtPerBatch  elements per block (default: fills about 128 threads,
@@ -21,7 +23,6 @@
 //                  has nelmtPerBatch * nq * nq threads rounded up to warps.
 //   BK_RANDOM=1, BK_TOL=t  as in BK1_ff.
 
-#include <cuda/algorithm>
 #include <cuda/buffer>
 #include <cuda/devices>
 #include <cuda/launch>
@@ -36,6 +37,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
+#include <stdexcept>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -143,9 +145,15 @@ bool run_test(const std::size_t nelmt, const int ntests, const unsigned int nelm
         elapsed = std::min(elapsed, 1.0e-9 * static_cast<double>(ns.count()));
     }
 
+    // The result back to the host (cudaMemcpyAsync rather than
+    // cuda::copy_bytes, whose header <cuda/algorithm> is newer than some
+    // toolkits' CCCL).
     std::vector<double> out(in.size());
-    cuda::copy_bytes(stream, cuda::std::span<const double>(d_out.data(), d_out.size()),
-                     cuda::std::span<double>(out.data(), out.size()));
+    const cudaError_t copy_status = cudaMemcpyAsync(
+        out.data(), d_out.data(), out.size() * sizeof(double), cudaMemcpyDeviceToHost, stream.get());
+    if (copy_status != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaMemcpyAsync: ") + cudaGetErrorString(copy_status));
+    }
     stream.sync();
 
     const double dof_rate  = 1.0e-9 * static_cast<double>(in.size()) / elapsed;
