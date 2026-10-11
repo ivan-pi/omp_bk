@@ -739,9 +739,11 @@ void SumFactorizationFFPlane(
         float sm1_hi[batch * nq3];
         float sm1_lo[batch * nq3];
 
-        // The team's elements e0 .. e0 + nb - 1; only the last team is short.
+        // The team's elements e0 .. e0 + batch - 1; the phase loops run over
+        // the full batch with a constant trip count, so that the compiler
+        // can collapse the batch into the thread index, and the guard skips
+        // the missing elements of a short last team.
         const std::size_t e0 = t * batch;
-        const index_t nb = (e0 + batch <= nelmt) ? batch : static_cast<index_t>(nelmt - e0);
 
         #pragma omp parallel
         {
@@ -751,47 +753,57 @@ void SumFactorizationFFPlane(
             }
 
             #pragma omp for collapse(3)
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t j = 0; j < nm; ++j) {
                     for (index_t k = 0; k < nm; ++k) {
-                        plane_phase_a<nq>(b, j, k, in + (e0 + b) * nm3, B_hi, B_lo, sm0_hi, sm0_lo);
+                        if (e0 + b < nelmt) {
+                            plane_phase_a<nq>(b, j, k, in + (e0 + b) * nm3, B_hi, B_lo, sm0_hi, sm0_lo);
+                        }
                     }
                 }
             }
 
             #pragma omp for collapse(3)
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t q = 0; q < nq; ++q) {
                     for (index_t k = 0; k < nm; ++k) {
-                        plane_phase_b<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                        if (e0 + b < nelmt) {
+                            plane_phase_b<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                        }
                     }
                 }
             }
 
             #pragma omp for collapse(3)
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t q = 0; q < nq; ++q) {
                     for (index_t r = 0; r < nq; ++r) {
-                        plane_phase_c<nq>(b, q, r, JxW + (e0 + b) * nq3, B_hi, B_lo,
-                                          sm1_hi, sm1_lo, sm0_hi, sm0_lo);
+                        if (e0 + b < nelmt) {
+                            plane_phase_c<nq>(b, q, r, JxW + (e0 + b) * nq3, B_hi, B_lo,
+                                              sm1_hi, sm1_lo, sm0_hi, sm0_lo);
+                        }
                     }
                 }
             }
 
             #pragma omp for collapse(3)
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t q = 0; q < nq; ++q) {
                     for (index_t k = 0; k < nm; ++k) {
-                        plane_phase_d<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                        if (e0 + b < nelmt) {
+                            plane_phase_d<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                        }
                     }
                 }
             }
 
             #pragma omp for collapse(3) nowait
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t j = 0; j < nm; ++j) {
                     for (index_t k = 0; k < nm; ++k) {
-                        plane_phase_e<nq>(b, j, k, B_hi, B_lo, sm1_hi, sm1_lo, out + (e0 + b) * nm3);
+                        if (e0 + b < nelmt) {
+                            plane_phase_e<nq>(b, j, k, B_hi, B_lo, sm1_hi, sm1_lo, out + (e0 + b) * nm3);
+                        }
                     }
                 }
             }
@@ -834,6 +846,11 @@ void SumFactorizationFFPlaneLoop(
     for (std::size_t t = 0; t < nteams; ++t) {
 
         // Team-shared: the split basis and two nq^3 boxes per element.
+        // nvc++ 25.3 places these in CUDA shared memory only up to about
+        // 8 KB in total (nq <= 7 with one element per team) and elsewhere
+        // in global memory behind L1; it does not support the allocate
+        // directive that would request shared memory.  On Grace Hopper the
+        // placement made no measurable difference at nq = 5..7.
         float B_hi[nm * nq];
         float B_lo[nm * nq];
         float sm0_hi[batch * nq3];
@@ -841,9 +858,11 @@ void SumFactorizationFFPlaneLoop(
         float sm1_hi[batch * nq3];
         float sm1_lo[batch * nq3];
 
-        // The team's elements e0 .. e0 + nb - 1; only the last team is short.
+        // The team's elements e0 .. e0 + batch - 1; the phase loops run over
+        // the full batch with a constant trip count, so that the compiler
+        // can collapse the batch into the thread index, and the guard skips
+        // the missing elements of a short last team.
         const std::size_t e0 = t * batch;
-        const index_t nb = (e0 + batch <= nelmt) ? batch : static_cast<index_t>(nelmt - e0);
 
         #pragma omp loop
         for (index_t i = 0; i < nm * nq; ++i) {
@@ -851,47 +870,57 @@ void SumFactorizationFFPlaneLoop(
         }
 
         #pragma omp loop collapse(3)
-        for (index_t b = 0; b < nb; ++b) {
+        for (index_t b = 0; b < batch; ++b) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
-                    plane_phase_a<nq>(b, j, k, in + (e0 + b) * nm3, B_hi, B_lo, sm0_hi, sm0_lo);
+                    if (e0 + b < nelmt) {
+                        plane_phase_a<nq>(b, j, k, in + (e0 + b) * nm3, B_hi, B_lo, sm0_hi, sm0_lo);
+                    }
                 }
             }
         }
 
         #pragma omp loop collapse(3)
-        for (index_t b = 0; b < nb; ++b) {
+        for (index_t b = 0; b < batch; ++b) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t k = 0; k < nm; ++k) {
-                    plane_phase_b<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                    if (e0 + b < nelmt) {
+                        plane_phase_b<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                    }
                 }
             }
         }
 
         #pragma omp loop collapse(3)
-        for (index_t b = 0; b < nb; ++b) {
+        for (index_t b = 0; b < batch; ++b) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t r = 0; r < nq; ++r) {
-                    plane_phase_c<nq>(b, q, r, JxW + (e0 + b) * nq3, B_hi, B_lo,
-                                      sm1_hi, sm1_lo, sm0_hi, sm0_lo);
+                    if (e0 + b < nelmt) {
+                        plane_phase_c<nq>(b, q, r, JxW + (e0 + b) * nq3, B_hi, B_lo,
+                                          sm1_hi, sm1_lo, sm0_hi, sm0_lo);
+                    }
                 }
             }
         }
 
         #pragma omp loop collapse(3)
-        for (index_t b = 0; b < nb; ++b) {
+        for (index_t b = 0; b < batch; ++b) {
             for (index_t q = 0; q < nq; ++q) {
                 for (index_t k = 0; k < nm; ++k) {
-                    plane_phase_d<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                    if (e0 + b < nelmt) {
+                        plane_phase_d<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                    }
                 }
             }
         }
 
         #pragma omp loop collapse(3)
-        for (index_t b = 0; b < nb; ++b) {
+        for (index_t b = 0; b < batch; ++b) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
-                    plane_phase_e<nq>(b, j, k, B_hi, B_lo, sm1_hi, sm1_lo, out + (e0 + b) * nm3);
+                    if (e0 + b < nelmt) {
+                        plane_phase_e<nq>(b, j, k, B_hi, B_lo, sm1_hi, sm1_lo, out + (e0 + b) * nm3);
+                    }
                 }
             }
         }
