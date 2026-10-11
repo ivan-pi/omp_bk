@@ -20,8 +20,9 @@ BK1: BK1.cpp bk1_sumfact.h bk_common.h
 # BK1 in float-float arithmetic (the kernel in BK1_ff.cpp, the helpers in
 # float_float.h) next to double and float; never with -ffast-math (the
 # header rejects it).
+# CPPFLAGS=-DFF_PLANE_BATCH=n sets the elements per team of the plane kernel.
 BK1_ff: BK1_ff.cpp float_float.h bk1_sumfact.h bk_common.h
-	$(CXX) $(CXXFLAGS) -o $@ $<
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -o $@ $<
 
 BK3: BK3.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $<

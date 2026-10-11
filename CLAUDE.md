@@ -10,7 +10,11 @@ float arrays, and the TwoSum/TwoProd helpers come from `float_float.h`, a
 private header of that driver only. `SumFactorizationFF` runs one element
 per thread, `SumFactorizationFFTeams` one element per team with the work
 arrays at team scope and a `parallel for collapse(3)` per step (team size
-from the constexpr `ff_team_size`); the driver runs and checks both.
+from the constexpr `ff_team_size`), and `SumFactorizationFFPlane<nq, batch>`
+a batch of elements per team of `batch * nq * nq` threads, each owning a
+register column, with five phases (default batch from `ff_plane_batch`,
+`-DFF_PLANE_BATCH=n` overrides). The driver runs and checks all of them;
+they must agree bit for bit, as every output is summed in index order.
 
 ## Build and check
 
