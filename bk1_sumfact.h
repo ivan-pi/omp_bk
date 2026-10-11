@@ -2,10 +2,9 @@
 #define BK1_SUMFACT_H
 
 // bk1_sumfact.h -- the BK1 (mass operator) sum factorization, generic in the
-// arithmetic type T.  T is float or double for the plain kernels and ffloat
-// (float_float.h) for the float-float kernel: T needs construction from 0,
-// `+=` and `*`, `*=`, and must be trivially copyable so that the OpenMP maps
-// can move the arrays bitwise.
+// arithmetic type T (float or double), and the benchmark harness shared by
+// the drivers.  The float-float kernel of BK1_ff.cpp is a separate routine
+// with the same interface in double; it is timed by the same harness.
 
 #include <algorithm>
 #include <chrono>
@@ -162,13 +161,19 @@ void SumFactorization(
     }
 }
 
+// A kernel with the interface of SumFactorization<T, nq>.
+template <typename T>
+using sumfact_kernel = void (*)(std::size_t, const T*, const T*, const T*, T*);
+
 // Benchmark harness shared by the drivers: keep the arrays mapped on the
-// device across ntests runs of the kernel and return the minimum wall time
-// of one run in seconds.
+// device across ntests runs of `kernel` (SumFactorization<T, nq> unless
+// another routine with the same interface is passed) and return the minimum
+// wall time of one run in seconds.
 template <typename T, int nq>
 double time_sumfact(
     const std::size_t nelmt, const int ntests,
-    const T* basis, const T* JxW, const T* in, T* out)
+    const T* basis, const T* JxW, const T* in, T* out,
+    const sumfact_kernel<T> kernel = &SumFactorization<T, nq>)
 {
     constexpr int nm = nq - 1;
     // the extents only appear in the map clauses
@@ -187,7 +192,7 @@ double time_sumfact(
         map(tofrom: out[:size_inout])
     for (int t = 0; t < ntests; ++t) {
         const auto start = high_resolution_clock::now();
-        SumFactorization<T, nq>(nelmt, basis, JxW, in, out);
+        kernel(nelmt, basis, JxW, in, out);
         const auto stop = high_resolution_clock::now();
         const duration<double> rep_time = stop - start;
         elapsed = std::min(elapsed, rep_time.count());

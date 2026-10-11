@@ -47,15 +47,20 @@ solution norm (useful as a quick correctness check).
 
 ## Float-float version of BK1
 
-`BK1_ff` runs the BK1 kernel of `bk1_sumfact.h` with the arithmetic type
-`ffloat` from `float_float.h`: a value is the unevaluated sum of two floats
-(~48 significant bits, float's exponent range), and every `+` and `*` is a
-short chain of fp32 adds, multiplies and fused multiply-adds built on the
-error-free transformations TwoSum and TwoProd. On GPUs whose fp64 rate is
-1/32 or 1/64 of fp32, this recovers near-double accuracy at about 18 fp32
-flops per multiply-add while moving the same 8 bytes per value as double.
-The kernel source is unchanged: it is the same template that `BK1`
-instantiates with `float`.
+`BK1_ff` runs the BK1 sum factorization in float-float arithmetic. The
+kernel `SumFactorizationFF` in `BK1_ff.cpp` has the interface of
+`SumFactorization` in double: the caller passes IEEE doubles for the basis,
+the weights and the input and gets doubles back. Inside the kernel every
+value is split into a pair of floats (hi + lo, ~48 significant bits, float's
+exponent range) as it is loaded, the nine steps run on separate hi and lo
+work arrays, and the result is joined back into a double as it is stored.
+Every multiply and multiply-add is a short chain of fp32 adds, multiplies
+and fused multiply-adds built on the error-free transformations TwoSum and
+TwoProd; the helpers live in `float_float.h`, a private implementation
+header of the driver with no pair type in any interface. On GPUs whose fp64
+rate is 1/32 or 1/64 of fp32, this recovers near-double accuracy at 15 fp32
+flops per multiply-add while moving the same 8 bytes per value as double
+(the split and join cost one fp64 operation per value loaded or stored).
 
 The driver runs double, float and float-float on the same data, prints one
 row per precision and the relative L2 error of float (~1e-7) and float-float
