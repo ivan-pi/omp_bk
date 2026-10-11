@@ -134,10 +134,14 @@ against the host double reference (`ok`/`FAIL`); they share
 CUDA 13.2 or later (`CCCL=/path/to/cccl` puts a newer CCCL checkout ahead
 of the toolkit's): the kernel is a functor whose call operator takes the
 launch configuration as a template parameter and reads the block and
-thread ranks and the dynamic shared memory from it.
+thread ranks and the dynamic shared memory from it. With glibc 2.41 or
+later the headers of the toolkits up to 12.8 fail in nvcc on the
+`noexcept` of `cospi`, `sinpi` and `rsqrt`;
+`cuda/cuda_headers_glibc241.sh <toolkit include dir> <destination>` makes
+a patched copy of the include tree to pass as `NVCCEXTRA="-I<destination>"`
+(the 11.8 headers do not have the problem).
 `make check_ff_cuda && ./check_ff_cuda` builds and runs the same kernel on
-the host
-through `cuda/cuda_shim.h`, a stand-in for the CUDA keywords with one
+the host through `cuda/cuda_shim.h`, a stand-in for the CUDA keywords with one
 thread per block, and checks it against the double reference for
 nq = 3..10, constant and random data and batches with a short last batch
 (`ok`/`FAIL`, exit status 1 on failure); it agrees with the OpenMP kernels
