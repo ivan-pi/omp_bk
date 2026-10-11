@@ -819,6 +819,13 @@ void SumFactorizationFFPlane(
 // placed by the compiler.  Compilers that bind a nested loop to the
 // team's initial thread (g++, clang without an enclosing parallel region)
 // run the phases of a team on one thread, which is correct and slow.
+//
+// nvc++ 25.3 spreads a phase loop over the threads only when its constant
+// trip count exceeds 16: with one element per team at nq <= 4 the phases
+// have 9 to 16 iterations and the whole element runs on one thread of the
+// team (1.5 GDoF/s at nq = 4 on Grace Hopper against 12 with a runtime
+// bound).  The default batch of ff_plane_batch never meets this; a batch
+// of 2 or more at nq = 4 does not either.
 template <int nq, int batch = 1, typename index_t = int>
 void SumFactorizationFFPlaneLoop(
     const std::size_t nelmt,
