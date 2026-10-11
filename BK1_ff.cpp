@@ -1,19 +1,22 @@
 // BK1_ff.cpp -- BK1 (mass operator) in float-float arithmetic.
 //
-// The kernel is the generic sum factorization of bk1_sumfact.h instantiated
-// with T = ffloat (float_float.h): a pair of floats carrying ~48 significant
-// bits, with every + and * expanded into fp32 adds, multiplies and fused
-// multiply-adds.  The point is hardware whose fp64 rate is a small fraction
-// of fp32 (consumer GPUs): float-float costs about 18 fp32 flops per
-// multiply-add, which is cheaper than fp64 at 1/32 or 1/64 of the fp32
-// rate, and it reads and writes the same 8 bytes per value.
+// SumFactorizationFF below has the interface of SumFactorization in double
+// (bk1_sumfact.h): the caller passes IEEE doubles for the basis, the
+// quadrature weights and the input and gets doubles back.  Inside the kernel
+// every value is split into a pair of floats (hi + lo, ~48 significant bits)
+// as it is loaded, the sum factorization runs on separate hi and lo work
+// arrays with the helpers of float_float.h, and the result is joined back
+// into a double as it is stored.  The point is hardware whose fp64 rate is a
+// small fraction of fp32 (consumer GPUs): a float-float multiply-add costs
+// 15 fp32 flops, cheaper than fp64 at 1/32 or 1/64 of the fp32 rate, and the
+// kernel reads and writes the same 8 bytes per value as double.
 //
-// The driver runs the same kernel in double, float and float-float on the
-// same data and prints one row per precision (throughput and norm), then the
-// relative L2 error of float and of float-float against the double result.
-// Norms and errors are reduced in native double after widening every value.
-// The last line is the check: the float-float error must stay below the
-// tolerance, else it reads FAIL and the exit status is 1.
+// The driver runs the double, float and float-float kernels on the same data
+// and prints one row per precision (throughput and norm), then the relative
+// L2 error of float and of float-float against the double result.  Norms and
+// errors are reduced in native double.  The last line is the check: the
+// float-float error must stay below the tolerance, else it reads FAIL and
+// the exit status is 1.
 // From the repository root:  make BK1_ff
 //
 // Run:  ./BK1_ff [p=2] [nelmt=524288] [ntests=5]
@@ -21,8 +24,8 @@
 //                3.0/1.0 of BK1; with the constant data the float row prints
 //                BK1's norm.
 //   BK_TOL=t     tolerance of the check (default 1e-10: random data gives
-//                ~3e-15, the cancelling constant data at p = 1 ~4e-13, and a
-//                broken ffloat operation 1e-7 or worse).
+//                ~3e-15, the cancelling constant data at p = 1 ~1e-12, and a
+//                broken float-float operation 1e-7 or worse).
 
 #include <iostream>
 #include <iomanip>
@@ -43,8 +46,197 @@ using namespace bk;
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// The float-float kernel
+// ---------------------------------------------------------------------------
+
+// Flat indices: WSP into an nq^3 box (the work arrays and an element's JxW),
+// DOF into an nm^3 block (an element's in and out), BAS into the nm x nq basis
+// B(mode i, quad point p).  nq and nm are the enclosing template's constants.
+#define WSP(i, j, k) (((i) * nq + (j)) * nq + (k))
+#define DOF(i, j, k) (((i) * nm + (j)) * nm + (k))
+#define BAS(i, p)    ((i) * nq + (p))
+
+template <int nq, typename index_t = int>
+void SumFactorizationFF(
+    const std::size_t nelmt,
+    const double* __restrict__ basis,
+    const double* __restrict__ JxW,
+    const double* __restrict__ in,
+    double* __restrict__ out)
+{
+    static_assert(nq >= 2, "nq = p + 2 with p >= 0");
+    constexpr int nm = nq - 1;
+    constexpr int nq3 = nq * nq * nq;
+    constexpr int nm3 = nm * nm * nm;
+
+    #pragma omp target \
+        map(to: basis[:nm*nq]) \
+        map(to: JxW[:nelmt*nq3], in[:nelmt*nm3]) \
+        map(from: out[:nelmt*nm3])
+    #pragma omp teams loop
+    for (std::size_t e = 0; e < nelmt; ++e) {
+
+        // The basis split into hi and lo, shared by all directions.
+        float B_hi[nm * nq];
+        float B_lo[nm * nq];
+        for (index_t i = 0; i < nm * nq; ++i) {
+            ff::split(basis[i], B_hi[i], B_lo[i]);
+        }
+
+        // Work arrays: two nq^3 boxes, each as a hi and a lo array; steps
+        // address sub-slices of each box.  Every step assigns its full output
+        // sub-slice, so no zeroing is needed.
+        float wsp0_hi[nq3];
+        float wsp0_lo[nq3];
+        float wsp1_hi[nq3];
+        float wsp1_lo[nq3];
+
+        const double* e_in  = in  + e * nm3;
+        double*       e_out = out + e * nm3;
+        const double* e_JxW = JxW + e * nq3;
+
+        // step-1 : split in -> wsp0 (nm^3 sub-block of the nq^3 box)
+        for (index_t i = 0; i < nm; ++i) {
+            for (index_t j = 0; j < nm; ++j) {
+                for (index_t k = 0; k < nm; ++k) {
+                    ff::split(e_in[DOF(i, j, k)], wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)]);
+                }
+            }
+        }
+
+        // step-2 : direction 0
+        for (index_t p = 0; p < nq; ++p) {
+            for (index_t k = 0; k < nm; ++k) {
+                for (index_t j = 0; j < nm; ++j) {
+                    float th = 0.0f;
+                    float tl = 0.0f;
+                    for (index_t i = 0; i < nm; ++i) {
+                        ff::mul_add(th, tl, wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)],
+                                    B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
+                    }
+                    wsp1_hi[WSP(p, j, k)] = th;
+                    wsp1_lo[WSP(p, j, k)] = tl;
+                }
+            }
+        }
+
+        // step-3 : direction 1
+        for (index_t q = 0; q < nq; ++q) {
+            for (index_t p = 0; p < nq; ++p) {
+                for (index_t k = 0; k < nm; ++k) {
+                    float th = 0.0f;
+                    float tl = 0.0f;
+                    for (index_t j = 0; j < nm; ++j) {
+                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                                    B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
+                    }
+                    wsp0_hi[WSP(q, p, k)] = th;
+                    wsp0_lo[WSP(q, p, k)] = tl;
+                }
+            }
+        }
+
+        // step-4 : direction 2
+        for (index_t r = 0; r < nq; ++r) {
+            for (index_t q = 0; q < nq; ++q) {
+                for (index_t p = 0; p < nq; ++p) {
+                    float th = 0.0f;
+                    float tl = 0.0f;
+                    for (index_t k = 0; k < nm; ++k) {
+                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                                    B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
+                    }
+                    wsp1_hi[WSP(p, q, r)] = th;
+                    wsp1_lo[WSP(p, q, r)] = tl;
+                }
+            }
+        }
+
+        // Reverse operations
+
+        // step-5 : multiply with weights and determinant of Jacobi, each
+        // JxW value split at its single use
+        for (index_t r = 0; r < nq; ++r) {
+            for (index_t q = 0; q < nq; ++q) {
+                for (index_t p = 0; p < nq; ++p) {
+                    float jh;
+                    float jl;
+                    ff::split(e_JxW[WSP(p, q, r)], jh, jl);
+                    ff::mul(wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)], jh, jl);
+                }
+            }
+        }
+
+        // step-6 : direction 2
+        for (index_t k = 0; k < nm; ++k) {
+            for (index_t q = 0; q < nq; ++q) {
+                for (index_t p = 0; p < nq; ++p) {
+                    float th = 0.0f;
+                    float tl = 0.0f;
+                    for (index_t r = 0; r < nq; ++r) {
+                        ff::mul_add(th, tl, wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)],
+                                    B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
+                    }
+                    wsp0_hi[WSP(q, p, k)] = th;
+                    wsp0_lo[WSP(q, p, k)] = tl;
+                }
+            }
+        }
+
+        // step-7 : direction 1
+        for (index_t j = 0; j < nm; ++j) {
+            for (index_t k = 0; k < nm; ++k) {
+                for (index_t p = 0; p < nq; ++p) {
+                    float th = 0.0f;
+                    float tl = 0.0f;
+                    for (index_t q = 0; q < nq; ++q) {
+                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                                    B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
+                    }
+                    wsp1_hi[WSP(p, j, k)] = th;
+                    wsp1_lo[WSP(p, j, k)] = tl;
+                }
+            }
+        }
+
+        // step-8 : direction 0
+        for (index_t i = 0; i < nm; ++i) {
+            for (index_t j = 0; j < nm; ++j) {
+                for (index_t k = 0; k < nm; ++k) {
+                    float th = 0.0f;
+                    float tl = 0.0f;
+                    for (index_t p = 0; p < nq; ++p) {
+                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                                    B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
+                    }
+                    wsp0_hi[WSP(i, j, k)] = th;
+                    wsp0_lo[WSP(i, j, k)] = tl;
+                }
+            }
+        }
+
+        // step-9 : join wsp0 -> out
+        for (index_t i = 0; i < nm; ++i) {
+            for (index_t j = 0; j < nm; ++j) {
+                for (index_t k = 0; k < nm; ++k) {
+                    e_out[DOF(i, j, k)] = ff::join(wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)]);
+                }
+            }
+        }
+    }
+}
+
+#undef WSP
+#undef DOF
+#undef BAS
+
+// ---------------------------------------------------------------------------
+// Test driver
+// ---------------------------------------------------------------------------
+
 // The double test data as seen by precision T: a reference for T = double,
-// otherwise a rounded (float) or split (ffloat) copy held in `storage`.
+// otherwise a rounded (float) copy held in `storage`.
 template <typename T>
 const std::vector<T>& as_precision(const std::vector<double>& v, std::vector<T>& storage)
 {
@@ -56,8 +248,8 @@ const std::vector<T>& as_precision(const std::vector<double>& v, std::vector<T>&
     }
 }
 
-// ||x - ref|| / ||ref||, every x[i] widened to double (hi + lo for ffloat),
-// both sums accumulated in double.
+// ||x - ref|| / ||ref||, every x[i] widened to double, both sums accumulated
+// in double.
 template <typename T>
 double relative_error(const std::vector<T>& x, const std::vector<double>& ref)
 {
@@ -72,10 +264,12 @@ double relative_error(const std::vector<T>& x, const std::vector<double>& ref)
     return std::sqrt(num) / std::sqrt(den);
 }
 
-// Time the kernel in precision T, print its row and return its output.
+// Time `kernel` on the data in precision T, print its row and return its
+// output.
 template <typename T, int nq>
 std::vector<T> run_precision(
-    const char* label, const std::size_t nelmt, const int ntests,
+    const char* label, const sumfact_kernel<T> kernel,
+    const std::size_t nelmt, const int ntests,
     const std::vector<double>& basis64,
     const std::vector<double>& JxW64,
     const std::vector<double>& in64)
@@ -89,7 +283,7 @@ std::vector<T> run_precision(
     std::vector<T> out(in.size());
 
     const double elapsed = time_sumfact<T, nq>(
-        nelmt, ntests, basis.data(), JxW.data(), in.data(), out.data());
+        nelmt, ntests, basis.data(), JxW.data(), in.data(), out.data(), kernel);
 
     // GDoF/s, and GB/s for read in + write out + read JxW at sizeof(T) bytes
     const double dof_rate  = 1.0e-9 * in.size() / elapsed;
@@ -121,15 +315,15 @@ bool run_test(const std::size_t nelmt, const int ntests, const bool random_data,
     std::cout << "SumFactorization -> nelmt = " << nelmt
               << " nq = " << nq
               << " data = " << (random_data ? "random" : "constant")
-              << " fma = " << (ffloat_hardware_fma ? "hardware" : "library call")
+              << " fma = " << (ff::hardware_fma ? "hardware" : "library call")
               << "\n";
 
-    const std::vector<double> ref =
-        run_precision<double, nq>("double", nelmt, ntests, basis, JxW, in);
-    const double err_float =
-        relative_error(run_precision<float, nq>("float", nelmt, ntests, basis, JxW, in), ref);
-    const double err_ff =
-        relative_error(run_precision<ffloat, nq>("float-float", nelmt, ntests, basis, JxW, in), ref);
+    const std::vector<double> ref = run_precision<double, nq>(
+        "double", &SumFactorization<double, nq>, nelmt, ntests, basis, JxW, in);
+    const double err_float = relative_error(run_precision<float, nq>(
+        "float", &SumFactorization<float, nq>, nelmt, ntests, basis, JxW, in), ref);
+    const double err_ff = relative_error(run_precision<double, nq>(
+        "float-float", &SumFactorizationFF<nq>, nelmt, ntests, basis, JxW, in), ref);
 
     const bool ok = err_ff <= tol;
     std::cout << "float        rel. error vs double = " << err_float << "\n"

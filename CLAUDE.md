@@ -2,9 +2,12 @@
 
 OpenMP implementations of the CEED bake-off kernels BK1, BK3 and BK5; `amx/`
 holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`).
-The BK1 kernel lives in `bk1_sumfact.h`, generic in the arithmetic type:
-`BK1.cpp` runs it in float, `BK1_ff.cpp` in float-float (`float_float.h`, a
-pair of floats with TwoSum/TwoProd arithmetic) next to double and float.
+The BK1 kernel lives in `bk1_sumfact.h`, generic in the arithmetic type
+(float or double); `BK1.cpp` runs it in float. `BK1_ff.cpp` holds its own
+float-float kernel with the same interface in double: values are split into
+hi/lo float pairs inside the kernel, the work arrays are separate hi and lo
+float arrays, and the TwoSum/TwoProd helpers come from `float_float.h`, a
+private header of that driver only.
 
 ## Build and check
 
