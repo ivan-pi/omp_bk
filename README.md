@@ -62,11 +62,23 @@ rate is 1/32 or 1/64 of fp32, this recovers near-double accuracy at 15 fp32
 flops per multiply-add while moving the same 8 bytes per value as double
 (the split and join cost one fp64 operation per value loaded or stored).
 
-The driver runs double, float and float-float on the same data, prints one
-row per precision and the relative L2 error of float (~1e-7) and float-float
-(~3e-15) against the double result, all reduced in double. The last line is
-the check of the float-float result, `ok` or `FAIL` against a tolerance
-(default 1e-10, `BK_TOL=...`), with exit status 1 on failure:
+There are two float-float kernels with the same arithmetic. `float-float`
+runs one element per thread with the work arrays in thread-local memory, as
+`BK1` does. `ff-teams` (`SumFactorizationFFTeams`) runs one element per
+team: the hi and lo work arrays are declared at team scope, so they are
+shared by the team (shared memory on a GPU), the points of each step are
+spread over the team's threads with `parallel for collapse(3)`, and the end
+of each parallel region is the barrier between steps. The team size is a
+constexpr of nq (`ff_team_size`: nq^3 rounded up to whole warps, 1024 at
+nq = 10). On the host the teams kernel opens a parallel region per step and
+element and is slow; it is meant for the GPU.
+
+The driver runs double, float and both float-float kernels on the same
+data, prints one row per kernel and the relative L2 error of float (~1e-7)
+and of each float-float kernel (~3e-15) against the double result, all
+reduced in double. The last line is the check of the float-float results,
+`ok` or `FAIL` against a tolerance (default 1e-10, `BK_TOL=...`), with exit
+status 1 on failure:
 
 ```sh
 ./BK1_ff <p> [nelmt] [ntests]     # same arguments and constant data as BK1; the float row prints BK1's norm
