@@ -17,7 +17,7 @@ NVCCFLAGS=-O3 -std=c++17 -arch=$(NVARCH) -Xcompiler -Wall,-Wno-unknown-pragmas
 # toolkit's own copy when that is too old for the runtime API.
 CCCL=
 NVCCFLAGS+=$(if $(CCCL),-I$(CCCL)/libcudacxx/include -I$(CCCL)/cub -I$(CCCL)/thrust,)
-# NVCCEXTRA adds flags, e.g. NVCCEXTRA='-Xptxas -v -DFF_CUDA_FULL_UNROLL_NQ=6'
+# NVCCEXTRA adds flags, e.g. NVCCEXTRA='-Xptxas -v -DFF_CUDA_CONTRACTION_UNROLL=2'
 NVCCEXTRA=
 NVCCFLAGS+=$(NVCCEXTRA)
 
@@ -46,7 +46,7 @@ BK5: BK5.cpp
 # stand-in for the CUDA keywords and checked against the double reference;
 # exit status 1 on failure.  The real kernel needs nvcc and a GPU.
 check_ff_cuda: cuda/check_ff_cuda.cpp cuda/cuda_shim.h bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
-	$(CXX) $(CXXFLAGS) -Wno-unknown-pragmas -D__CUDACC__ -I. -Icuda -o $@ $<
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -Wno-unknown-pragmas -D__CUDACC__ -I. -Icuda -o $@ $<
 
 # The CUDA float-float kernel on the GPU, timed and checked against the
 # double reference on the host; needs nvcc (CUDA 13.2+) and a GPU.

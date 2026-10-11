@@ -30,6 +30,7 @@
 #include <cuda/memory_pool>
 #include <cuda/std/chrono>
 #include <cuda/std/span>
+#include <cuda/std/string_view>
 #include <cuda/stream>
 
 #include <algorithm>
@@ -95,8 +96,9 @@ bool run_test(const bk::ffdrv::Args& args)
     const auto config = cuda::make_config(
         cuda::grid_dims(grid), cuda::block_dims(block),
         cuda::dynamic_shared_memory<float[]>(smem_floats, cuda::non_portable));
-    bk::ffdrv::print_header(args.nelmt, nq, args.random_data, device.name(), batch, block, grid,
-                            smem_floats * sizeof(float));
+    const cuda::std::string_view name = device.name();
+    bk::ffdrv::print_header(args.nelmt, nq, args.random_data, std::string(name.data(), name.size()),
+                            batch, block, grid, smem_floats * sizeof(float));
 
     // Minimum time over ntests runs.
     double elapsed = 1e300;

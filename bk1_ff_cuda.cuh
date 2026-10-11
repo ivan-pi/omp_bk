@@ -74,12 +74,16 @@
 
 // The loops over a register column are always fully unrolled, which is
 // what keeps the column in registers.  The loops over the contraction
-// index are fully unrolled up to this order and left to the compiler
-// above it: fully unrolled, a phase of order 10 is nq * nm = 90 multiply-
-// adds of 15 instructions, and five such phases strain the instruction
-// cache.  -DFF_CUDA_FULL_UNROLL_NQ=n moves the threshold.
-#ifndef FF_CUDA_FULL_UNROLL_NQ
-#define FF_CUDA_FULL_UNROLL_NQ 10
+// index are fully unrolled by default (FF_CUDA_CONTRACTION_UNROLL = 0),
+// which lets ptxas hoist the basis and input loads of several iterations
+// ahead of the arithmetic at the price of registers: 168 at nq = 8 and
+// 10, 220 at nq = 9 on sm_90, which leaves 12 or 9 warps per SM.  A rolled
+// contraction loop (factor 1) halves the throughput, and a register cap
+// (-maxrregcount) spills inside the chains and halves it too.
+// -DFF_CUDA_CONTRACTION_UNROLL=n unrolls the contraction loops by n
+// instead, bounding the hoisting to n iterations.
+#ifndef FF_CUDA_CONTRACTION_UNROLL
+#define FF_CUDA_CONTRACTION_UNROLL 0
 #endif
 
 namespace bk {
@@ -139,8 +143,9 @@ __device__ inline void mass_operator_ff_body(
     constexpr int nq3 = traits::nq3;
     constexpr int nm3 = traits::nm3;
     // unroll factor of the contraction loops: full, or the compiler's choice
-    [[maybe_unused]] constexpr int unroll_nm = (nq <= FF_CUDA_FULL_UNROLL_NQ) ? nm : 1;
-    [[maybe_unused]] constexpr int unroll_nq = (nq <= FF_CUDA_FULL_UNROLL_NQ) ? nq : 1;
+    static_assert(FF_CUDA_CONTRACTION_UNROLL >= 0, "unroll factor is 0 (full) or positive");
+    [[maybe_unused]] constexpr int unroll_nm = (FF_CUDA_CONTRACTION_UNROLL == 0) ? nm : FF_CUDA_CONTRACTION_UNROLL;
+    [[maybe_unused]] constexpr int unroll_nq = (FF_CUDA_CONTRACTION_UNROLL == 0) ? nq : FF_CUDA_CONTRACTION_UNROLL;
 
     // Shared memory: the split basis and the two hi/lo box pairs, laid out
     // as traits::shared_floats counts them.
