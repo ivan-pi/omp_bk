@@ -6,7 +6,8 @@
 //
 // The driver builds the test data of BK1_ff (constant, or pseudo-random
 // with BK_RANDOM=1), computes the double reference on the host, times
-// ntests runs of the kernel and prints GDoF/s, GB/s (8 bytes per value in,
+// ntests runs of the kernel after warm-up runs of 0.2 s of kernel time
+// (BK_WARMUP=s) and prints GDoF/s, GB/s (8 bytes per value in,
 // out and JxW), the norm and the relative L2 error against the reference,
 // ending with ok or FAIL (exit status 1) against BK_TOL (default 1e-10).
 // From the repository root:  make BK1_ff_cuda_plain
@@ -90,9 +91,8 @@ bool run_test(const bk::ffdrv::Args& args)
     check(cudaEventCreate(&start), "cudaEventCreate");
     check(cudaEventCreate(&stop), "cudaEventCreate");
 
-    // Minimum time over ntests runs.
-    double elapsed = 1e300;
-    for (int t = 0; t < args.ntests; ++t) {
+    // One run of the kernel, timed with the events, in seconds.
+    const auto run_once = [&]() -> double {
         check(cudaEventRecord(start, stream), "cudaEventRecord");
         bk::MassOperatorFF<nq><<<grid, block, smem, stream>>>(
             static_cast<unsigned int>(args.nelmt), batch, d_basis.ptr, d_JxW.ptr, d_in.ptr, d_out.ptr);
@@ -101,7 +101,21 @@ bool run_test(const bk::ffdrv::Args& args)
         check(cudaEventSynchronize(stop), "cudaEventSynchronize");
         float ms = 0.0f;
         check(cudaEventElapsedTime(&ms, start, stop), "cudaEventElapsedTime");
-        elapsed = std::min(elapsed, 1.0e-3 * static_cast<double>(ms));
+        return 1.0e-3 * static_cast<double>(ms);
+    };
+
+    // Warm-up: the GPU has been idle through the host reference and sits
+    // at its idle clock, and the first launch loads the module.  Run until
+    // bk::ffdrv::warmup_seconds of kernel time have passed, at least twice.
+    double warm = 0.0;
+    for (int t = 0; t < 2 || warm < bk::ffdrv::warmup_seconds; ++t) {
+        warm += run_once();
+    }
+
+    // Minimum time over ntests runs.
+    double elapsed = 1e300;
+    for (int t = 0; t < args.ntests; ++t) {
+        elapsed = std::min(elapsed, run_once());
     }
 
     std::vector<double> out(data.in.size());

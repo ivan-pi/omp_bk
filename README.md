@@ -125,8 +125,11 @@ it needs no special flags: the error-free transformations survive nvcc's
 default contraction, and `--use_fast_math` only flushes subnormal lo parts.
 The header comment lists the launch geometry and the known cost.
 Two drivers run the kernel on the GPU, take the arguments of `BK1_ff`
-plus the elements per block, time the kernel with CUDA events and check it
-against the host double reference (`ok`/`FAIL`); they share
+plus the elements per block, time the kernel with CUDA events after warm-up
+runs worth 0.2 s of kernel time (`BK_WARMUP=s` changes it; the GPU drops
+to its idle clock while the host computes the reference, and the minimum
+of a few short runs then depends on how far the clock has ramped) and
+check it against the host double reference (`ok`/`FAIL`); they share
 `cuda/bk1_ff_driver_common.h`. `make BK1_ff_cuda_plain` builds
 `cuda/BK1_ff_cuda_plain.cu` on the classic CUDA runtime API, for any nvcc
 (`NVCC=...` selects one, `NVARCH=native` is the default architecture).

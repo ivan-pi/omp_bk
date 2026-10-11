@@ -8,7 +8,8 @@
 // The driver builds the same test data as BK1_ff (constant 3.0/1.0, or
 // pseudo-random with BK_RANDOM=1), computes the double reference on the
 // host with SumFactorization<double> of bk1_sumfact.h, times ntests runs of
-// the kernel and prints GDoF/s, GB/s (8 bytes per value in, out and JxW),
+// the kernel after warm-up runs of 0.2 s of kernel time (BK_WARMUP=s) and
+// prints GDoF/s, GB/s (8 bytes per value in, out and JxW),
 // the norm, and the relative L2 error against the reference, ending with
 // ok or FAIL (exit status 1) against BK_TOL (default 1e-10).  The host
 // reference is single-threaded and takes a while at the default element
@@ -22,7 +23,7 @@
 //   nelmtPerBatch  elements per block (default: fills about 128 threads,
 //                  mass_operator_ff_traits<nq>::default_batch()); the block
 //                  has nelmtPerBatch * nq * nq threads rounded up to warps.
-//   BK_RANDOM=1, BK_TOL=t  as in BK1_ff.
+//   BK_RANDOM=1, BK_TOL=t  as in BK1_ff; BK_WARMUP=s  warm-up kernel time.
 
 #include <cuda/buffer>
 #include <cuda/devices>
@@ -100,16 +101,29 @@ bool run_test(const bk::ffdrv::Args& args)
     bk::ffdrv::print_header(args.nelmt, nq, args.random_data, std::string(name.data(), name.size()),
                             batch, block, grid, smem_floats * sizeof(float));
 
-    // Minimum time over ntests runs.
-    double elapsed = 1e300;
-    for (int t = 0; t < args.ntests; ++t) {
+    // One run of the kernel, timed with events, in seconds.
+    const auto run_once = [&]() -> double {
         cuda::timed_event start{stream};
         cuda::launch(stream, config, MassOperatorFFKernel<nq>{},
                      static_cast<unsigned int>(args.nelmt), batch, d_basis, d_JxW, d_in, d_out);
         cuda::timed_event stop{stream};
         stop.sync();
         const cuda::std::chrono::nanoseconds ns = stop - start;
-        elapsed = std::min(elapsed, 1.0e-9 * static_cast<double>(ns.count()));
+        return 1.0e-9 * static_cast<double>(ns.count());
+    };
+
+    // Warm-up: the GPU has been idle through the host reference and sits
+    // at its idle clock, and the first launch loads the module.  Run until
+    // bk::ffdrv::warmup_seconds of kernel time have passed, at least twice.
+    double warm = 0.0;
+    for (int t = 0; t < 2 || warm < bk::ffdrv::warmup_seconds; ++t) {
+        warm += run_once();
+    }
+
+    // Minimum time over ntests runs.
+    double elapsed = 1e300;
+    for (int t = 0; t < args.ntests; ++t) {
+        elapsed = std::min(elapsed, run_once());
     }
 
     // The result back to the host (cudaMemcpyAsync rather than

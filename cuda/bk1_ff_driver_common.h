@@ -25,8 +25,18 @@ namespace ffdrv {
 
 constexpr std::size_t default_nelmt = std::size_t(1) << 19;   // = 524288, as BK1
 
+// Kernel time of the untimed warm-up runs before the timed ones: enough
+// for the GPU to leave the idle clock it drops to while the host computes
+// the reference (BK_WARMUP=s overrides).
+inline double warmup_seconds_default() { return 0.2; }
+inline const double warmup_seconds = [] {
+    const char* env = std::getenv("BK_WARMUP");
+    return (env != nullptr) ? std::atof(env) : warmup_seconds_default();
+}();
+
 // ./driver [p=2] [nelmt=524288] [ntests=5] [nelmtPerBatch=0: the default
-// of mass_operator_ff_traits]; BK_RANDOM=1 and BK_TOL=t as in BK1_ff.
+// of mass_operator_ff_traits]; BK_RANDOM=1 and BK_TOL=t as in BK1_ff,
+// BK_WARMUP=s the warm-up kernel time in seconds (default 0.2).
 struct Args {
     int p = 2;
     std::size_t nelmt = default_nelmt;
