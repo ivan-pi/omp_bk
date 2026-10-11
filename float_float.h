@@ -51,8 +51,25 @@
 #error "float-float arithmetic needs IEEE semantics: do not compile with -ffast-math / -Ofast"
 #endif
 
+// Under nvcc the helpers are also device functions (bk1_ff_cuda.cuh); the
+// fused multiply-add is the device intrinsic there and std::fma elsewhere.
+#if defined(__CUDACC__)
+#define FF_HOST_DEVICE __host__ __device__
+#else
+#define FF_HOST_DEVICE
+#endif
+
 namespace bk {
 namespace ff {
+
+FF_HOST_DEVICE inline float fma_f(const float a, const float b, const float c)
+{
+#if defined(__CUDA_ARCH__)
+    return ::fmaf(a, b, c);
+#else
+    return std::fma(a, b, c);
+#endif
+}
 
 static_assert(std::numeric_limits<float>::is_iec559, "float must be IEEE binary32");
 static_assert(std::numeric_limits<double>::is_iec559, "double must be IEEE binary64");
@@ -70,20 +87,20 @@ constexpr bool hardware_fma = false;
 // Exact split of a double into its leading 24 bits and the next 24 bits
 // (for |x| within float's range): hi = fl(x), lo = fl(x - hi) where x - hi
 // is exact in double.
-inline void split(const double x, float& hi, float& lo)
+FF_HOST_DEVICE inline void split(const double x, float& hi, float& lo)
 {
     hi = static_cast<float>(x);
     lo = static_cast<float>(x - static_cast<double>(hi));
 }
 
 // hi + lo as a double; exact, both parts fit in 53 bits.
-inline double join(const float hi, const float lo)
+FF_HOST_DEVICE inline double join(const float hi, const float lo)
 {
     return static_cast<double>(hi) + static_cast<double>(lo);
 }
 
 // (s, e) with s + e == a + b exactly, s = fl(a + b).  6 flops.
-inline void two_sum(const float a, const float b, float& s, float& e)
+FF_HOST_DEVICE inline void two_sum(const float a, const float b, float& s, float& e)
 {
     s = a + b;
     const float bb = s - a;
@@ -91,41 +108,41 @@ inline void two_sum(const float a, const float b, float& s, float& e)
 }
 
 // Same result, 3 flops, valid only when |a| >= |b| or a == 0.
-inline void quick_two_sum(const float a, const float b, float& s, float& e)
+FF_HOST_DEVICE inline void quick_two_sum(const float a, const float b, float& s, float& e)
 {
     s = a + b;
     e = b - (s - a);
 }
 
 // (p, e) with p + e == a * b exactly, p = fl(a * b).  1 multiply + 1 fma.
-inline void two_prod(const float a, const float b, float& p, float& e)
+FF_HOST_DEVICE inline void two_prod(const float a, const float b, float& p, float& e)
 {
     p = a * b;
-    e = std::fma(a, b, -p);
+    e = fma_f(a, b, -p);
 }
 
 // (ah, al) *= (bh, bl): ah * bh exactly, plus the two cross terms; al * bl is
 // below the precision of the result and is dropped.  7 flops.
-inline void mul(float& ah, float& al, const float bh, const float bl)
+FF_HOST_DEVICE inline void mul(float& ah, float& al, const float bh, const float bl)
 {
     float p;
     float e;
     two_prod(ah, bh, p, e);
-    e = std::fma(ah, bl, std::fma(al, bh, e));
+    e = fma_f(ah, bl, fma_f(al, bh, e));
     quick_two_sum(p, e, ah, al);
 }
 
 // (th, tl) += (ah, al) * (bh, bl): the product as in mul but without its
 // renormalisation, then the hi parts are summed error-free, the lo parts in
 // plain fp32, and the pair is renormalised once.  15 flops.
-inline void mul_add(float& th, float& tl,
+FF_HOST_DEVICE inline void mul_add(float& th, float& tl,
                     const float ah, const float al,
                     const float bh, const float bl)
 {
     float ph;
     float pl;
     two_prod(ah, bh, ph, pl);
-    pl = std::fma(ah, bl, std::fma(al, bh, pl));
+    pl = fma_f(ah, bl, fma_f(al, bh, pl));
     float sh;
     float sl;
     two_sum(th, ph, sh, sl);
@@ -135,5 +152,7 @@ inline void mul_add(float& th, float& tl,
 
 } // namespace ff
 } // namespace bk
+
+#undef FF_HOST_DEVICE
 
 #endif // FLOAT_FLOAT_H

@@ -109,6 +109,21 @@ refuses `-ffast-math`, anything subtler shows up as `FAIL`, and the Makefile
 selects the native instruction set so `std::fma` is an instruction (the
 first output line says `fma = hardware`).
 
+### CUDA kernel
+
+`bk1_ff_cuda.cuh` holds the same float-float kernel as a CUDA kernel,
+`MassOperatorFF<nq>`, with double storage at the boundary: one block works
+through batches of `nelmtPerBatch` elements, a thread owns one point of an
+element's plane with the column through it in registers, and the boxes
+between the steps are hi/lo float pairs in dynamic shared memory
+(`mass_operator_ff_shared_bytes(nq, nelmtPerBatch)` bytes, the same count
+as a double kernel's). The first and last steps read and write global
+memory directly. The header is empty unless compiled by nvcc, and it needs
+no special flags: the error-free transformations survive nvcc's default
+contraction, and `--use_fast_math` only flushes subnormal lo parts. The
+header comment lists the launch geometry and the known costs. It is not
+built by the Makefile and has only been syntax-checked here.
+
 ## Apple AMX version of BK1
 
 `amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX
