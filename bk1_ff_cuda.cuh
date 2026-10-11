@@ -21,7 +21,8 @@
 // parameter (cuda::launch).  Within a batch a thread owns one point of
 // an element's plane and the whole column through it along the first index,
 // held in registers as hi and lo of nq values, and the five phases are those
-// of the OpenMP plane kernel (plane_phase_a..e in BK1_ff.cpp): the
+// of the OpenMP plane kernel (plane_phase_a..e in BK1_ff.cpp), with four
+// barriers per batch (none after E): the
 // contraction index is the outer loop, the column index the inner one, and
 // the basis is read from shared memory as a warp broadcast.  The boxes
 // between the phases are two pairs of hi/lo float arrays in dynamic shared
@@ -382,9 +383,10 @@ __device__ inline void mass_operator_ff_body(
                 out_at(e, i, j, k) = ff::join(yh[i], yl[i]);
             }
         }
-        // the next batch's phase A overwrites w0 while phase E may still read w1,
-        // and phase B of the next batch reads w0: one barrier covers both
-        __syncthreads();
+        // No barrier after phase E: it reads w1 and writes global memory
+        // only, the next batch's phase A writes w0, whose last readers
+        // (phase D) are behind the barrier before E, and the next writer
+        // of w1 (phase B) is behind the barrier after A.
     }
 }
 
