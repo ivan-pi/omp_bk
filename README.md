@@ -120,8 +120,13 @@ hi/lo float pairs in dynamic shared memory with the one nq^3 layout of the
 OpenMP kernels. `mass_operator_ff_traits<nq>` holds the sizes per element
 and the launch geometry: threads per element, block size, dynamic shared
 memory bytes (the same count as a double kernel's) and the default batch.
-Boxes and global arrays are addressed through accessor lambdas. The header is empty unless compiled by nvcc, and
-it needs no special flags: the error-free transformations survive nvcc's
+Boxes and global arrays are addressed through accessor lambdas. The loops
+over a register column are fully unrolled; the loops over the contraction
+index are unrolled fully up to nq = 5 and at nq = 9 and by a factor of 2
+elsewhere (`mass_operator_ff_traits<nq>::contraction_unroll`, the better
+setting measured per order on GH200; `-DFF_CUDA_CONTRACTION_UNROLL=n` sets
+one factor for every order, 0 for full). The header is empty unless
+compiled by nvcc, and it needs no special flags: the error-free transformations survive nvcc's
 default contraction, and `--use_fast_math` only flushes subnormal lo parts.
 The header comment lists the launch geometry and the known cost.
 Two drivers run the kernel on the GPU, take the arguments of `BK1_ff`

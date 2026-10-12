@@ -74,21 +74,24 @@
 #include "float_float.h"
 
 // The loops over a register column are always fully unrolled, which is
-// what keeps the column in registers.  The loops over the contraction
-// index are fully unrolled by default (FF_CUDA_CONTRACTION_UNROLL = 0),
-// which lets ptxas hoist the basis and input loads of several iterations
-// ahead of the arithmetic at the price of registers: 168 at nq = 8 and
-// 10, 220 at nq = 9 on sm_90, which leaves 12 or 9 warps per SM.  A rolled
-// contraction loop (factor 1) halves the throughput, and a register cap
-// (-maxrregcount) spills inside the chains and halves it too.
-// -DFF_CUDA_CONTRACTION_UNROLL=n unrolls the contraction loops by n
-// instead, bounding the hoisting to n iterations.  With the full unroll,
-// phase A loads the whole input column before its arithmetic (nm global
-// loads in flight together, which the few warps per SM at high order
-// need); with a partial factor it splits each value where it is used.
-#ifndef FF_CUDA_CONTRACTION_UNROLL
-#define FF_CUDA_CONTRACTION_UNROLL 0
-#endif
+// what keeps the column in registers.  The unroll factor of the loops
+// over the contraction index is mass_operator_ff_traits<nq>::
+// contraction_unroll: 0 unrolls them fully, which lets ptxas hoist the
+// basis and input loads of several iterations ahead of the arithmetic at
+// the price of registers (168 at nq = 8 and 10, 220 at nq = 9 on sm_90,
+// 12 or 9 warps per SM); n unrolls them by n, a loop body ptxas can
+// software-pipeline.  The default per order is the better of the two
+// measured on GH200 (nvcc 11.8, GDoF/s, full / by 2): nq = 4: 34.2 / 31.0,
+// 5: 30.1 / 28.7, 6: 22.7 / 24.4, 7: 18.3 / 20.9, 8: 19.1 / 21.2,
+// 9: 12.3 / 11.5, 10: 8.8 / 13.3, so full up to nq = 5 and at nq = 9, by 2
+// elsewhere.  A rolled contraction loop (factor 1) halves the throughput,
+// and a register cap (-maxrregcount) spills inside the chains and halves
+// it too.  -DFF_CUDA_CONTRACTION_UNROLL=n sets one factor for every order.
+// With the full unroll, phase A loads the whole input column before its
+// arithmetic (nm global loads in flight together, which the few warps per
+// SM at high order need); with a partial factor it splits each value
+// where it is used, as a column array indexed by a partially unrolled
+// loop counter would go to local memory.
 
 namespace bk {
 
@@ -125,6 +128,14 @@ struct mass_operator_ff_traits {
     {
         return (threads / plane > 1) ? threads / plane : 1;
     }
+
+    // unroll factor of the contraction loops: 0 full, n by n (see above)
+#if defined(FF_CUDA_CONTRACTION_UNROLL)
+    static constexpr int contraction_unroll = FF_CUDA_CONTRACTION_UNROLL;
+#else
+    static constexpr int contraction_unroll = (nq <= 5 || nq == 9) ? 0 : 2;
+#endif
+    static_assert(contraction_unroll >= 0, "unroll factor is 0 (full) or positive");
 };
 
 // The kernel body, shared by the __global__ entry below and the kernel
@@ -167,9 +178,9 @@ __device__ inline void mass_operator_ff_body(
     constexpr int nq3 = traits::nq3;
     constexpr int nm3 = traits::nm3;
     // unroll factor of the contraction loops: full, or the compiler's choice
-    static_assert(FF_CUDA_CONTRACTION_UNROLL >= 0, "unroll factor is 0 (full) or positive");
-    [[maybe_unused]] constexpr int unroll_nm = (FF_CUDA_CONTRACTION_UNROLL == 0) ? nm : FF_CUDA_CONTRACTION_UNROLL;
-    [[maybe_unused]] constexpr int unroll_nq = (FF_CUDA_CONTRACTION_UNROLL == 0) ? nq : FF_CUDA_CONTRACTION_UNROLL;
+    constexpr bool full = (traits::contraction_unroll == 0);
+    [[maybe_unused]] constexpr int unroll_nm = full ? nm : traits::contraction_unroll;
+    [[maybe_unused]] constexpr int unroll_nq = full ? nq : traits::contraction_unroll;
 
     // Shared memory: the split basis and the two hi/lo box pairs, laid out
     // as traits::shared_floats counts them.
@@ -228,7 +239,7 @@ __device__ inline void mass_operator_ff_body(
                 ch[p] = 0.0f;
                 cl[p] = 0.0f;
             }
-            if constexpr (FF_CUDA_CONTRACTION_UNROLL == 0) {
+            if constexpr (full) {
                 // the whole input column is loaded before the arithmetic,
                 // so that its nm global loads are in flight together
                 float uh[nm];

@@ -17,7 +17,7 @@ NVCCFLAGS=-O3 -std=c++17 -arch=$(NVARCH) -Xcompiler -Wall,-Wno-unknown-pragmas
 # toolkit's own copy when that is too old for the runtime API.
 CCCL=
 NVCCFLAGS+=$(if $(CCCL),-I$(CCCL)/libcudacxx/include -I$(CCCL)/cub -I$(CCCL)/thrust,)
-# NVCCEXTRA adds flags, e.g. NVCCEXTRA='-Xptxas -v -DFF_CUDA_CONTRACTION_UNROLL=2'
+# NVCCEXTRA adds flags, e.g. NVCCEXTRA='-Xptxas -v -DFF_CUDA_CONTRACTION_UNROLL=0'
 NVCCEXTRA=
 NVCCFLAGS+=$(NVCCEXTRA)
 
