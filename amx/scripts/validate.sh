@@ -14,6 +14,7 @@
 #
 # Threads: whatever OMP_NUM_THREADS says, else the binary's default (cores - 1).
 # Batch size: the binary's default of 16, plus one explicit batch=32 line.
+# Scaling: the NEON pass (default) and the fused AMX scaling (BK_SCALE=amx).
 . "$(dirname "$0")/common.sh"
 N=${1:-1234}          # not a multiple of 16, so partial lane chunks are exercised
 TOL=${2:-1e-5}
@@ -61,12 +62,14 @@ for P in 1 2 3 5 8 11 14; do
   fi
   for layout in aos soa; do
     check "sumfact $layout"        BK_DENSE=0 BK_LAYOUT=$layout
+    check "sumfact $layout scale=amx" BK_DENSE=0 BK_LAYOUT=$layout BK_SCALE=amx
     if [ $P -le 3 ]; then
       check "dense $layout"        BK_DENSE=1 BK_LAYOUT=$layout
     fi
     check "neon $layout"           BK_KERNEL=neon BK_LAYOUT=$layout
   done
   check "sumfact aos batch=32"     BK_DENSE=0 BK_LAYOUT=aos BK_BATCH=32
+  check "sumfact aos b=32 scale=amx" BK_DENSE=0 BK_LAYOUT=aos BK_BATCH=32 BK_SCALE=amx
 done
 
 echo "$pass passed, $fail failed  (nelmt=$N, tol=$TOL, threads=${OMP_NUM_THREADS:-default})"
