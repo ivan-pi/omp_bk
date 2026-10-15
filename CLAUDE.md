@@ -21,9 +21,13 @@ functions `plane_phase_a..e`. The driver runs and checks all of them; they
 must agree bit for bit, as every output is summed in index order.
 `bk1_ff_cuda.cuh` is the same kernel as a CUDA kernel (`MassOperatorFF<nq>`,
 double storage, float-float inside), compiled only under nvcc;
-`float_float.h` is host and device callable for it. `make check_ff_cuda`
-runs that kernel on the host through `cuda/cuda_shim.h` against the double
-reference (`ok`/`FAIL`); run it after any change to the CUDA header.
+`float_float.h` is host and device callable for it. `MassOperatorFF2<nq>`
+in the same header is the same kernel with `float2` pairs and the
+value-returning intrinsic helpers of `float_float2.h` (the pair-layout
+experiment); the two must give identical outputs. `make check_ff_cuda`
+runs both kernels on the host through `cuda/cuda_shim.h` against the double
+reference and against each other (`ok`/`FAIL`); run it after any change to
+the CUDA header or either helper header.
 `make BK1_ff_cuda_plain` (any nvcc, classic runtime API) and
 `make BK1_ff_cuda` (CCCL runtime API of CUDA 13.2+, `cuda::launch`) build
 the GPU drivers, which share `cuda/bk1_ff_driver_common.h`, time the kernel

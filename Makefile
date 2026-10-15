@@ -45,16 +45,16 @@ BK5: BK5.cpp
 # The CUDA float-float kernel (bk1_ff_cuda.cuh) run on the host through a
 # stand-in for the CUDA keywords and checked against the double reference;
 # exit status 1 on failure.  The real kernel needs nvcc and a GPU.
-check_ff_cuda: cuda/check_ff_cuda.cpp cuda/cuda_shim.h bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
+check_ff_cuda: cuda/check_ff_cuda.cpp cuda/cuda_shim.h bk1_ff_cuda.cuh float_float.h float_float2.h bk1_sumfact.h bk_common.h
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -Wno-unknown-pragmas -D__CUDACC__ -I. -Icuda -o $@ $<
 
 # The CUDA float-float kernel on the GPU, timed and checked against the
 # double reference on the host; needs nvcc (CUDA 13.2+) and a GPU.
-BK1_ff_cuda: cuda/BK1_ff_cuda.cu cuda/bk1_ff_driver_common.h bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
+BK1_ff_cuda: cuda/BK1_ff_cuda.cu cuda/bk1_ff_driver_common.h bk1_ff_cuda.cuh float_float.h float_float2.h bk1_sumfact.h bk_common.h
 	$(NVCC) $(NVCCFLAGS) -I. -Icuda -o $@ $<
 
 # The same on the classic CUDA runtime API, for any nvcc (11.8 included).
-BK1_ff_cuda_plain: cuda/BK1_ff_cuda_plain.cu cuda/bk1_ff_driver_common.h bk1_ff_cuda.cuh float_float.h bk1_sumfact.h bk_common.h
+BK1_ff_cuda_plain: cuda/BK1_ff_cuda_plain.cu cuda/bk1_ff_driver_common.h bk1_ff_cuda.cuh float_float.h float_float2.h bk1_sumfact.h bk_common.h
 	$(NVCC) $(NVCCFLAGS) -I. -Icuda -o $@ $<
 
 # Apple AMX version of BK1 (software-emulated AMX on any other machine)

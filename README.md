@@ -154,13 +154,21 @@ later the headers of the toolkits up to 12.8 fail in nvcc on the
 `cuda/cuda_headers_glibc241.sh <toolkit include dir> <destination>` makes
 a patched copy of the include tree to pass as `NVCCEXTRA="-I<destination>"`
 (the 11.8 headers do not have the problem).
-`make check_ff_cuda && ./check_ff_cuda` builds and runs the same kernel on
+`MassOperatorFF2` in the same header is the experiment on the pair layout:
+the same kernel, operation for operation, with every float-float value as
+one `float2` (x = hi, y = lo) in shared memory and in registers, and the
+helpers of `float_float2.h` taking and returning pairs by value through
+explicit round-to-nearest intrinsics, in the style of NVIDIA's `dbldbl.h`;
+a box value is then one 8-byte shared-memory access instead of two 4-byte
+ones. The plain driver runs both (`float-float` and `ff-float2` rows) and
+checks that their outputs are identical.
+`make check_ff_cuda && ./check_ff_cuda` builds and runs both kernels on
 the host through `cuda/cuda_shim.h`, a stand-in for the CUDA keywords with one
-thread per block, and checks it against the double reference for
-nq = 3..10, constant and random data and batches with a short last batch
-(`ok`/`FAIL`, exit status 1 on failure); it agrees with the OpenMP kernels
-bit for bit. The stand-in checks indexing, phases and batching, not the
-execution by many threads.
+thread per block, and checks them against the double reference for
+nq = 3..10, constant and random data and batches with a short last batch,
+and against each other bit for bit (`ok`/`FAIL`, exit status 1 on
+failure); they agree with the OpenMP kernels bit for bit. The stand-in
+checks indexing, phases and batching, not the execution by many threads.
 
 ## Apple AMX version of BK1
 

@@ -66,12 +66,15 @@
 // Known cost left for later: the split is one fp64 subtract per loaded
 // value, which on a 1/64-rate GPU is ~30% of the arithmetic at nq = 4 and
 // ~13% at nq = 10 (a bit-level split with integer operations would avoid it).
+//
+// MassOperatorFF2 below is the same kernel with float2 pairs (see there).
 
 #if defined(__CUDACC__)
 
 #include <cstddef>
 
 #include "float_float.h"
+#include "float_float2.h"
 
 // The loops over a register column are always fully unrolled, which is
 // what keeps the column in registers.  The unroll factor of the loops
@@ -424,6 +427,232 @@ __global__ void MassOperatorFF(
     extern __shared__ float shared[];
     mass_operator_ff_body<nq>(nelmt, nelmtPerBatch, d_basis, d_JxW, d_in, d_out, shared,
                               blockIdx.x, gridDim.x, threadIdx.x, blockDim.x);
+}
+
+// ---------------------------------------------------------------------------
+// MassOperatorFF2: the same kernel with float2 pairs.
+//
+// The experiment: the same mapping, phases, loop order, unroll policy and
+// operation order as mass_operator_ff_body, so the results agree with it
+// bit for bit, but every float-float value is one float2 (x = hi, y = lo):
+// the boxes and the basis in shared memory are float2 arrays, read and
+// written as one 8-byte access instead of two 4-byte ones, the register
+// columns are float2 arrays, and the helpers of float_float2.h take and
+// return pairs by value with explicit round-to-nearest intrinsics, in the
+// style of NVIDIA's dbldbl.h.  Same shared-memory bytes and launch geometry
+// (mass_operator_ff_traits).  cuda/check_ff_cuda.cpp runs both kernels on
+// the host and checks that their outputs are identical.
+template <int nq>
+__device__ inline void mass_operator_ff2_body(
+    const unsigned int nelmt, const unsigned int nelmtPerBatch,
+    const double* __restrict__ d_basis,
+    const double* __restrict__ d_JxW,
+    const double* __restrict__ d_in,
+    double* __restrict__ d_out,
+    float2* shared,
+    const unsigned int block_rank, const unsigned int grid_size,
+    const unsigned int thread_rank, const unsigned int block_size)
+{
+    using traits = mass_operator_ff_traits<nq>;
+    constexpr int nm = traits::nm;
+    constexpr int nq3 = traits::nq3;
+    constexpr int nm3 = traits::nm3;
+    constexpr bool full = (traits::contraction_unroll == 0);
+    [[maybe_unused]] constexpr int unroll_nm = full ? nm : traits::contraction_unroll;
+    [[maybe_unused]] constexpr int unroll_nq = full ? nq : traits::contraction_unroll;
+
+    // Shared memory: the split basis and the two boxes as float2, the same
+    // bytes as traits::shared_floats counts in floats.
+    float2* s_basis = shared;
+    float2* s_wsp0  = s_basis + nm * nq;
+    float2* s_wsp1  = s_wsp0 + nelmtPerBatch * nq3;
+
+    const auto w0 = [=](int e, int a, int b, int c) -> float2& { return s_wsp0[((e * nq + a) * nq + b) * nq + c]; };
+    const auto w1 = [=](int e, int a, int b, int c) -> float2& { return s_wsp1[((e * nq + a) * nq + b) * nq + c]; };
+    const auto basis = [=](int i, int p) -> float2 { return s_basis[i * nq + p]; };
+
+    // The register column: the output of a phase as pairs.
+    float2 c[nq];
+
+    // The basis, split once per block.
+    for (int i = static_cast<int>(thread_rank); i < nm * nq; i += static_cast<int>(block_size)) {
+        s_basis[i] = ff2::split(d_basis[i]);
+    }
+    __syncthreads();
+
+    const unsigned int nbatches = (nelmt + nelmtPerBatch - 1) / nelmtPerBatch;
+    for (unsigned int eb = block_rank; eb < nbatches; eb += grid_size) {
+
+        const int remaining = static_cast<int>(nelmt - eb * nelmtPerBatch);
+        const int nb = (static_cast<int>(nelmtPerBatch) < remaining) ? static_cast<int>(nelmtPerBatch) : remaining;
+
+        const double* __restrict__ b_in  = d_in  + static_cast<std::size_t>(eb) * nelmtPerBatch * nm3;
+        const double* __restrict__ b_JxW = d_JxW + static_cast<std::size_t>(eb) * nelmtPerBatch * nq3;
+        double*       __restrict__ b_out = d_out + static_cast<std::size_t>(eb) * nelmtPerBatch * nm3;
+        const auto in_at  = [=](int e, int i, int j, int k) -> double  { return b_in [((e * nm + i) * nm + j) * nm + k]; };
+        const auto JxW_at = [=](int e, int p, int q, int r) -> double  { return b_JxW[((e * nq + p) * nq + q) * nq + r]; };
+        const auto out_at = [=](int e, int i, int j, int k) -> double& { return b_out[((e * nm + i) * nm + j) * nm + k]; };
+
+        // phase A : load and split the column in(:, j, k), contract direction 0
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nm * nm; tid += static_cast<int>(block_size)) {
+            const auto [e, j, k] = ff_decompose<nm, nm>(tid);
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                c[p] = make_float2(0.0f, 0.0f);
+            }
+            if constexpr (full) {
+                float2 u[nm];
+                #pragma unroll
+                for (int i = 0; i < nm; ++i) {
+                    u[i] = ff2::split(in_at(e, i, j, k));
+                }
+                #pragma unroll
+                for (int i = 0; i < nm; ++i) {
+                    #pragma unroll
+                    for (int p = 0; p < nq; ++p) {
+                        c[p] = ff2::mul_acc(c[p], u[i], basis(i, p));
+                    }
+                }
+            } else {
+                #pragma unroll unroll_nm
+                for (int i = 0; i < nm; ++i) {
+                    const float2 u = ff2::split(in_at(e, i, j, k));
+                    #pragma unroll
+                    for (int p = 0; p < nq; ++p) {
+                        c[p] = ff2::mul_acc(c[p], u, basis(i, p));
+                    }
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                w0(e, p, j, k) = ff2::renormalize(c[p]);
+            }
+        }
+        __syncthreads();
+
+        // phase B : contract direction 1
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nq * nm; tid += static_cast<int>(block_size)) {
+            const auto [e, q, k] = ff_decompose<nq, nm>(tid);
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                c[p] = make_float2(0.0f, 0.0f);
+            }
+            #pragma unroll unroll_nm
+            for (int j = 0; j < nm; ++j) {
+                const float2 b = basis(j, q);
+                #pragma unroll
+                for (int p = 0; p < nq; ++p) {
+                    c[p] = ff2::mul_acc(c[p], w0(e, p, j, k), b);
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                w1(e, p, q, k) = ff2::renormalize(c[p]);
+            }
+        }
+        __syncthreads();
+
+        // phase C : contract direction 2, then the weights and determinant of
+        // Jacobi, each JxW value split at its single use
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nq * nq; tid += static_cast<int>(block_size)) {
+            const auto [e, q, r] = ff_decompose<nq, nq>(tid);
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                c[p] = make_float2(0.0f, 0.0f);
+            }
+            #pragma unroll unroll_nm
+            for (int k = 0; k < nm; ++k) {
+                const float2 b = basis(k, r);
+                #pragma unroll
+                for (int p = 0; p < nq; ++p) {
+                    c[p] = ff2::mul_acc(c[p], w1(e, p, q, k), b);
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                const float2 jw = ff2::split(JxW_at(e, p, q, r));
+                w0(e, p, q, r) = ff2::mul(ff2::renormalize(c[p]), jw);
+            }
+        }
+        __syncthreads();
+
+        // phase D : contract direction 2 back
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nq * nm; tid += static_cast<int>(block_size)) {
+            const auto [e, q, k] = ff_decompose<nq, nm>(tid);
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                c[p] = make_float2(0.0f, 0.0f);
+            }
+            #pragma unroll unroll_nq
+            for (int r = 0; r < nq; ++r) {
+                const float2 b = basis(k, r);
+                #pragma unroll
+                for (int p = 0; p < nq; ++p) {
+                    c[p] = ff2::mul_acc(c[p], w0(e, p, q, r), b);
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                w1(e, p, q, k) = ff2::renormalize(c[p]);
+            }
+        }
+        __syncthreads();
+
+        // phase E : contract direction 1 back, then direction 0 back in
+        // registers, join and store the column out(:, j, k)
+        for (int tid = static_cast<int>(thread_rank); tid < nb * nm * nm; tid += static_cast<int>(block_size)) {
+            const auto [e, j, k] = ff_decompose<nm, nm>(tid);
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                c[p] = make_float2(0.0f, 0.0f);
+            }
+            #pragma unroll unroll_nq
+            for (int q = 0; q < nq; ++q) {
+                const float2 b = basis(j, q);
+                #pragma unroll
+                for (int p = 0; p < nq; ++p) {
+                    c[p] = ff2::mul_acc(c[p], w1(e, p, q, k), b);
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                c[p] = ff2::renormalize(c[p]);
+            }
+            float2 y[nm];
+            #pragma unroll
+            for (int i = 0; i < nm; ++i) {
+                y[i] = make_float2(0.0f, 0.0f);
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                #pragma unroll
+                for (int i = 0; i < nm; ++i) {
+                    y[i] = ff2::mul_acc(y[i], c[p], basis(i, p));
+                }
+            }
+            #pragma unroll
+            for (int i = 0; i < nm; ++i) {
+                out_at(e, i, j, k) = ff2::join(ff2::renormalize(y[i]));
+            }
+        }
+        // no barrier after phase E, as in mass_operator_ff_body
+    }
+}
+
+// The float2 kernel as a __global__ function: the same launch geometry and
+// dynamic shared memory bytes as MassOperatorFF (cuda/check_ff_cuda.cpp
+// runs this form on the host as well and compares the two).
+template <int nq>
+__global__ void MassOperatorFF2(
+    const unsigned int nelmt, const unsigned int nelmtPerBatch,
+    const double* __restrict__ d_basis,
+    const double* __restrict__ d_JxW,
+    const double* __restrict__ d_in,
+    double* __restrict__ d_out)
+{
+    extern __shared__ float2 shared2[];
+    mass_operator_ff2_body<nq>(nelmt, nelmtPerBatch, d_basis, d_JxW, d_in, d_out, shared2,
+                               blockIdx.x, gridDim.x, threadIdx.x, blockDim.x);
 }
 
 } // namespace bk
