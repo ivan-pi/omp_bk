@@ -57,10 +57,16 @@ work arrays, and the result is joined back into a double as it is stored.
 Every multiply and multiply-add is a short chain of fp32 adds, multiplies
 and fused multiply-adds built on the error-free transformations TwoSum and
 TwoProd; the helpers live in `float_float.h`, a private implementation
-header of the driver with no pair type in any interface. On GPUs whose fp64
-rate is 1/32 or 1/64 of fp32, this recovers near-double accuracy at 15 fp32
-flops per multiply-add while moving the same 8 bytes per value as double
-(the split and join cost one fp64 operation per value loaded or stored).
+header of the driver with no pair type in any interface. A contraction
+accumulates with `mul_acc` (12 flops: the product of Algorithm 11 of
+Joldes, Muller and Popescu 2017 without its renormalisation, added with
+Dekker's add2 without its renormalisation) and renormalises the running
+sum once per column (`renormalize`, 3 flops), so the lo part of the sum
+grows by at most about one ulp per term before it is folded back. On GPUs
+whose fp64 rate is 1/32 or 1/64 of fp32, this recovers near-double accuracy
+at about 12 fp32 flops per multiply-add while moving the same 8 bytes per
+value as double (the split and join cost one fp64 operation per value
+loaded or stored).
 
 There are two float-float kernels with the same arithmetic. `float-float`
 runs one element per thread with the work arrays in thread-local memory, as

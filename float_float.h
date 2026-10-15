@@ -22,13 +22,22 @@
 // plain float SSA values and plain 4-byte array accesses, with no struct to
 // keep in local memory.
 //
-// Costs in fp32 flops: mul is 7 and mul_add 15 (a multiply of 7 followed by
-// an add of 11 would be 18; mul_add skips the renormalisation of the product,
-// whose lo part is then at most a few ulp of its hi and is absorbed by the
-// lo sum of the addition).  The addition is the QD library's sloppy_add: the
-// rounding error of lo + lo is dropped, which costs digits only when the sum
-// cancels to far below its larger term.  On BK1 this reaches ~3e-15 relative
-// error against double.
+// Costs in fp32 flops: mul is 7, mul_acc 12 and renormalize 3 (a multiply
+// of 7 followed by an add of 11 would be 18; mul_acc skips the
+// renormalisation of the product, whose lo part is then at most a few ulp
+// of its hi and is absorbed by the lo sum of the addition, and the kernels
+// renormalise the running sum once per column instead of in every step).
+// The addition is Dekker's add2, the QD library's sloppy_add (Algorithm 5
+// of Joldes, Muller and Popescu, "Tight and rigorous error bounds for basic
+// building blocks of double-word arithmetic", ACM TOMS 44(2), 2017): its
+// error is bounded in absolute terms, about 4 u^2 (|x| + |y|) per Dekker,
+// but not relative to the sum, which can cancel to far below its terms;
+// the paper's AccurateDWPlusDW (20 flops) has a relative bound of 3 u^2.
+// For a sum factorization the absolute bound is the relevant one, as for
+// plain floating-point summation, and on BK1 this reaches ~3e-15 relative
+// error against double.  The product without the al * bl term is the
+// paper's Algorithm 11 (bound 6 u^2, 8 flops with its renormalisation);
+// its Algorithm 12 adds that term for 5 u^2.
 //
 // The conversions cost fp64 work: split is one fp64 subtract (plus the
 // rounding to float) and join one fp64 add.  On a GPU with fp64 at 1/64 of
@@ -132,10 +141,16 @@ FF_HOST_DEVICE inline void mul(float& ah, float& al, const float bh, const float
     quick_two_sum(p, e, ah, al);
 }
 
-// (th, tl) += (ah, al) * (bh, bl): the product as in mul but without its
-// renormalisation, then the hi parts are summed error-free, the lo parts in
-// plain fp32, and the pair is renormalised once.  15 flops.
-FF_HOST_DEVICE inline void mul_add(float& th, float& tl,
+// (th, tl) += (ah, al) * (bh, bl) without renormalising the sum: the product
+// as in mul but without its renormalisation (the lines of Algorithm 11 of
+// Joldes, Muller and Popescu 2017 before its Fast2Sum, with the two cross
+// terms folded into fma), then the hi parts are summed error-free and the
+// lo parts in plain fp32 (Algorithm 5 of the same paper, Dekker's add2,
+// without its Fast2Sum).  12 flops.  The result is an unnormalised pair:
+// |tl| grows by up to about one ulp(th) per call, so after k calls it is at
+// most about k ulp(th) and the rounding errors of the lo sums are about
+// k u^2 |th|.  Call renormalize once at the end of a column (k <= nq here).
+FF_HOST_DEVICE inline void mul_acc(float& th, float& tl,
                     const float ah, const float al,
                     const float bh, const float bl)
 {
@@ -146,8 +161,24 @@ FF_HOST_DEVICE inline void mul_add(float& th, float& tl,
     float sh;
     float sl;
     two_sum(th, ph, sh, sl);
-    sl += tl + pl;
-    quick_two_sum(sh, sl, th, tl);
+    th = sh;
+    tl = sl + (tl + pl);
+}
+
+// (h, l) -> the normalised pair of the same value, |l| <= ulp(h) / 2.
+// 3 flops.  Fast2Sum needs |h| >= |l|, which an accumulated pair satisfies.
+FF_HOST_DEVICE inline void renormalize(float& h, float& l) { quick_two_sum(h, l, h, l); }
+
+// (th, tl) += (ah, al) * (bh, bl) with the sum renormalised: mul_acc then
+// renormalize, 15 flops.  The kernels use mul_acc in their contraction loops
+// and renormalize once per column, which gives the same bits as mul_add in
+// every step.
+FF_HOST_DEVICE inline void mul_add(float& th, float& tl,
+                    const float ah, const float al,
+                    const float bh, const float bl)
+{
+    mul_acc(th, tl, ah, al, bh, bl);
+    renormalize(th, tl);
 }
 
 } // namespace ff

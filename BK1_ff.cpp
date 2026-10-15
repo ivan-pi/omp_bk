@@ -8,7 +8,7 @@
 // arrays with the helpers of float_float.h, and the result is joined back
 // into a double as it is stored.  The point is hardware whose fp64 rate is a
 // small fraction of fp32 (consumer GPUs): a float-float multiply-add costs
-// 15 fp32 flops, cheaper than fp64 at 1/32 or 1/64 of the fp32 rate, and the
+// 12 fp32 flops (plus 3 per column to renormalise), cheaper than fp64 at 1/32 or 1/64 of the fp32 rate, and the
 // kernel reads and writes the same 8 bytes per value as double.
 //
 // Three float-float kernels share the arithmetic and differ in how the
@@ -129,9 +129,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t i = 0; i < nm; ++i) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)],
                                     B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, j, k)] = th;
                     wsp1_lo[WSP(p, j, k)] = tl;
                 }
@@ -145,9 +146,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t j = 0; j < nm; ++j) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
                                     B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(q, p, k)] = th;
                     wsp0_lo[WSP(q, p, k)] = tl;
                 }
@@ -161,9 +163,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t k = 0; k < nm; ++k) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
                                     B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, q, r)] = th;
                     wsp1_lo[WSP(p, q, r)] = tl;
                 }
@@ -192,9 +195,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t r = 0; r < nq; ++r) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)],
                                     B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(q, p, k)] = th;
                     wsp0_lo[WSP(q, p, k)] = tl;
                 }
@@ -208,9 +212,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t q = 0; q < nq; ++q) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
                                     B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, j, k)] = th;
                     wsp1_lo[WSP(p, j, k)] = tl;
                 }
@@ -224,9 +229,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t p = 0; p < nq; ++p) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
                                     B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(i, j, k)] = th;
                     wsp0_lo[WSP(i, j, k)] = tl;
                 }
@@ -335,9 +341,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t i = 0; i < nm; ++i) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)],
                                     B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, j, k)] = th;
                     wsp1_lo[WSP(p, j, k)] = tl;
                 }
@@ -352,9 +359,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t j = 0; j < nm; ++j) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
                                     B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(q, p, k)] = th;
                     wsp0_lo[WSP(q, p, k)] = tl;
                 }
@@ -369,9 +377,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t k = 0; k < nm; ++k) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
                                     B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, q, r)] = th;
                     wsp1_lo[WSP(p, q, r)] = tl;
                 }
@@ -402,9 +411,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t r = 0; r < nq; ++r) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)],
                                     B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(q, p, k)] = th;
                     wsp0_lo[WSP(q, p, k)] = tl;
                 }
@@ -419,9 +429,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t q = 0; q < nq; ++q) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
                                     B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, j, k)] = th;
                     wsp1_lo[WSP(p, j, k)] = tl;
                 }
@@ -436,9 +447,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t p = 0; p < nq; ++p) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
                                     B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(i, j, k)] = th;
                     wsp0_lo[WSP(i, j, k)] = tl;
                 }
@@ -540,11 +552,12 @@ inline void plane_phase_a(
     for (index_t i = 0; i < nm; ++i) {
         FF_UNROLL
         for (index_t p = 0; p < nq; ++p) {
-            ff::mul_add(sh[p], sl[p], uh[i], ul[i], B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
+            ff::mul_acc(sh[p], sl[p], uh[i], ul[i], B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
         }
     }
     FF_UNROLL
     for (index_t p = 0; p < nq; ++p) {
+        ff::renormalize(sh[p], sl[p]);
         sm0_hi[SMB(b, p, j, k)] = sh[p];
         sm0_lo[SMB(b, p, j, k)] = sl[p];
     }
@@ -572,11 +585,12 @@ inline void plane_phase_b(
         const float bl = B_lo[BAS(j, q)];
         FF_UNROLL
         for (index_t p = 0; p < nq; ++p) {
-            ff::mul_add(th[p], tl[p], sm0_hi[SMB(b, p, j, k)], sm0_lo[SMB(b, p, j, k)], bh, bl);
+            ff::mul_acc(th[p], tl[p], sm0_hi[SMB(b, p, j, k)], sm0_lo[SMB(b, p, j, k)], bh, bl);
         }
     }
     FF_UNROLL
     for (index_t p = 0; p < nq; ++p) {
+        ff::renormalize(th[p], tl[p]);
         sm1_hi[SMB(b, p, q, k)] = th[p];
         sm1_lo[SMB(b, p, q, k)] = tl[p];
     }
@@ -607,7 +621,7 @@ inline void plane_phase_c(
         const float bl = B_lo[BAS(k, r)];
         FF_UNROLL
         for (index_t p = 0; p < nq; ++p) {
-            ff::mul_add(vh[p], vl[p], sm1_hi[SMB(b, p, q, k)], sm1_lo[SMB(b, p, q, k)], bh, bl);
+            ff::mul_acc(vh[p], vl[p], sm1_hi[SMB(b, p, q, k)], sm1_lo[SMB(b, p, q, k)], bh, bl);
         }
     }
     FF_UNROLL
@@ -615,6 +629,7 @@ inline void plane_phase_c(
         float jh;
         float jl;
         ff::split(e_JxW[WSP(p, q, r)], jh, jl);
+        ff::renormalize(vh[p], vl[p]);
         ff::mul(vh[p], vl[p], jh, jl);
         sm0_hi[SMB(b, p, q, r)] = vh[p];
         sm0_lo[SMB(b, p, q, r)] = vl[p];
@@ -642,11 +657,12 @@ inline void plane_phase_d(
         const float bl = B_lo[BAS(k, r)];
         FF_UNROLL
         for (index_t p = 0; p < nq; ++p) {
-            ff::mul_add(wh[p], wl[p], sm0_hi[SMB(b, p, q, r)], sm0_lo[SMB(b, p, q, r)], bh, bl);
+            ff::mul_acc(wh[p], wl[p], sm0_hi[SMB(b, p, q, r)], sm0_lo[SMB(b, p, q, r)], bh, bl);
         }
     }
     FF_UNROLL
     for (index_t p = 0; p < nq; ++p) {
+        ff::renormalize(wh[p], wl[p]);
         sm1_hi[SMB(b, p, q, k)] = wh[p];
         sm1_lo[SMB(b, p, q, k)] = wl[p];
     }
@@ -676,11 +692,15 @@ inline void plane_phase_e(
         const float bl = B_lo[BAS(j, q)];
         FF_UNROLL
         for (index_t p = 0; p < nq; ++p) {
-            ff::mul_add(xh[p], xl[p], sm1_hi[SMB(b, p, q, k)], sm1_lo[SMB(b, p, q, k)], bh, bl);
+            ff::mul_acc(xh[p], xl[p], sm1_hi[SMB(b, p, q, k)], sm1_lo[SMB(b, p, q, k)], bh, bl);
         }
     }
     float yh[nm];
     float yl[nm];
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        ff::renormalize(xh[p], xl[p]);
+    }
     FF_UNROLL
     for (index_t i = 0; i < nm; ++i) {
         yh[i] = 0.0f;
@@ -690,11 +710,12 @@ inline void plane_phase_e(
     for (index_t p = 0; p < nq; ++p) {
         FF_UNROLL
         for (index_t i = 0; i < nm; ++i) {
-            ff::mul_add(yh[i], yl[i], xh[p], xl[p], B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
+            ff::mul_acc(yh[i], yl[i], xh[p], xl[p], B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
         }
     }
     FF_UNROLL
     for (index_t i = 0; i < nm; ++i) {
+        ff::renormalize(yh[i], yl[i]);
         e_out[DOF(i, j, k)] = ff::join(yh[i], yl[i]);
     }
 }

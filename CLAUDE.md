@@ -7,7 +7,9 @@ The BK1 kernel lives in `bk1_sumfact.h`, generic in the arithmetic type
 float-float kernels with the same interface in double: values are split into
 hi/lo float pairs inside the kernel, the work arrays are separate hi and lo
 float arrays, and the TwoSum/TwoProd helpers come from `float_float.h`, a
-private header of that driver only. `SumFactorizationFF` runs one element
+private header of that driver only (contractions accumulate with `mul_acc`
+and call `renormalize` once per column; every kernel must do this the same
+way to stay bit-identical). `SumFactorizationFF` runs one element
 per thread, `SumFactorizationFFTeams` one element per team with the work
 arrays at team scope and a `parallel for collapse(3)` per step (team size
 from the constexpr `ff_team_size`), and `SumFactorizationFFPlane<nq, batch>`

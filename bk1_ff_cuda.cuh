@@ -10,8 +10,8 @@
 // significant bits) as it is loaded, the sum factorization runs on float
 // pairs with the helpers of float_float.h, and the result is joined back to
 // a double as it is stored.  The point is hardware whose fp64 rate is a
-// small fraction of fp32: a float-float multiply-add is 15 fp32
-// instructions, cheaper than fp64 at 1/32 or 1/64 of the fp32 rate, and the
+// small fraction of fp32: a float-float multiply-add is 12 fp32
+// instructions, plus 3 per column to renormalise the sum, cheaper than fp64 at 1/32 or 1/64 of the fp32 rate, and the
 // kernel moves the same 8 bytes per value as double.
 //
 // Mapping: one block works through batches of nelmtPerBatch elements
@@ -252,7 +252,7 @@ __device__ inline void mass_operator_ff_body(
                 for (int i = 0; i < nm; ++i) {
                     #pragma unroll
                     for (int p = 0; p < nq; ++p) {
-                        ff::mul_add(ch[p], cl[p], uh[i], ul[i], basis_hi(i, p), basis_lo(i, p));
+                        ff::mul_acc(ch[p], cl[p], uh[i], ul[i], basis_hi(i, p), basis_lo(i, p));
                     }
                 }
             } else {
@@ -265,12 +265,13 @@ __device__ inline void mass_operator_ff_body(
                     ff::split(in_at(e, i, j, k), uh, ul);
                     #pragma unroll
                     for (int p = 0; p < nq; ++p) {
-                        ff::mul_add(ch[p], cl[p], uh, ul, basis_hi(i, p), basis_lo(i, p));
+                        ff::mul_acc(ch[p], cl[p], uh, ul, basis_hi(i, p), basis_lo(i, p));
                     }
                 }
             }
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
+                ff::renormalize(ch[p], cl[p]);
                 w0_hi(e, p, j, k) = ch[p];
                 w0_lo(e, p, j, k) = cl[p];
             }
@@ -291,11 +292,12 @@ __device__ inline void mass_operator_ff_body(
                 const float bl = basis_lo(j, q);
                 #pragma unroll
                 for (int p = 0; p < nq; ++p) {
-                    ff::mul_add(ch[p], cl[p], w0_hi(e, p, j, k), w0_lo(e, p, j, k), bh, bl);
+                    ff::mul_acc(ch[p], cl[p], w0_hi(e, p, j, k), w0_lo(e, p, j, k), bh, bl);
                 }
             }
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
+                ff::renormalize(ch[p], cl[p]);
                 w1_hi(e, p, q, k) = ch[p];
                 w1_lo(e, p, q, k) = cl[p];
             }
@@ -317,7 +319,7 @@ __device__ inline void mass_operator_ff_body(
                 const float bl = basis_lo(k, r);
                 #pragma unroll
                 for (int p = 0; p < nq; ++p) {
-                    ff::mul_add(ch[p], cl[p], w1_hi(e, p, q, k), w1_lo(e, p, q, k), bh, bl);
+                    ff::mul_acc(ch[p], cl[p], w1_hi(e, p, q, k), w1_lo(e, p, q, k), bh, bl);
                 }
             }
             #pragma unroll
@@ -325,6 +327,7 @@ __device__ inline void mass_operator_ff_body(
                 float jh;
                 float jl;
                 ff::split(JxW_at(e, p, q, r), jh, jl);
+                ff::renormalize(ch[p], cl[p]);
                 ff::mul(ch[p], cl[p], jh, jl);
                 w0_hi(e, p, q, r) = ch[p];
                 w0_lo(e, p, q, r) = cl[p];
@@ -346,11 +349,12 @@ __device__ inline void mass_operator_ff_body(
                 const float bl = basis_lo(k, r);
                 #pragma unroll
                 for (int p = 0; p < nq; ++p) {
-                    ff::mul_add(ch[p], cl[p], w0_hi(e, p, q, r), w0_lo(e, p, q, r), bh, bl);
+                    ff::mul_acc(ch[p], cl[p], w0_hi(e, p, q, r), w0_lo(e, p, q, r), bh, bl);
                 }
             }
             #pragma unroll
             for (int p = 0; p < nq; ++p) {
+                ff::renormalize(ch[p], cl[p]);
                 w1_hi(e, p, q, k) = ch[p];
                 w1_lo(e, p, q, k) = cl[p];
             }
@@ -372,8 +376,12 @@ __device__ inline void mass_operator_ff_body(
                 const float bl = basis_lo(j, q);
                 #pragma unroll
                 for (int p = 0; p < nq; ++p) {
-                    ff::mul_add(ch[p], cl[p], w1_hi(e, p, q, k), w1_lo(e, p, q, k), bh, bl);
+                    ff::mul_acc(ch[p], cl[p], w1_hi(e, p, q, k), w1_lo(e, p, q, k), bh, bl);
                 }
+            }
+            #pragma unroll
+            for (int p = 0; p < nq; ++p) {
+                ff::renormalize(ch[p], cl[p]);
             }
             float yh[nm];
             float yl[nm];
@@ -386,11 +394,12 @@ __device__ inline void mass_operator_ff_body(
             for (int p = 0; p < nq; ++p) {
                 #pragma unroll
                 for (int i = 0; i < nm; ++i) {
-                    ff::mul_add(yh[i], yl[i], ch[p], cl[p], basis_hi(i, p), basis_lo(i, p));
+                    ff::mul_acc(yh[i], yl[i], ch[p], cl[p], basis_hi(i, p), basis_lo(i, p));
                 }
             }
             #pragma unroll
             for (int i = 0; i < nm; ++i) {
+                ff::renormalize(yh[i], yl[i]);
                 out_at(e, i, j, k) = ff::join(yh[i], yl[i]);
             }
         }
