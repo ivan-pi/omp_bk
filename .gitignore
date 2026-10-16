@@ -12,3 +12,4 @@ amx_pipe
 accel_gemm
 *.o
 results/
+__pycache__/
