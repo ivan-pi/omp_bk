@@ -22,6 +22,8 @@
 #   NELMT=1000000        elements                       NTESTS=5   timed runs per kernel
 #   NCU_ORDERS="7 8"     orders for ncu                 NCU_NELMT=200000
 #   NVCCEXTRA=...        extra nvcc flags for the build (e.g. -DFF_CUDA_CONTRACTION_UNROLL=0)
+#   NVCCHOST=/path/g++   nvcc's host compiler (the Makefile's -ccbin), when the first g++ on
+#                        the PATH is newer than the nvcc accepts; NVCC=... selects the nvcc
 #   BK1_FF=./BK1_ff      an OpenMP driver to include in the sweep (built separately, e.g. with nvc++)
 #   NVCXX="nvc++ -mp=gpu ..."  when set, also compiles BK1_ff.cpp with -gpu=ptxinfo for the
 #                        register table of the OpenMP kernels (regs_omp.txt) and with
@@ -49,7 +51,7 @@ echo "results in $OUT"
     echo "commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "nvcc: $(${NVCC:-nvcc} --version | tail -2 | head -1)"
     nvidia-smi --query-gpu=name,driver_version,clocks.sm,clocks.max.sm --format=csv 2>/dev/null || true
-    echo "NVCCEXTRA: $NVCCEXTRA  BK_RANDOM: ${BK_RANDOM:-}"
+    echo "NVCC: ${NVCC:-nvcc}  NVCCHOST: ${NVCCHOST:-}  NVCCEXTRA: $NVCCEXTRA  BK_RANDOM: ${BK_RANDOM:-}"
 } > "$OUT/env.txt"
 
 # 1. build with the ptxas report, and tabulate it

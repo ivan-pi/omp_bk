@@ -17,6 +17,11 @@ NVCCFLAGS=-O3 -std=c++17 -arch=$(NVARCH) -Xcompiler -Wall,-Wno-unknown-pragmas
 # toolkit's own copy when that is too old for the runtime API.
 CCCL=
 NVCCFLAGS+=$(if $(CCCL),-I$(CCCL)/libcudacxx/include -I$(CCCL)/cub -I$(CCCL)/thrust,)
+# NVCCHOST=/path/to/g++ selects nvcc's host compiler (-ccbin): nvcc 11.8
+# accepts GCC up to 11, 12.x up to 12 or 13, and the first g++ on the PATH
+# may be newer.
+NVCCHOST=
+NVCCFLAGS+=$(if $(NVCCHOST),-ccbin $(NVCCHOST),)
 # NVCCEXTRA adds flags, e.g. NVCCEXTRA='-Xptxas -v -DFF_CUDA_CONTRACTION_UNROLL=0'
 NVCCEXTRA=
 NVCCFLAGS+=$(NVCCEXTRA)

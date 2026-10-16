@@ -144,7 +144,9 @@ of a few short runs then depends on how far the clock has ramped) and
 check it against the host double reference (`ok`/`FAIL`); they share
 `cuda/bk1_ff_driver_common.h`. `make BK1_ff_cuda_plain` builds
 `cuda/BK1_ff_cuda_plain.cu` on the classic CUDA runtime API, for any nvcc
-(`NVCC=...` selects one, `NVARCH=native` is the default architecture).
+(`NVCC=...` selects one, `NVARCH=native` is the default architecture,
+`NVCCHOST=/path/to/g++` its host compiler when the first `g++` on the
+path is newer than that nvcc accepts: 11.8 takes GCC up to 11).
 `make BK1_ff_cuda` builds `cuda/BK1_ff_cuda.cu` on the CCCL runtime API of
 CUDA 13.2 or later (`CCCL=/path/to/cccl` puts a newer CCCL checkout ahead
 of the toolkit's): the kernel is a functor whose call operator takes the
