@@ -54,7 +54,11 @@ echo "results in $OUT"
 
 # 1. build with the ptxas report, and tabulate it
 echo "== build (ptxas -v)"
-make -B BK1_ff_cuda_plain NVCCEXTRA="-Xptxas -v $NVCCEXTRA" > "$OUT/build.log" 2>&1
+if ! make -B BK1_ff_cuda_plain NVCCEXTRA="-Xptxas -v $NVCCEXTRA" > "$OUT/build.log" 2>&1; then
+    echo "build failed; the end of $OUT/build.log:"
+    tail -40 "$OUT/build.log"
+    exit 1
+fi
 "$here/regs.sh" < "$OUT/build.log" | tee "$OUT/regs.txt"
 if [ -n "${NVCXX:-}" ]; then
     echo "== nvc++ ptxinfo"
