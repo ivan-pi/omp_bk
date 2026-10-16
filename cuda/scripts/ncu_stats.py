@@ -227,7 +227,8 @@ def main():
         metrics = [m for m, _ in METRICS if m not in args.drop]
         known = known_metrics(args.ncu)
         if known is not None:
-            metrics = [m for m in metrics if m.split('.')[0] in known]
+            # launch__ metrics are launch attributes, not listed by --query-metrics
+            metrics = [m for m in metrics if m.startswith('launch__') or m.split('.')[0] in known]
         dropped = sorted({m for m, _ in METRICS} - set(metrics))
         if dropped:
             print('left out: ' + ', '.join(dropped), file=sys.stderr)
