@@ -4,10 +4,11 @@ that matter for an issue-bound kernel, side by side per order.
 
 For every order and kernel the script has ncu write a report (.ncu-rep, kept
 for ncu-ui) with a fixed metric list, skipping the driver's warm-up launches,
-then reads the reports through Nsight Compute's Python Report Interface
-(the ncu_report module in extras/python of the Nsight Compute installation,
-found next to the ncu binary, or given with --python-path or NCU_PYTHON_PATH)
-and prints one table per nq with a column per kernel.  Nothing is parsed:
+then reads the reports through Nsight Compute's Python Report Interface,
+the ncu_report module: installed with `pip install ncu-report`, or taken
+from extras/python of the Nsight Compute installation (found next to the ncu
+binary, or given with --python-path or NCU_PYTHON_PATH), and prints one
+table per nq with a column per kernel.  Nothing is parsed:
 every number is action.metric_by_name(name).value() of the report.
 
     cuda/scripts/ncu_stats.py --orders 7 8                       # MassOperatorFF and MassOperatorFF2 at nq = 9, 10
@@ -72,9 +73,10 @@ LABELS = dict(METRICS)
 
 
 def import_ncu_report(ncu, python_path):
-    """The ncu_report module: from --python-path / NCU_PYTHON_PATH, or from
-    extras/python next to the (resolved) ncu binary, or a nsight-compute
-    installation nearby."""
+    """The ncu_report module: the installed package (pip install ncu-report)
+    unless --python-path / NCU_PYTHON_PATH, extras/python next to the
+    (resolved) ncu binary, or a nsight-compute installation nearby holds one,
+    which then comes first."""
     candidates = []
     if python_path:
         candidates.append(python_path)
@@ -95,8 +97,8 @@ def import_ncu_report(ncu, python_path):
         return ncu_report
     except ImportError as e:
         print(f'cannot import ncu_report ({e}); looked in: {", ".join(candidates) or "nothing"}', file=sys.stderr)
-        print('give the extras/python directory of your Nsight Compute with --python-path or NCU_PYTHON_PATH',
-              file=sys.stderr)
+        print('pip install ncu-report, or give the extras/python directory of your Nsight Compute with '
+              '--python-path or NCU_PYTHON_PATH', file=sys.stderr)
         return None
 
 

@@ -202,8 +202,8 @@ per scheduler, achieved occupancy, registers and occupancy limits,
 executed instructions, pipe utilisation of fma, fp64, alu and lsu,
 shared-memory loads, stores and bank conflicts, warp stall reasons),
 skipping the warm-up launches, reads the reports through Nsight Compute's
-Python Report Interface (`ncu_report`, found in `extras/python` next to
-the `ncu` binary, or given with `--python-path`) and shows one table per
+Python Report Interface (`ncu_report`: `pip install ncu-report`, or the
+copy in `extras/python` next to the `ncu` binary, or `--python-path`) and shows one table per
 nq with a column per kernel; the reports stay in `ncu_reports/` for
 `ncu-ui`, `--load` tabulates existing reports side by side, metrics the
 local `ncu --query-metrics` does not list are left out, `--drop` leaves
