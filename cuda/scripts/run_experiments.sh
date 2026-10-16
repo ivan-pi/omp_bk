@@ -18,7 +18,9 @@
 #   NCU_ORDERS="7 8"     orders for ncu                 NCU_NELMT=200000
 #   NVCCEXTRA=...        extra nvcc flags for the build (e.g. -DFF_CUDA_CONTRACTION_UNROLL=0)
 #   BK1_FF=./BK1_ff      an OpenMP driver to include in the sweep (built separately, e.g. with nvc++)
-#   NVCXX="nvc++ -mp=gpu ..."  when set, also compiles BK1_ff.cpp with -gpu=ptxinfo for its register table
+#   NVCXX="nvc++ -mp=gpu ..."  when set, also compiles BK1_ff.cpp with -gpu=ptxinfo for the
+#                        register table of the OpenMP kernels (regs_omp.txt) and with
+#                        -Minfo=all for the loop messages of the plane phases (minfo.txt)
 #   BK_RANDOM=1          random data (passed through to the drivers)
 set -euo pipefail
 
@@ -54,6 +56,10 @@ if [ -n "${NVCXX:-}" ]; then
     # shellcheck disable=SC2086
     $NVCXX -gpu=ptxinfo -c BK1_ff.cpp -o "$OUT/BK1_ff.o" > "$OUT/nvcxx.log" 2>&1 || true
     "$here/ptxas_table.py" --csv "$OUT/regs_omp.csv" "$OUT/nvcxx.log" | tee "$OUT/regs_omp.txt"
+    echo "== nvc++ -Minfo=all (loop messages for the plane phases, BK1_ff.cpp lines 500-720)"
+    # shellcheck disable=SC2086
+    $NVCXX -Minfo=all -c BK1_ff.cpp -o "$OUT/BK1_ff.o" > "$OUT/minfo.log" 2>&1 || true
+    awk '/^ *([5-6][0-9][0-9]|7[0-1][0-9]), /' "$OUT/minfo.log" | grep -i 'unroll\|vector\|loop' | sort -u | tee "$OUT/minfo.txt"
     rm -f "$OUT/BK1_ff.o"
 fi
 
