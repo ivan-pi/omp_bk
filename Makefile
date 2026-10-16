@@ -19,7 +19,7 @@ NVARCH?=native
 # selects the bundled 11.8 toolkit, whose headers have no glibc 2.41 clash).
 # NVCCPTXINFO is the flag for the ptxas resource report of either compiler.
 ifneq (,$(findstring nvc++,$(NVCC)))
-NVCCFLAGS=-O3 -std=c++17 -cuda $(if $(filter native,$(NVARCH)),,-gpu=$(NVARCH))
+NVCCFLAGS=-O3 -std=c++17 -cuda --diag_suppress cuda_compile $(if $(filter native,$(NVARCH)),,-gpu=$(NVARCH))
 NVCCPTXINFO=-gpu=ptxinfo
 else
 NVCCFLAGS=-O3 -std=c++17 -arch=$(NVARCH) -Xcompiler -Wall,-Wno-unknown-pragmas
