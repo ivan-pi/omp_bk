@@ -176,8 +176,8 @@ checks indexing, phases and batching, not the execution by many threads.
 All drivers append one CSV row per kernel and run to the file named by
 `BK_CSV` (`driver,kernel,nq,nelmt,batch,gdofs,gbs,norm,error,ok`, header
 first when the file is new), so a sweep is a shell loop and nothing has to
-be parsed. The scripts in `cuda/scripts/` are built on that and on the CSV
-that `ncu` prints; none of them interprets the drivers' text output.
+be parsed. The scripts in `cuda/scripts/` are built on that and on Nsight
+Compute's report files; none of them interprets the drivers' text output.
 
 ```sh
 cuda/scripts/sweep.sh sweep.csv ./BK1_ff_cuda_plain ./BK1_ff   # ORDERS="2 3 4 5 6 7 8" REPEAT=1 NELMT=1000000 NTESTS=5
@@ -196,15 +196,18 @@ BK1_FF=./BK1_ff NVCXX="nvc++ <flags>" REPEAT=2 cuda/scripts/run_experiments.sh
 `BK_CSV` set and ends with the table; `table.py` pivots the CSV with the
 csv module. `regs.sh` is an awk over the fixed strings of a ptxas report,
 with `cu++filt` for the names when it is on the path. `ncu_stats.py`
-runs ncu per kernel and order with a fixed metric list (duration,
-throughputs, issue-slot utilisation, eligible and active warps per
-scheduler, achieved occupancy, registers and occupancy limits, executed
-instructions, pipe utilisation of fma, fp64, alu and lsu, shared-memory
-loads, stores and bank conflicts, warp stall reasons), skipping the
-warm-up launches, reads the CSV ncu prints and shows one table per nq
-with a column per kernel; metrics the local `ncu --query-metrics` does not
-list are left out, `--drop` leaves out more, and the OpenMP kernels are
-selected with a `regex:` name. `run_experiments.sh` chains them into a
+has ncu write a report per kernel and order with a fixed metric list
+(duration, throughputs, issue-slot utilisation, eligible and active warps
+per scheduler, achieved occupancy, registers and occupancy limits,
+executed instructions, pipe utilisation of fma, fp64, alu and lsu,
+shared-memory loads, stores and bank conflicts, warp stall reasons),
+skipping the warm-up launches, reads the reports through Nsight Compute's
+Python Report Interface (`ncu_report`, found in `extras/python` next to
+the `ncu` binary, or given with `--python-path`) and shows one table per
+nq with a column per kernel; the reports stay in `ncu_reports/` for
+`ncu-ui`, `--load` tabulates existing reports side by side, metrics the
+local `ncu --query-metrics` does not list are left out, `--drop` leaves
+out more, and the OpenMP kernels are selected with a `regex:` name. `run_experiments.sh` chains them into a
 results directory with the build log, the drivers' output and the GPU and
 driver versions; its environment variables select orders, repeats,
 element counts, extra nvcc flags, the OpenMP driver and an nvc++ command

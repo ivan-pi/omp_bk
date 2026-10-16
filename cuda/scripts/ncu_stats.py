@@ -2,32 +2,37 @@
 """Profile the BK1 float-float kernels with Nsight Compute and print the numbers
 that matter for an issue-bound kernel, side by side per order.
 
-For every order and kernel the script runs ncu on the driver with an explicit
-metric list (duration, SM and memory throughput, issue-slot utilisation,
+For every order and kernel the script has ncu write a report (.ncu-rep, kept
+for ncu-ui) with a fixed metric list, skipping the driver's warm-up launches,
+then reads the reports through Nsight Compute's Python Report Interface
+(the ncu_report module in extras/python of the Nsight Compute installation,
+found next to the ncu binary, or given with --python-path or NCU_PYTHON_PATH)
+and prints one table per nq with a column per kernel.  Nothing is parsed:
+every number is action.metric_by_name(name).value() of the report.
+
+    cuda/scripts/ncu_stats.py --orders 7 8                       # MassOperatorFF and MassOperatorFF2 at nq = 9, 10
+    cuda/scripts/ncu_stats.py --orders 8 --kernels MassOperatorFF2 --csv ncu.csv
+    cuda/scripts/ncu_stats.py --binary ./BK1_ff --kernels regex:PlaneLoopILi10ELi1E --skip 0 --orders 8
+    cuda/scripts/ncu_stats.py --load ncu_reports/*.ncu-rep       # tabulate existing reports (any metric set)
+
+The metrics: duration, SM and memory throughput, issue-slot utilisation,
 eligible and active warps per scheduler, achieved occupancy, registers and
 the occupancy limits, executed instructions, pipe utilisation of fma, fp64,
 alu and lsu, shared-memory load and store instructions and bank conflicts,
-and the warp stall reasons in cycles per issued instruction), skipping the
-driver's warm-up launches, and prints one table per nq with a column per
-kernel.  The metric list is checked against ncu --query-metrics first and
-metrics that ncu does not list are left out; --drop leaves out more.  The
-CSV that ncu prints is read with the csv module, nothing else is parsed.
-
-    cuda/scripts/ncu_stats.py --orders 7 8                      # MassOperatorFF and MassOperatorFF2, nq = 9, 10
-    cuda/scripts/ncu_stats.py --orders 8 --kernels MassOperatorFF2 --csv ncu.csv
-    cuda/scripts/ncu_stats.py --binary ./BK1_ff --kernels regex:PlaneLoopILi10ELi1E --skip 0 --orders 8
-
---kernels takes ncu kernel names (the function name without template
-arguments, exact match) or regex:... patterns, which is what the nvc++
-kernels of BK1_ff need (regex:PlaneLoop matches the OpenMP loop kernel).
-ncu locks the clocks to base by default, so its durations are not the
-drivers' timings; compare its numbers with each other.
+and the warp stall reasons in cycles per issued instruction.  The list is
+checked against ncu --query-metrics first and names this ncu does not list
+are left out (--drop leaves out more); with --load, whatever a report holds
+is shown.  --kernels takes ncu kernel names (the function name without
+template arguments) or regex:... patterns, which the nvc++ kernels of
+BK1_ff need.  ncu locks the clocks to base by default, so its durations are
+not the drivers' timings; compare its numbers with each other.
 """
 
 import argparse
 import csv
-import io
+import glob
 import os
+import shutil
 import subprocess
 import sys
 
@@ -35,7 +40,7 @@ STALLS = ['barrier', 'long_scoreboard', 'short_scoreboard', 'mio_throttle', 'mat
           'wait', 'not_selected', 'selected', 'no_instruction', 'lg_throttle', 'dispatch_stall',
           'imc_miss', 'misc', 'drain', 'membar', 'branch_resolving', 'sleeping', 'tex_throttle']
 
-# (metric, short label); the stall metrics are appended below
+# (metric, label); the stall metrics are appended below
 METRICS = [
     ('gpu__time_duration.sum', 'duration'),
     ('sm__throughput.avg.pct_of_peak_sustained_elapsed', 'SM throughput %'),
@@ -63,6 +68,36 @@ METRICS = [
     ('smsp__average_warp_latency_per_inst_issued.ratio', 'warp cycles / issued inst'),
 ]
 METRICS += [(f'smsp__average_warps_issue_stalled_{s}_per_issue_active.ratio', f'stall {s}') for s in STALLS]
+LABELS = dict(METRICS)
+
+
+def import_ncu_report(ncu, python_path):
+    """The ncu_report module: from --python-path / NCU_PYTHON_PATH, or from
+    extras/python next to the (resolved) ncu binary, or a nsight-compute
+    installation nearby."""
+    candidates = []
+    if python_path:
+        candidates.append(python_path)
+    if os.environ.get('NCU_PYTHON_PATH'):
+        candidates.append(os.environ['NCU_PYTHON_PATH'])
+    exe = shutil.which(ncu)
+    if exe:
+        real = os.path.dirname(os.path.realpath(exe))
+        candidates.append(os.path.join(real, 'extras', 'python'))
+        candidates.extend(glob.glob(os.path.join(os.path.dirname(real), 'nsight-compute-*', 'extras', 'python')))
+    candidates.extend(glob.glob('/opt/nvidia/nsight-compute/*/extras/python'))
+    for path in candidates:
+        if os.path.isfile(os.path.join(path, 'ncu_report.py')):
+            sys.path.insert(0, path)
+            break
+    try:
+        import ncu_report  # pylint: disable=import-outside-toplevel
+        return ncu_report
+    except ImportError as e:
+        print(f'cannot import ncu_report ({e}); looked in: {", ".join(candidates) or "nothing"}', file=sys.stderr)
+        print('give the extras/python directory of your Nsight Compute with --python-path or NCU_PYTHON_PATH',
+              file=sys.stderr)
+        return None
 
 
 def known_metrics(ncu):
@@ -82,57 +117,71 @@ def known_metrics(ncu):
     return names or None
 
 
-def parse_csv(text):
-    """{metric name: (value, unit)} from ncu --csv output for one kernel launch.
-    ncu prints its CSV with a header line that starts with "ID"; lines before
-    it (==PROF== messages) are skipped."""
-    lines = text.splitlines()
-    start = next((i for i, l in enumerate(lines) if l.startswith('"ID"') or l.startswith('ID,')), None)
-    if start is None:
-        return {}
-    reader = csv.DictReader(io.StringIO('\n'.join(lines[start:])))
-    values = {}
-    for row in reader:
-        name = row.get('Metric Name')
-        if not name:
-            continue
-        raw = (row.get('Metric Value') or '').replace(',', '')
-        try:
-            value = float(raw)
-        except ValueError:
-            value = raw
-        values[name] = (value, row.get('Metric Unit') or '')
-    return values
-
-
-def profile(args, kernel, p, metrics):
-    """Run ncu for one kernel and order; {metric: (value, unit)}, empty on failure."""
-    cmd = [args.ncu, '--csv', '--kernel-name', kernel, '--launch-skip', str(args.skip),
+def collect(args, kernel, p, metrics):
+    """Run ncu into a report file; returns its path or None."""
+    os.makedirs(args.reports, exist_ok=True)
+    stem = os.path.join(args.reports, f'{kernel.replace(":", "_")}_p{p}')
+    cmd = [args.ncu, '-o', stem, '-f', '--kernel-name', kernel, '--launch-skip', str(args.skip),
            '--launch-count', '1', '--metrics', ','.join(metrics),
            args.binary, str(p), str(args.nelmt), str(args.ntests)]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if proc.returncode != 0:
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if proc.returncode != 0 or not os.path.isfile(stem + '.ncu-rep'):
         print(f'ncu failed for {kernel} p={p} (exit {proc.returncode}):', file=sys.stderr)
-        print((proc.stderr + proc.stdout).strip()[-2000:], file=sys.stderr)
+        print(proc.stdout.strip()[-2000:], file=sys.stderr)
         print('a metric this ncu rejects can be left out with --drop NAME', file=sys.stderr)
-        return {}
-    if args.raw:
-        os.makedirs(args.raw, exist_ok=True)
-        with open(os.path.join(args.raw, f'{kernel.replace(":", "_")}_p{p}.csv'), 'w') as fh:
-            fh.write(proc.stdout)
-    return parse_csv(proc.stdout)
+        return None
+    return stem + '.ncu-rep'
+
+
+def read_report(ncu_report, path):
+    """[(kernel name, {metric: (value, unit)})] for every action of a report."""
+    report = ncu_report.load_report(path)
+    actions = []
+    for r in range(report.num_ranges()):
+        rng = report.range_by_idx(r)
+        for a in range(rng.num_actions()):
+            action = rng.action_by_idx(a)
+            values = {}
+            for name in action.metric_names():
+                metric = action.metric_by_name(name)
+                try:
+                    unit = metric.unit()
+                except Exception:   # older interfaces without unit()
+                    unit = ''
+                values[name] = (metric.value(), unit)
+            actions.append((action.name(), values))
+    return actions
 
 
 def fmt(value, unit):
-    if isinstance(value, str):
-        return value
-    if unit in ('%',):
+    if not isinstance(value, (int, float)):
+        return str(value)
+    if unit == '%':
         return f'{value:.1f}'
     if abs(value) >= 1e6:
         return f'{value / 1e6:.3f}M'
     if abs(value) >= 1000:
         return f'{value:,.0f}'
     return f'{value:.2f}'
+
+
+def print_table(title, columns, top_stalls):
+    """columns: [(column label, {metric: (value, unit)})]."""
+    width = max(len(label) for label, _ in columns) + 2
+    print(f'\n== {title} ' + ' '.join(f'{label:>{width}}' for label, _ in columns))
+    first = columns[0][1]
+    ordered = [(m, l) for m, l in METRICS if not l.startswith('stall')]
+    stalls = [(m, l) for m, l in METRICS if l.startswith('stall') and m in first]
+    stalls.sort(key=lambda ml: -float(first[ml[0]][0]) if isinstance(first[ml[0]][0], (int, float)) else 0.0)
+    for metric, label in ordered + stalls[:top_stalls]:
+        if not any(metric in values for _, values in columns):
+            continue
+        unit = next((values[metric][1] for _, values in columns if metric in values), '')
+        line = f'{label:<30}'
+        for _, values in columns:
+            v = values.get(metric)
+            line += f'{fmt(*v) if v else "-":>{width}}'
+        print(line + (f'  [{unit}]' if unit else ''))
 
 
 def main():
@@ -145,66 +194,58 @@ def main():
     ap.add_argument('--ntests', type=int, default=1)
     ap.add_argument('--skip', type=int, default=3, help='launches of the kernel to skip (the warm-up; default 3)')
     ap.add_argument('--ncu', default='ncu')
+    ap.add_argument('--python-path', metavar='DIR', help='the extras/python directory holding ncu_report')
+    ap.add_argument('--reports', default='ncu_reports', metavar='DIR', help='where the .ncu-rep files go')
+    ap.add_argument('--load', nargs='*', metavar='REPORT', help='only tabulate these existing reports')
     ap.add_argument('--csv', metavar='FILE', help='write every metric to this CSV')
-    ap.add_argument('--raw', metavar='DIR', help='keep the ncu CSV of every run in this directory')
     ap.add_argument('--top-stalls', type=int, default=6, help='stall reasons to print per column (default 6)')
     ap.add_argument('--drop', nargs='*', default=[], metavar='METRIC', help='metrics to leave out')
     args = ap.parse_args()
 
-    known = known_metrics(args.ncu)
-    metrics = [m for m, _ in METRICS if m not in args.drop]
-    if known is not None:
-        metrics = [m for m in metrics if m.split('.')[0] in known]
-    dropped = sorted({m for m, _ in METRICS} - set(metrics))
-    if dropped:
-        print('left out: ' + ', '.join(dropped), file=sys.stderr)
-    labels = dict(METRICS)
+    ncu_report = import_ncu_report(args.ncu, args.python_path)
+    if ncu_report is None:
+        return 1
 
-    results = {}   # (p, kernel) -> {metric: (value, unit)}
-    for p in args.orders:
-        for kernel in args.kernels:
-            results[(p, kernel)] = profile(args, kernel, p, metrics)
+    tables = []     # (title, [(column label, values)])
+    if args.load:
+        # one table, a column per report (its first action)
+        columns = []
+        for path in args.load:
+            for _, values in read_report(ncu_report, path)[:1]:
+                columns.append((os.path.basename(path).replace('.ncu-rep', ''), values))
+        if columns:
+            tables.append(('reports', columns))
+    else:
+        metrics = [m for m, _ in METRICS if m not in args.drop]
+        known = known_metrics(args.ncu)
+        if known is not None:
+            metrics = [m for m in metrics if m.split('.')[0] in known]
+        dropped = sorted({m for m, _ in METRICS} - set(metrics))
+        if dropped:
+            print('left out: ' + ', '.join(dropped), file=sys.stderr)
+        for p in args.orders:
+            columns = []
+            for kernel in args.kernels:
+                path = collect(args, kernel, p, metrics)
+                if path:
+                    for _, values in read_report(ncu_report, path)[:1]:
+                        columns.append((kernel, values))
+            if columns:
+                tables.append((f'p={p} nq={p + 2}', columns))
 
     rows_out = []
-    for p in args.orders:
-        nq = p + 2
-        cols = [k for k in args.kernels if results.get((p, k))]
-        if not cols:
-            print(f'p={p} nq={nq}: no results')
-            continue
-        width = max(len(k) for k in cols) + 2
-        print(f'\n== p={p} nq={nq} ' + ' '.join(f'{k:>{width}}' for k in cols))
-        for metric, label in METRICS:
-            if label.startswith('stall'):
-                continue
-            if not any(metric in results[(p, k)] for k in cols):
-                continue
-            unit = next((results[(p, k)][metric][1] for k in cols if metric in results[(p, k)]), '')
-            line = f'{label:<30}'
-            for k in cols:
-                v = results[(p, k)].get(metric)
-                line += f'{fmt(*v) if v else "-":>{width}}'
-            print(line + (f'  [{unit}]' if unit else ''))
-        # the stall reasons, largest first by the first column
-        first = results[(p, cols[0])]
-        stalls = [(m, l) for m, l in METRICS if l.startswith('stall') and m in first]
-        stalls.sort(key=lambda ml: -first[ml[0]][0] if isinstance(first[ml[0]][0], float) else 0.0)
-        for metric, label in stalls[:args.top_stalls]:
-            line = f'{label:<30}'
-            for k in cols:
-                v = results[(p, k)].get(metric)
-                line += f'{fmt(*v) if v else "-":>{width}}'
-            print(line + '  [cycles / issue]')
-        for k in cols:
-            for metric, (value, unit) in results[(p, k)].items():
-                rows_out.append({'p': p, 'nq': nq, 'kernel': k, 'metric': metric,
-                                 'label': labels.get(metric, ''), 'value': value, 'unit': unit})
+    for title, columns in tables:
+        print_table(title, columns, args.top_stalls)
+        for label, values in columns:
+            for metric, (value, unit) in values.items():
+                rows_out.append({'table': title, 'kernel': label, 'metric': metric,
+                                 'label': LABELS.get(metric, ''), 'value': value, 'unit': unit})
     if args.csv:
         with open(args.csv, 'w', newline='') as fh:
-            w = csv.DictWriter(fh, fieldnames=['p', 'nq', 'kernel', 'metric', 'label', 'value', 'unit'])
+            w = csv.DictWriter(fh, fieldnames=['table', 'kernel', 'metric', 'label', 'value', 'unit'])
             w.writeheader()
             w.writerows(rows_out)
-    return 0 if rows_out else 1
+    return 0 if tables else 1
 
 
 if __name__ == '__main__':

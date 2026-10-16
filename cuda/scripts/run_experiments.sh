@@ -12,8 +12,9 @@
 #                         drivers' output
 #   sass.txt              instructions per kernel in the SASS
 #   ncu.txt / ncu.csv     Nsight Compute statistics of both CUDA kernels for
-#                         NCU_ORDERS (skipped when ncu is not on the PATH or
-#                         NCU=0)
+#                         NCU_ORDERS, read from the reports in ncu_reports/
+#                         through the Python Report Interface (skipped when ncu
+#                         is not on the PATH or NCU=0)
 #
 # Run from the repository root.  Environment:
 #   OUT=results/<date>   results directory
@@ -87,7 +88,7 @@ if [ "${NCU:-1}" != "0" ] && command -v ncu >/dev/null 2>&1; then
     echo "== ncu"
     # shellcheck disable=SC2086
     "$here/ncu_stats.py" --binary ./BK1_ff_cuda_plain --orders $NCU_ORDERS --nelmt "$NCU_NELMT" \
-        --csv "$OUT/ncu.csv" --raw "$OUT/ncu_raw" | tee "$OUT/ncu.txt"
+        --csv "$OUT/ncu.csv" --reports "$OUT/ncu_reports" | tee "$OUT/ncu.txt"
 else
     echo "== ncu skipped (not on the PATH or NCU=0)"
 fi
