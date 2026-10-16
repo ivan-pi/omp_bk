@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <optional>
 #include <string>
 #include <vector>
@@ -94,6 +96,39 @@ inline std::optional<std::string> get_env(const char* name)
     if (const char* val = std::getenv(name))
         return std::string(val);
     return std::nullopt;
+}
+
+// Machine-readable results: when BK_CSV names a file, every driver appends
+// one row per kernel and run to it (a header first when the file is new):
+//   driver,kernel,nq,nelmt,batch,gdofs,gbs,norm,error,ok
+// so that a sweep is a shell loop and no output has to be parsed.  batch is
+// the elements per team or block (0 where the kernel has none), error the
+// relative L2 error against the double result (empty for double itself).
+inline void append_csv_row(const char* driver, const std::string& kernel, const int nq,
+                           const std::size_t nelmt, const int batch, const double gdofs,
+                           const double gbs, const double norm, const std::optional<double> error,
+                           const bool ok)
+{
+    const std::optional<std::string> file = get_env("BK_CSV");
+    if (!file) {
+        return;
+    }
+    bool is_new = true;
+    {
+        std::ifstream probe(*file);
+        is_new = !probe.good() || probe.peek() == std::ifstream::traits_type::eof();
+    }
+    std::ofstream out(*file, std::ios::app);
+    if (is_new) {
+        out << "driver,kernel,nq,nelmt,batch,gdofs,gbs,norm,error,ok\n";
+    }
+    out << driver << ',' << kernel << ',' << nq << ',' << nelmt << ',' << batch << ','
+        << std::setprecision(6) << gdofs << ',' << gbs << ','
+        << std::setprecision(17) << norm << ',';
+    if (error) {
+        out << std::setprecision(6) << *error;
+    }
+    out << ',' << (ok ? "ok" : "FAIL") << '\n';
 }
 
 } // namespace bk

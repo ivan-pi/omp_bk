@@ -4,7 +4,12 @@ BK3
 BK5
 BK1_ff
 BK1_amx
+check_ff_cuda
+BK1_ff_cuda
+BK1_ff_cuda_plain
 bw_test
 amx_pipe
 accel_gemm
 *.o
+results/
+__pycache__/

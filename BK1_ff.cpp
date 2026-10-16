@@ -8,7 +8,7 @@
 // arrays with the helpers of float_float.h, and the result is joined back
 // into a double as it is stored.  The point is hardware whose fp64 rate is a
 // small fraction of fp32 (consumer GPUs): a float-float multiply-add costs
-// 15 fp32 flops, cheaper than fp64 at 1/32 or 1/64 of the fp32 rate, and the
+// 12 fp32 flops (plus 3 per column to renormalise), cheaper than fp64 at 1/32 or 1/64 of the fp32 rate, and the
 // kernel reads and writes the same 8 bytes per value as double.
 //
 // Three float-float kernels share the arithmetic and differ in how the
@@ -18,11 +18,15 @@
 // (shared memory on a GPU) and the points of each of the nine steps spread
 // over the threads; SumFactorizationFFPlane a batch of elements per team of
 // batch x nq x nq threads, each owning a column of its element's box in
-// registers, with five phases and the contraction index as the outer loop.
-// The plane kernel runs twice, with one element per team and with the
-// batch of ff_plane_batch(nq) (about FF_PLANE_THREADS = 128 threads per
-// team; -DFF_PLANE_BATCH=n forces a batch).  On the host the team kernels
-// open parallel regions per team and are slow; they are meant for the GPU.
+// registers, with five phases and the contraction index as the outer loop;
+// SumFactorizationFFPlaneLoop the same phases written with teams loop and
+// nested loop constructs instead of a parallel region and worksharing
+// loops, the form nvc++ lowers like OpenACC gang and vector loops.  Each
+// plane kernel runs twice, with one element per team and with the batch of
+// ff_plane_batch(nq) (about FF_PLANE_THREADS = 128 threads per team;
+// -DFF_PLANE_BATCH=n forces a batch).  On the host the team kernels are
+// slow, the first two open parallel regions per team and the loop one runs
+// a team on one thread; they are meant for the GPU.
 //
 // The driver runs the double, float and the float-float kernels on the
 // same data and prints one row per kernel (throughput and norm), then the
@@ -125,9 +129,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t i = 0; i < nm; ++i) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)],
                                     B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, j, k)] = th;
                     wsp1_lo[WSP(p, j, k)] = tl;
                 }
@@ -141,9 +146,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t j = 0; j < nm; ++j) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
                                     B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(q, p, k)] = th;
                     wsp0_lo[WSP(q, p, k)] = tl;
                 }
@@ -157,9 +163,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t k = 0; k < nm; ++k) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
                                     B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, q, r)] = th;
                     wsp1_lo[WSP(p, q, r)] = tl;
                 }
@@ -188,9 +195,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t r = 0; r < nq; ++r) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)],
                                     B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(q, p, k)] = th;
                     wsp0_lo[WSP(q, p, k)] = tl;
                 }
@@ -204,9 +212,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t q = 0; q < nq; ++q) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
                                     B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, j, k)] = th;
                     wsp1_lo[WSP(p, j, k)] = tl;
                 }
@@ -220,9 +229,10 @@ void SumFactorizationFF(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t p = 0; p < nq; ++p) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
                                     B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(i, j, k)] = th;
                     wsp0_lo[WSP(i, j, k)] = tl;
                 }
@@ -244,17 +254,26 @@ void SumFactorizationFF(
 // The same kernel with one team per element
 // ---------------------------------------------------------------------------
 
+// n rounded up to whole warps.  Every team size below goes through this:
+// a team is scheduled in warps anyway, and the threads of a padded team
+// beyond n simply get no iterations of the worksharing loops.  A team
+// smaller than one warp is also unsafe in practice: with nvc++ 25.3 the
+// plane kernel with one element per team gave nan at nq = 4 and 5 (teams
+// of 16 and 25 threads) and correct results from nq = 6 (36 threads), as if
+// the barriers between phases were elided inside a single warp.
+constexpr int ff_round_to_warps(const int n)
+{
+    constexpr int warp = 32;
+    return ((n + warp - 1) / warp) * warp;
+}
+
 // Threads per team of SumFactorizationFFTeams: one per point of the nq^3
 // box, the largest output of any step, rounded up to whole warps.  At
 // nq = 10 this is the CUDA maximum of 1024; at nq <= 4 it is one or two
 // warps, which underfills an SM (several elements per team would be the
 // cure).  thread_limit is an upper bound: fewer threads only mean more
 // iterations per thread in the collapsed loops.
-constexpr int ff_team_size(const int nq)
-{
-    constexpr int warp = 32;
-    return ((nq * nq * nq + warp - 1) / warp) * warp;
-}
+constexpr int ff_team_size(const int nq) { return ff_round_to_warps(nq * nq * nq); }
 
 // SumFactorizationFF with the elements distributed over teams and the
 // threads of a team over the points of each step: the work arrays are
@@ -322,9 +341,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t i = 0; i < nm; ++i) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(i, j, k)], wsp0_lo[WSP(i, j, k)],
                                     B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, j, k)] = th;
                     wsp1_lo[WSP(p, j, k)] = tl;
                 }
@@ -339,9 +359,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t j = 0; j < nm; ++j) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
                                     B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(q, p, k)] = th;
                     wsp0_lo[WSP(q, p, k)] = tl;
                 }
@@ -356,9 +377,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t k = 0; k < nm; ++k) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
                                     B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, q, r)] = th;
                     wsp1_lo[WSP(p, q, r)] = tl;
                 }
@@ -389,9 +411,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t r = 0; r < nq; ++r) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, q, r)], wsp1_lo[WSP(p, q, r)],
                                     B_hi[BAS(k, r)], B_lo[BAS(k, r)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(q, p, k)] = th;
                     wsp0_lo[WSP(q, p, k)] = tl;
                 }
@@ -406,9 +429,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t q = 0; q < nq; ++q) {
-                        ff::mul_add(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
+                        ff::mul_acc(th, tl, wsp0_hi[WSP(q, p, k)], wsp0_lo[WSP(q, p, k)],
                                     B_hi[BAS(j, q)], B_lo[BAS(j, q)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp1_hi[WSP(p, j, k)] = th;
                     wsp1_lo[WSP(p, j, k)] = tl;
                 }
@@ -423,9 +447,10 @@ void SumFactorizationFFTeams(
                     float th = 0.0f;
                     float tl = 0.0f;
                     for (index_t p = 0; p < nq; ++p) {
-                        ff::mul_add(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
+                        ff::mul_acc(th, tl, wsp1_hi[WSP(p, j, k)], wsp1_lo[WSP(p, j, k)],
                                     B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
                     }
+                    ff::renormalize(th, tl);
                     wsp0_hi[WSP(i, j, k)] = th;
                     wsp0_lo[WSP(i, j, k)] = tl;
                 }
@@ -445,7 +470,7 @@ void SumFactorizationFFTeams(
 }
 
 // ---------------------------------------------------------------------------
-// The plane kernel: a team of nq x nq threads per element, register columns
+// The plane kernels: a team of nq x nq threads per element, register columns
 // ---------------------------------------------------------------------------
 
 // Unrolling hint for the short compile-time loops over a register column:
@@ -459,8 +484,8 @@ void SumFactorizationFFTeams(
 #define FF_UNROLL
 #endif
 
-// Elements per team of SumFactorizationFFPlane.  A plane of nq x nq threads
-// is one element; below a few warps per team the SM is underfilled, so low
+// Elements per team of the plane kernels.  A plane of nq x nq threads is
+// one element; below a few warps per team the SM is underfilled, so low
 // orders batch several elements per team.  The default fills about
 // FF_PLANE_THREADS threads (14 elements at nq = 3, 8 at nq = 4, 1 from
 // nq = 9); -DFF_PLANE_BATCH=n forces one batch for every order.
@@ -477,27 +502,230 @@ constexpr int ff_plane_batch([[maybe_unused]] const int nq)
 #endif
 }
 
-// batch elements per team of batch * nq * nq threads.  A thread owns one
-// point of an element's plane and the whole column through it along the
-// first index, held in registers as hi and lo of nq values.  Each phase
-// contracts either along the register column, with no shared-memory
+// The five phases of the plane kernels, one point of one element's plane
+// each.  A thread owns the point and the whole column through it along
+// the first index, held in registers as hi and lo of nq values.  Each
+// phase contracts either along the register column, with no shared-memory
 // traffic but the basis, read by the whole warp as a broadcast, or along
 // one of the plane's directions through the team-shared boxes sm0 and sm1
-// (one pair per element of the batch).  The contraction index is the outer
-// loop and the column index the inner one, so every input value and basis
-// entry is loaded once per column rather than once per output, and the nq
-// accumulation chains of a column are independent.  Five phases with a
-// barrier between them; the two boxes alternate so that no phase writes the
-// box the previous one read.  Every output is still summed in index order,
-// so the result equals the other kernels' bit for bit.
+// (one pair per element b of the team's batch).  The contraction index is
+// the outer loop and the column index the inner one, so every input value
+// and basis entry is loaded once per column rather than once per output,
+// and the nq accumulation chains of a column are independent.  Every
+// output is still summed in index order, so the result equals the other
+// kernels' bit for bit.
 //
 //   A: thread (b,j,k): in(i,j,k)   -> contract i -> s[p]           -> sm0(b,p,j,k)
 //   B: thread (b,q,k): sm0(b,p,j,k)-> contract j -> t[p]           -> sm1(b,p,q,k)
 //   C: thread (b,q,r): sm1(b,p,q,k)-> contract k -> v[p] * JxW     -> sm0(b,p,q,r)
 //   D: thread (b,q,k): sm0(b,p,q,r)-> contract r -> w[p]           -> sm1(b,p,q,k)
 //   E: thread (b,j,k): sm1(b,p,q,k)-> contract q -> x[p], contract p -> out(i,j,k)
+//
+// Between two phases every thread of the team must have finished the
+// earlier one; the kernels below provide that barrier, and the two boxes
+// alternate so that no phase writes the box the previous one read.
 #define SMB(b, i, j, k) ((b) * nq3 + WSP(i, j, k))
 
+template <int nq, typename index_t>
+inline void plane_phase_a(
+    const index_t b, const index_t j, const index_t k,
+    const double* __restrict__ e_in,
+    const float* B_hi, const float* B_lo,
+    float* sm0_hi, float* sm0_lo)
+{
+    constexpr int nm = nq - 1;
+    constexpr int nq3 = nq * nq * nq;
+    float uh[nm];
+    float ul[nm];
+    FF_UNROLL
+    for (index_t i = 0; i < nm; ++i) {
+        ff::split(e_in[DOF(i, j, k)], uh[i], ul[i]);
+    }
+    float sh[nq];
+    float sl[nq];
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        sh[p] = 0.0f;
+        sl[p] = 0.0f;
+    }
+    FF_UNROLL
+    for (index_t i = 0; i < nm; ++i) {
+        FF_UNROLL
+        for (index_t p = 0; p < nq; ++p) {
+            ff::mul_acc(sh[p], sl[p], uh[i], ul[i], B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
+        }
+    }
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        ff::renormalize(sh[p], sl[p]);
+        sm0_hi[SMB(b, p, j, k)] = sh[p];
+        sm0_lo[SMB(b, p, j, k)] = sl[p];
+    }
+}
+
+template <int nq, typename index_t>
+inline void plane_phase_b(
+    const index_t b, const index_t q, const index_t k,
+    const float* B_hi, const float* B_lo,
+    const float* sm0_hi, const float* sm0_lo,
+    float* sm1_hi, float* sm1_lo)
+{
+    constexpr int nm = nq - 1;
+    constexpr int nq3 = nq * nq * nq;
+    float th[nq];
+    float tl[nq];
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        th[p] = 0.0f;
+        tl[p] = 0.0f;
+    }
+    FF_UNROLL
+    for (index_t j = 0; j < nm; ++j) {
+        const float bh = B_hi[BAS(j, q)];
+        const float bl = B_lo[BAS(j, q)];
+        FF_UNROLL
+        for (index_t p = 0; p < nq; ++p) {
+            ff::mul_acc(th[p], tl[p], sm0_hi[SMB(b, p, j, k)], sm0_lo[SMB(b, p, j, k)], bh, bl);
+        }
+    }
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        ff::renormalize(th[p], tl[p]);
+        sm1_hi[SMB(b, p, q, k)] = th[p];
+        sm1_lo[SMB(b, p, q, k)] = tl[p];
+    }
+}
+
+// Direction 2, then the weights and determinant of Jacobi, each JxW value
+// split at its single use.
+template <int nq, typename index_t>
+inline void plane_phase_c(
+    const index_t b, const index_t q, const index_t r,
+    const double* __restrict__ e_JxW,
+    const float* B_hi, const float* B_lo,
+    const float* sm1_hi, const float* sm1_lo,
+    float* sm0_hi, float* sm0_lo)
+{
+    constexpr int nm = nq - 1;
+    constexpr int nq3 = nq * nq * nq;
+    float vh[nq];
+    float vl[nq];
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        vh[p] = 0.0f;
+        vl[p] = 0.0f;
+    }
+    FF_UNROLL
+    for (index_t k = 0; k < nm; ++k) {
+        const float bh = B_hi[BAS(k, r)];
+        const float bl = B_lo[BAS(k, r)];
+        FF_UNROLL
+        for (index_t p = 0; p < nq; ++p) {
+            ff::mul_acc(vh[p], vl[p], sm1_hi[SMB(b, p, q, k)], sm1_lo[SMB(b, p, q, k)], bh, bl);
+        }
+    }
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        float jh;
+        float jl;
+        ff::split(e_JxW[WSP(p, q, r)], jh, jl);
+        ff::renormalize(vh[p], vl[p]);
+        ff::mul(vh[p], vl[p], jh, jl);
+        sm0_hi[SMB(b, p, q, r)] = vh[p];
+        sm0_lo[SMB(b, p, q, r)] = vl[p];
+    }
+}
+
+template <int nq, typename index_t>
+inline void plane_phase_d(
+    const index_t b, const index_t q, const index_t k,
+    const float* B_hi, const float* B_lo,
+    const float* sm0_hi, const float* sm0_lo,
+    float* sm1_hi, float* sm1_lo)
+{
+    constexpr int nq3 = nq * nq * nq;
+    float wh[nq];
+    float wl[nq];
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        wh[p] = 0.0f;
+        wl[p] = 0.0f;
+    }
+    FF_UNROLL
+    for (index_t r = 0; r < nq; ++r) {
+        const float bh = B_hi[BAS(k, r)];
+        const float bl = B_lo[BAS(k, r)];
+        FF_UNROLL
+        for (index_t p = 0; p < nq; ++p) {
+            ff::mul_acc(wh[p], wl[p], sm0_hi[SMB(b, p, q, r)], sm0_lo[SMB(b, p, q, r)], bh, bl);
+        }
+    }
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        ff::renormalize(wh[p], wl[p]);
+        sm1_hi[SMB(b, p, q, k)] = wh[p];
+        sm1_lo[SMB(b, p, q, k)] = wl[p];
+    }
+}
+
+// Direction 1 back, then direction 0 back in registers, join and store the
+// column out(:, j, k).
+template <int nq, typename index_t>
+inline void plane_phase_e(
+    const index_t b, const index_t j, const index_t k,
+    const float* B_hi, const float* B_lo,
+    const float* sm1_hi, const float* sm1_lo,
+    double* __restrict__ e_out)
+{
+    constexpr int nm = nq - 1;
+    constexpr int nq3 = nq * nq * nq;
+    float xh[nq];
+    float xl[nq];
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        xh[p] = 0.0f;
+        xl[p] = 0.0f;
+    }
+    FF_UNROLL
+    for (index_t q = 0; q < nq; ++q) {
+        const float bh = B_hi[BAS(j, q)];
+        const float bl = B_lo[BAS(j, q)];
+        FF_UNROLL
+        for (index_t p = 0; p < nq; ++p) {
+            ff::mul_acc(xh[p], xl[p], sm1_hi[SMB(b, p, q, k)], sm1_lo[SMB(b, p, q, k)], bh, bl);
+        }
+    }
+    float yh[nm];
+    float yl[nm];
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        ff::renormalize(xh[p], xl[p]);
+    }
+    FF_UNROLL
+    for (index_t i = 0; i < nm; ++i) {
+        yh[i] = 0.0f;
+        yl[i] = 0.0f;
+    }
+    FF_UNROLL
+    for (index_t p = 0; p < nq; ++p) {
+        FF_UNROLL
+        for (index_t i = 0; i < nm; ++i) {
+            ff::mul_acc(yh[i], yl[i], xh[p], xl[p], B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
+        }
+    }
+    FF_UNROLL
+    for (index_t i = 0; i < nm; ++i) {
+        ff::renormalize(yh[i], yl[i]);
+        e_out[DOF(i, j, k)] = ff::join(yh[i], yl[i]);
+    }
+}
+
+#undef SMB
+
+// The plane kernel with teams distribute: batch elements per team of
+// batch * nq * nq threads, rounded up to whole warps (ff_round_to_warps),
+// one parallel region per team and a worksharing loop per phase, whose
+// implicit barrier separates the phases.
 template <int nq, int batch = 1, typename index_t = int>
 void SumFactorizationFFPlane(
     const std::size_t nelmt,
@@ -512,7 +740,7 @@ void SumFactorizationFFPlane(
     constexpr int nq3 = nq * nq * nq;
     constexpr int nm3 = nm * nm * nm;
     // the team size only appears in the thread_limit clause
-    [[maybe_unused]] constexpr int team_size = batch * nq * nq;
+    [[maybe_unused]] constexpr int team_size = ff_round_to_warps(batch * nq * nq);
     static_assert(team_size <= 1024, "a CUDA block holds at most 1024 threads");
 
     const std::size_t nteams = (nelmt + batch - 1) / batch;
@@ -532,9 +760,11 @@ void SumFactorizationFFPlane(
         float sm1_hi[batch * nq3];
         float sm1_lo[batch * nq3];
 
-        // The team's elements e0 .. e0 + nb - 1; only the last team is short.
+        // The team's elements e0 .. e0 + batch - 1; the phase loops run over
+        // the full batch with a constant trip count, so that the compiler
+        // can collapse the batch into the thread index, and the guard skips
+        // the missing elements of a short last team.
         const std::size_t e0 = t * batch;
-        const index_t nb = (e0 + batch <= nelmt) ? batch : static_cast<index_t>(nelmt - e0);
 
         #pragma omp parallel
         {
@@ -543,177 +773,57 @@ void SumFactorizationFFPlane(
                 ff::split(basis[i], B_hi[i], B_lo[i]);
             }
 
-            // phase A : load the column in(:, j, k), contract direction 0
             #pragma omp for collapse(3)
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t j = 0; j < nm; ++j) {
                     for (index_t k = 0; k < nm; ++k) {
-                        const double* e_in = in + (e0 + b) * nm3;
-                        float uh[nm];
-                        float ul[nm];
-                        FF_UNROLL
-                        for (index_t i = 0; i < nm; ++i) {
-                            ff::split(e_in[DOF(i, j, k)], uh[i], ul[i]);
-                        }
-                        float sh[nq];
-                        float sl[nq];
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            sh[p] = 0.0f;
-                            sl[p] = 0.0f;
-                        }
-                        FF_UNROLL
-                        for (index_t i = 0; i < nm; ++i) {
-                            FF_UNROLL
-                            for (index_t p = 0; p < nq; ++p) {
-                                ff::mul_add(sh[p], sl[p], uh[i], ul[i], B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
-                            }
-                        }
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            sm0_hi[SMB(b, p, j, k)] = sh[p];
-                            sm0_lo[SMB(b, p, j, k)] = sl[p];
+                        if (e0 + b < nelmt) {
+                            plane_phase_a<nq>(b, j, k, in + (e0 + b) * nm3, B_hi, B_lo, sm0_hi, sm0_lo);
                         }
                     }
                 }
             }
 
-            // phase B : contract direction 1
             #pragma omp for collapse(3)
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t q = 0; q < nq; ++q) {
                     for (index_t k = 0; k < nm; ++k) {
-                        float th[nq];
-                        float tl[nq];
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            th[p] = 0.0f;
-                            tl[p] = 0.0f;
-                        }
-                        FF_UNROLL
-                        for (index_t j = 0; j < nm; ++j) {
-                            const float bh = B_hi[BAS(j, q)];
-                            const float bl = B_lo[BAS(j, q)];
-                            FF_UNROLL
-                            for (index_t p = 0; p < nq; ++p) {
-                                ff::mul_add(th[p], tl[p], sm0_hi[SMB(b, p, j, k)], sm0_lo[SMB(b, p, j, k)], bh, bl);
-                            }
-                        }
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            sm1_hi[SMB(b, p, q, k)] = th[p];
-                            sm1_lo[SMB(b, p, q, k)] = tl[p];
+                        if (e0 + b < nelmt) {
+                            plane_phase_b<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
                         }
                     }
                 }
             }
 
-            // phase C : contract direction 2, multiply with the weights and
-            // determinant of Jacobi (each JxW value split at its single use)
             #pragma omp for collapse(3)
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t q = 0; q < nq; ++q) {
                     for (index_t r = 0; r < nq; ++r) {
-                        const double* e_JxW = JxW + (e0 + b) * nq3;
-                        float vh[nq];
-                        float vl[nq];
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            vh[p] = 0.0f;
-                            vl[p] = 0.0f;
-                        }
-                        FF_UNROLL
-                        for (index_t k = 0; k < nm; ++k) {
-                            const float bh = B_hi[BAS(k, r)];
-                            const float bl = B_lo[BAS(k, r)];
-                            FF_UNROLL
-                            for (index_t p = 0; p < nq; ++p) {
-                                ff::mul_add(vh[p], vl[p], sm1_hi[SMB(b, p, q, k)], sm1_lo[SMB(b, p, q, k)], bh, bl);
-                            }
-                        }
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            float jh;
-                            float jl;
-                            ff::split(e_JxW[WSP(p, q, r)], jh, jl);
-                            ff::mul(vh[p], vl[p], jh, jl);
-                            sm0_hi[SMB(b, p, q, r)] = vh[p];
-                            sm0_lo[SMB(b, p, q, r)] = vl[p];
+                        if (e0 + b < nelmt) {
+                            plane_phase_c<nq>(b, q, r, JxW + (e0 + b) * nq3, B_hi, B_lo,
+                                              sm1_hi, sm1_lo, sm0_hi, sm0_lo);
                         }
                     }
                 }
             }
 
-            // phase D : contract direction 2 back
             #pragma omp for collapse(3)
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t q = 0; q < nq; ++q) {
                     for (index_t k = 0; k < nm; ++k) {
-                        float wh[nq];
-                        float wl[nq];
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            wh[p] = 0.0f;
-                            wl[p] = 0.0f;
-                        }
-                        FF_UNROLL
-                        for (index_t r = 0; r < nq; ++r) {
-                            const float bh = B_hi[BAS(k, r)];
-                            const float bl = B_lo[BAS(k, r)];
-                            FF_UNROLL
-                            for (index_t p = 0; p < nq; ++p) {
-                                ff::mul_add(wh[p], wl[p], sm0_hi[SMB(b, p, q, r)], sm0_lo[SMB(b, p, q, r)], bh, bl);
-                            }
-                        }
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            sm1_hi[SMB(b, p, q, k)] = wh[p];
-                            sm1_lo[SMB(b, p, q, k)] = wl[p];
+                        if (e0 + b < nelmt) {
+                            plane_phase_d<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
                         }
                     }
                 }
             }
 
-            // phase E : contract direction 1 back, then direction 0 back in
-            // registers, join and store the column out(:, j, k)
             #pragma omp for collapse(3) nowait
-            for (index_t b = 0; b < nb; ++b) {
+            for (index_t b = 0; b < batch; ++b) {
                 for (index_t j = 0; j < nm; ++j) {
                     for (index_t k = 0; k < nm; ++k) {
-                        double* e_out = out + (e0 + b) * nm3;
-                        float xh[nq];
-                        float xl[nq];
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            xh[p] = 0.0f;
-                            xl[p] = 0.0f;
-                        }
-                        FF_UNROLL
-                        for (index_t q = 0; q < nq; ++q) {
-                            const float bh = B_hi[BAS(j, q)];
-                            const float bl = B_lo[BAS(j, q)];
-                            FF_UNROLL
-                            for (index_t p = 0; p < nq; ++p) {
-                                ff::mul_add(xh[p], xl[p], sm1_hi[SMB(b, p, q, k)], sm1_lo[SMB(b, p, q, k)], bh, bl);
-                            }
-                        }
-                        float yh[nm];
-                        float yl[nm];
-                        FF_UNROLL
-                        for (index_t i = 0; i < nm; ++i) {
-                            yh[i] = 0.0f;
-                            yl[i] = 0.0f;
-                        }
-                        FF_UNROLL
-                        for (index_t p = 0; p < nq; ++p) {
-                            FF_UNROLL
-                            for (index_t i = 0; i < nm; ++i) {
-                                ff::mul_add(yh[i], yl[i], xh[p], xl[p], B_hi[BAS(i, p)], B_lo[BAS(i, p)]);
-                            }
-                        }
-                        FF_UNROLL
-                        for (index_t i = 0; i < nm; ++i) {
-                            e_out[DOF(i, j, k)] = ff::join(yh[i], yl[i]);
+                        if (e0 + b < nelmt) {
+                            plane_phase_e<nq>(b, j, k, B_hi, B_lo, sm1_hi, sm1_lo, out + (e0 + b) * nm3);
                         }
                     }
                 }
@@ -722,7 +832,129 @@ void SumFactorizationFFPlane(
     }
 }
 
-#undef SMB
+// The same plane kernel with the loop construct: teams loop over the
+// teams and a nested loop per phase, no parallel region and no
+// worksharing loop.  This is the descriptive form nvc++ lowers like
+// OpenACC gang and vector loops: one kernel function, the team-scope
+// arrays in shared memory, and the barrier between two nested loops
+// placed by the compiler.  Compilers that bind a nested loop to the
+// team's initial thread (g++, clang without an enclosing parallel region)
+// run the phases of a team on one thread, which is correct and slow.
+//
+// nvc++ 25.3 spreads a phase loop over the threads only when its constant
+// trip count exceeds 16: with one element per team at nq <= 4 the phases
+// have 9 to 16 iterations and the whole element runs on one thread of the
+// team (1.5 GDoF/s at nq = 4 on Grace Hopper against 12 with a runtime
+// bound).  The default batch of ff_plane_batch never meets this; a batch
+// of 2 or more at nq = 4 does not either.
+template <int nq, int batch = 1, typename index_t = int>
+void SumFactorizationFFPlaneLoop(
+    const std::size_t nelmt,
+    const double* __restrict__ basis,
+    const double* __restrict__ JxW,
+    const double* __restrict__ in,
+    double* __restrict__ out)
+{
+    static_assert(nq >= 2, "nq = p + 2 with p >= 0");
+    static_assert(batch >= 1, "at least one element per team");
+    constexpr int nm = nq - 1;
+    constexpr int nq3 = nq * nq * nq;
+    constexpr int nm3 = nm * nm * nm;
+    // the team size only appears in the thread_limit clause
+    [[maybe_unused]] constexpr int team_size = ff_round_to_warps(batch * nq * nq);
+    static_assert(team_size <= 1024, "a CUDA block holds at most 1024 threads");
+
+    const std::size_t nteams = (nelmt + batch - 1) / batch;
+
+    #pragma omp target \
+        map(to: basis[:nm*nq]) \
+        map(to: JxW[:nelmt*nq3], in[:nelmt*nm3]) \
+        map(from: out[:nelmt*nm3])
+    #pragma omp teams loop thread_limit(team_size)
+    for (std::size_t t = 0; t < nteams; ++t) {
+
+        // Team-shared: the split basis and two nq^3 boxes per element.
+        // nvc++ 25.3 places these in CUDA shared memory only up to about
+        // 8 KB in total (nq <= 7 with one element per team) and elsewhere
+        // in global memory behind L1; it does not support the allocate
+        // directive that would request shared memory.  On Grace Hopper the
+        // placement made no measurable difference at nq = 5..7.
+        float B_hi[nm * nq];
+        float B_lo[nm * nq];
+        float sm0_hi[batch * nq3];
+        float sm0_lo[batch * nq3];
+        float sm1_hi[batch * nq3];
+        float sm1_lo[batch * nq3];
+
+        // The team's elements e0 .. e0 + batch - 1; the phase loops run over
+        // the full batch with a constant trip count, so that the compiler
+        // can collapse the batch into the thread index, and the guard skips
+        // the missing elements of a short last team.
+        const std::size_t e0 = t * batch;
+
+        #pragma omp loop
+        for (index_t i = 0; i < nm * nq; ++i) {
+            ff::split(basis[i], B_hi[i], B_lo[i]);
+        }
+
+        #pragma omp loop collapse(3)
+        for (index_t b = 0; b < batch; ++b) {
+            for (index_t j = 0; j < nm; ++j) {
+                for (index_t k = 0; k < nm; ++k) {
+                    if (e0 + b < nelmt) {
+                        plane_phase_a<nq>(b, j, k, in + (e0 + b) * nm3, B_hi, B_lo, sm0_hi, sm0_lo);
+                    }
+                }
+            }
+        }
+
+        #pragma omp loop collapse(3)
+        for (index_t b = 0; b < batch; ++b) {
+            for (index_t q = 0; q < nq; ++q) {
+                for (index_t k = 0; k < nm; ++k) {
+                    if (e0 + b < nelmt) {
+                        plane_phase_b<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                    }
+                }
+            }
+        }
+
+        #pragma omp loop collapse(3)
+        for (index_t b = 0; b < batch; ++b) {
+            for (index_t q = 0; q < nq; ++q) {
+                for (index_t r = 0; r < nq; ++r) {
+                    if (e0 + b < nelmt) {
+                        plane_phase_c<nq>(b, q, r, JxW + (e0 + b) * nq3, B_hi, B_lo,
+                                          sm1_hi, sm1_lo, sm0_hi, sm0_lo);
+                    }
+                }
+            }
+        }
+
+        #pragma omp loop collapse(3)
+        for (index_t b = 0; b < batch; ++b) {
+            for (index_t q = 0; q < nq; ++q) {
+                for (index_t k = 0; k < nm; ++k) {
+                    if (e0 + b < nelmt) {
+                        plane_phase_d<nq>(b, q, k, B_hi, B_lo, sm0_hi, sm0_lo, sm1_hi, sm1_lo);
+                    }
+                }
+            }
+        }
+
+        #pragma omp loop collapse(3)
+        for (index_t b = 0; b < batch; ++b) {
+            for (index_t j = 0; j < nm; ++j) {
+                for (index_t k = 0; k < nm; ++k) {
+                    if (e0 + b < nelmt) {
+                        plane_phase_e<nq>(b, j, k, B_hi, B_lo, sm1_hi, sm1_lo, out + (e0 + b) * nm3);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #undef FF_UNROLL
 
 #undef WSP
@@ -762,15 +994,23 @@ double relative_error(const std::vector<T>& x, const std::vector<double>& ref)
     return std::sqrt(num) / std::sqrt(den);
 }
 
+// The rates of one timed kernel, for the CSV row.
+struct Rates {
+    double gdofs;
+    double gbs;
+    double norm;
+};
+
 // Time `kernel` on the data in precision T, print its row and return its
-// output.
+// output; the rates go to `rates`.
 template <typename T, int nq>
 std::vector<T> run_precision(
     const char* label, const sumfact_kernel<T> kernel,
     const std::size_t nelmt, const int ntests,
     const std::vector<double>& basis64,
     const std::vector<double>& JxW64,
-    const std::vector<double>& in64)
+    const std::vector<double>& in64,
+    Rates& rates)
 {
     std::vector<T> basis_T;
     std::vector<T> JxW_T;
@@ -792,7 +1032,23 @@ std::vector<T> run_precision(
               << " GB/s = "   << std::setw(9) << byte_rate
               << " norm = "   << std::setprecision(10) << norm2(out) << std::setprecision(6)
               << "\n";
+    rates = Rates{dof_rate, byte_rate, norm2(out)};
     return out;
+}
+
+// One float-float kernel of run_test: its row, its error against the double
+// result and its CSV row (BK_CSV).
+template <int nq>
+double run_kernel(const char* label, const sumfact_kernel<double> kernel, const int batch,
+                  const std::size_t nelmt, const int ntests, const double tol,
+                  const std::vector<double>& basis, const std::vector<double>& JxW,
+                  const std::vector<double>& in, const std::vector<double>& ref)
+{
+    Rates rates{};
+    const double err = relative_error(
+        run_precision<double, nq>(label, kernel, nelmt, ntests, basis, JxW, in, rates), ref);
+    append_csv_row("omp", label, nq, nelmt, batch, rates.gdofs, rates.gbs, rates.norm, err, err <= tol);
+    return err;
 }
 
 // Returns true when the float-float result is within tol of the double one.
@@ -816,28 +1072,39 @@ bool run_test(const std::size_t nelmt, const int ntests, const bool random_data,
               << " fma = " << (ff::hardware_fma ? "hardware" : "library call")
               << "\n";
 
+    Rates rates{};
     const std::vector<double> ref = run_precision<double, nq>(
-        "double", &SumFactorization<double, nq>, nelmt, ntests, basis, JxW, in);
+        "double", &SumFactorization<double, nq>, nelmt, ntests, basis, JxW, in, rates);
+    append_csv_row("omp", "double", nq, nelmt, 0, rates.gdofs, rates.gbs, rates.norm, std::nullopt, true);
     const double err_float = relative_error(run_precision<float, nq>(
-        "float", &SumFactorization<float, nq>, nelmt, ntests, basis, JxW, in), ref);
-    const double err_ff = relative_error(run_precision<double, nq>(
-        "float-float", &SumFactorizationFF<nq>, nelmt, ntests, basis, JxW, in), ref);
-    const double err_teams = relative_error(run_precision<double, nq>(
-        "ff-teams", &SumFactorizationFFTeams<nq>, nelmt, ntests, basis, JxW, in), ref);
-    const double err_plane = relative_error(run_precision<double, nq>(
-        "ff-plane", &SumFactorizationFFPlane<nq, 1>, nelmt, ntests, basis, JxW, in), ref);
+        "float", &SumFactorization<float, nq>, nelmt, ntests, basis, JxW, in, rates), ref);
+    append_csv_row("omp", "float", nq, nelmt, 0, rates.gdofs, rates.gbs, rates.norm, err_float, true);
     constexpr int batch = ff_plane_batch(nq);
     const std::string batch_label = "ff-plane x" + std::to_string(batch);
-    const double err_batch = relative_error(run_precision<double, nq>(
-        batch_label.c_str(), &SumFactorizationFFPlane<nq, batch>, nelmt, ntests, basis, JxW, in), ref);
+    const std::string loop_label = "ff-loop x" + std::to_string(batch);
+    const double err_ff = run_kernel<nq>(
+        "float-float", &SumFactorizationFF<nq>, 0, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_teams = run_kernel<nq>(
+        "ff-teams", &SumFactorizationFFTeams<nq>, 1, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_plane = run_kernel<nq>(
+        "ff-plane", &SumFactorizationFFPlane<nq, 1>, 1, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_batch = run_kernel<nq>(
+        batch_label.c_str(), &SumFactorizationFFPlane<nq, batch>, batch, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_loop = run_kernel<nq>(
+        "ff-loop", &SumFactorizationFFPlaneLoop<nq, 1>, 1, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_loop_batch = run_kernel<nq>(
+        loop_label.c_str(), &SumFactorizationFFPlaneLoop<nq, batch>, batch, nelmt, ntests, tol, basis, JxW, in, ref);
 
-    const bool ok = (err_ff <= tol) && (err_teams <= tol) && (err_plane <= tol) && (err_batch <= tol);
+    const bool ok = (err_ff <= tol) && (err_teams <= tol) && (err_plane <= tol) && (err_batch <= tol)
+                 && (err_loop <= tol) && (err_loop_batch <= tol);
     std::cout << "float        rel. error vs double = " << err_float << "\n"
               << (ok ? "ok" : "FAIL")
               << ": float-float rel. error vs double = " << err_ff
               << ", ff-teams = " << err_teams
               << ", ff-plane = " << err_plane
               << ", x" << batch << " = " << err_batch
+              << ", ff-loop = " << err_loop
+              << ", x" << batch << " = " << err_loop_batch
               << " (tol = " << tol << ")\n";
     return ok;
 }

@@ -7,14 +7,35 @@ The BK1 kernel lives in `bk1_sumfact.h`, generic in the arithmetic type
 float-float kernels with the same interface in double: values are split into
 hi/lo float pairs inside the kernel, the work arrays are separate hi and lo
 float arrays, and the TwoSum/TwoProd helpers come from `float_float.h`, a
-private header of that driver only. `SumFactorizationFF` runs one element
+private header of that driver only (contractions accumulate with `mul_acc`
+and call `renormalize` once per column; every kernel must do this the same
+way to stay bit-identical). `SumFactorizationFF` runs one element
 per thread, `SumFactorizationFFTeams` one element per team with the work
 arrays at team scope and a `parallel for collapse(3)` per step (team size
 from the constexpr `ff_team_size`), and `SumFactorizationFFPlane<nq, batch>`
 a batch of elements per team of `batch * nq * nq` threads, each owning a
 register column, with five phases (default batch from `ff_plane_batch`,
-`-DFF_PLANE_BATCH=n` overrides). The driver runs and checks all of them;
-they must agree bit for bit, as every output is summed in index order.
+`-DFF_PLANE_BATCH=n` overrides); `SumFactorizationFFPlaneLoop` is the same
+kernel with `teams loop` and nested `loop` constructs, sharing the phase
+functions `plane_phase_a..e`. The driver runs and checks all of them; they
+must agree bit for bit, as every output is summed in index order.
+`bk1_ff_cuda.cuh` is the same kernel as a CUDA kernel (`MassOperatorFF<nq>`,
+double storage, float-float inside), compiled only under nvcc;
+`float_float.h` is host and device callable for it. `MassOperatorFF2<nq>`
+in the same header is the same kernel with `float2` pairs and the
+value-returning intrinsic helpers of `float_float2.h` (the pair-layout
+experiment); the two must give identical outputs. `make check_ff_cuda`
+runs both kernels on the host through `cuda/cuda_shim.h` against the double
+reference and against each other (`ok`/`FAIL`); run it after any change to
+the CUDA header or either helper header.
+`make BK1_ff_cuda_plain` (any nvcc, classic runtime API) and
+`make BK1_ff_cuda` (CCCL runtime API of CUDA 13.2+, `cuda::launch`) build
+the GPU drivers, which share `cuda/bk1_ff_driver_common.h`, time the kernel
+and check it the same way. Every driver appends a CSV row per kernel to the file named by
+`BK_CSV` (`append_csv_row` in `bk_common.h`); `cuda/scripts/` builds on
+that (`sweep.sh`, `table.py`, `regs.sh`, `ncu_stats.py`, `sass_count.sh`,
+chained by `run_experiments.sh` into `results/<date>/`) and parses no
+driver text, so keep the CSV columns stable.
 
 ## Build and check
 
