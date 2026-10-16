@@ -146,7 +146,12 @@ check it against the host double reference (`ok`/`FAIL`); they share
 `cuda/BK1_ff_cuda_plain.cu` on the classic CUDA runtime API, for any nvcc
 (`NVCC=...` selects one, `NVARCH=native` is the default architecture,
 `NVCCHOST=/path/to/g++` its host compiler when the first `g++` on the
-path is newer than that nvcc accepts: 11.8 takes GCC up to 11).
+path is newer than that nvcc accepts: 11.8 takes GCC up to 11). With
+`NVCC=nvc++` the driver is compiled by `nvc++ -cuda` instead, which has
+no host compiler version check; `NVARCH` is then a `-gpu` target such as
+`cc90`, and `NVCCEXTRA=-gpu=cuda11.8` selects the bundled 11.8 toolkit
+whose headers have no glibc 2.41 clash:
+`make BK1_ff_cuda_plain NVCC=nvc++ NVARCH=cc90 NVCCEXTRA=-gpu=cuda11.8`.
 `make BK1_ff_cuda` builds `cuda/BK1_ff_cuda.cu` on the CCCL runtime API of
 CUDA 13.2 or later (`CCCL=/path/to/cccl` puts a newer CCCL checkout ahead
 of the toolkit's): the kernel is a functor whose call operator takes the

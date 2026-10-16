@@ -12,7 +12,18 @@ CXXFLAGS=-Wall -pedantic -O3 -std=c++17 $(ARCHFLAGS) -fopenmp
 # cuda::launch runtime API; NVARCH selects the GPU (native = the one present).
 NVCC=nvcc
 NVARCH=native
+# With NVCC=nvc++ the CUDA sources are compiled by nvc++ -cuda (no host
+# compiler version check; NVARCH is then a -gpu target such as cc90, or
+# native for the GPU present at build time; NVCCEXTRA='-gpu=cuda11.8'
+# selects the bundled 11.8 toolkit, whose headers have no glibc 2.41 clash).
+# NVCCPTXINFO is the flag for the ptxas resource report of either compiler.
+ifneq (,$(findstring nvc++,$(NVCC)))
+NVCCFLAGS=-O3 -std=c++17 -cuda $(if $(filter native,$(NVARCH)),,-gpu=$(NVARCH))
+NVCCPTXINFO=-gpu=ptxinfo
+else
 NVCCFLAGS=-O3 -std=c++17 -arch=$(NVARCH) -Xcompiler -Wall,-Wno-unknown-pragmas
+NVCCPTXINFO=-Xptxas -v
+endif
 # CCCL=/path/to/cccl puts a checkout of CCCL (3.2 or later) ahead of the
 # toolkit's own copy when that is too old for the runtime API.
 CCCL=

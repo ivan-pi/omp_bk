@@ -23,7 +23,8 @@
 #   NCU_ORDERS="7 8"     orders for ncu                 NCU_NELMT=200000
 #   NVCCEXTRA=...        extra nvcc flags for the build (e.g. -DFF_CUDA_CONTRACTION_UNROLL=0)
 #   NVCCHOST=/path/g++   nvcc's host compiler (the Makefile's -ccbin), when the first g++ on
-#                        the PATH is newer than the nvcc accepts; NVCC=... selects the nvcc
+#                        the PATH is newer than the nvcc accepts; NVCC=... selects the nvcc,
+#                        NVCC=nvc++ NVARCH=cc90 compiles the CUDA driver with nvc++ -cuda
 #   BK1_FF=./BK1_ff      an OpenMP driver to include in the sweep (built separately, e.g. with nvc++)
 #   NVCXX="nvc++ -mp=gpu ..."  when set, also compiles BK1_ff.cpp with -gpu=ptxinfo for the
 #                        register table of the OpenMP kernels (regs_omp.txt) and with
@@ -56,7 +57,12 @@ echo "results in $OUT"
 
 # 1. build with the ptxas report, and tabulate it
 echo "== build (ptxas -v)"
-if ! make -B BK1_ff_cuda_plain NVCCEXTRA="-Xptxas -v $NVCCEXTRA" > "$OUT/build.log" 2>&1; then
+# the ptxas report flag of the CUDA compiler in use (nvcc or nvc++ -cuda)
+case "${NVCC:-nvcc}" in
+    *nvc++*) ptxinfo='-gpu=ptxinfo' ;;
+    *)       ptxinfo='-Xptxas -v' ;;
+esac
+if ! make -B BK1_ff_cuda_plain NVCCEXTRA="$ptxinfo $NVCCEXTRA" > "$OUT/build.log" 2>&1; then
     echo "build failed; the end of $OUT/build.log:"
     tail -40 "$OUT/build.log"
     exit 1
