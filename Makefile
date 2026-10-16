@@ -8,10 +8,11 @@ else
 ARCHFLAGS=-mcpu=native
 endif
 CXXFLAGS=-Wall -pedantic -O3 -std=c++17 $(ARCHFLAGS) -fopenmp
-# The CUDA driver (make BK1_ff_cuda): nvcc from CUDA 13.2 or later for the
-# cuda::launch runtime API; NVARCH selects the GPU (native = the one present).
-NVCC=nvcc
-NVARCH=native
+# The CUDA drivers: NVCC selects the compiler, NVARCH the GPU (native = the
+# one present); these ?= variables can also come from the environment.
+# make BK1_ff_cuda needs nvcc from CUDA 13.2 or later (cuda::launch).
+NVCC?=nvcc
+NVARCH?=native
 # With NVCC=nvc++ the CUDA sources are compiled by nvc++ -cuda (no host
 # compiler version check; NVARCH is then a -gpu target such as cc90, or
 # native for the GPU present at build time; NVCCEXTRA='-gpu=cuda11.8'
@@ -26,15 +27,15 @@ NVCCPTXINFO=-Xptxas -v
 endif
 # CCCL=/path/to/cccl puts a checkout of CCCL (3.2 or later) ahead of the
 # toolkit's own copy when that is too old for the runtime API.
-CCCL=
+CCCL?=
 NVCCFLAGS+=$(if $(CCCL),-I$(CCCL)/libcudacxx/include -I$(CCCL)/cub -I$(CCCL)/thrust,)
 # NVCCHOST=/path/to/g++ selects nvcc's host compiler (-ccbin): nvcc 11.8
 # accepts GCC up to 11, 12.x up to 12 or 13, and the first g++ on the PATH
 # may be newer.
-NVCCHOST=
+NVCCHOST?=
 NVCCFLAGS+=$(if $(NVCCHOST),-ccbin $(NVCCHOST),)
 # NVCCEXTRA adds flags, e.g. NVCCEXTRA='-Xptxas -v -DFF_CUDA_CONTRACTION_UNROLL=0'
-NVCCEXTRA=
+NVCCEXTRA?=
 NVCCFLAGS+=$(NVCCEXTRA)
 
 

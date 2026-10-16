@@ -62,7 +62,8 @@ case "${NVCC:-nvcc}" in
     *nvc++*) ptxinfo='-gpu=ptxinfo' ;;
     *)       ptxinfo='-Xptxas -v' ;;
 esac
-if ! make -B BK1_ff_cuda_plain NVCCEXTRA="$ptxinfo $NVCCEXTRA" > "$OUT/build.log" 2>&1; then
+if ! make -B BK1_ff_cuda_plain NVCC="${NVCC:-nvcc}" NVARCH="${NVARCH:-native}" NVCCHOST="${NVCCHOST:-}" \
+        NVCCEXTRA="$ptxinfo $NVCCEXTRA" > "$OUT/build.log" 2>&1; then
     echo "build failed; the end of $OUT/build.log:"
     tail -40 "$OUT/build.log"
     exit 1
