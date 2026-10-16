@@ -2,10 +2,14 @@
 # run_experiments.sh -- the standard measurement of the float-float BK1
 # kernels on a GPU node, into one results directory:
 #
-#   regs.txt / regs.csv   ptxas registers and spills of both CUDA kernels
-#                         (and of the OpenMP kernels when NVCXX is set)
-#   sweep.txt / sweep.csv GDoF/s of both CUDA kernels, and of the OpenMP
-#                         kernels when BK1_FF is set, for ORDERS, REPEAT runs
+#   regs.txt              ptxas registers and spills of both CUDA kernels
+#                         (regs_omp.txt, minfo.txt: the OpenMP kernels' registers
+#                         and nvc++'s unroll messages, when NVCXX is set)
+#   sweep.csv / sweep.txt the drivers' own CSV rows (BK_CSV) for ORDERS and
+#                         REPEAT runs, both CUDA kernels and the OpenMP kernels
+#                         when BK1_FF is set, and the GDoF/s table; errors.txt
+#                         the same table of the relative errors; sweep.log the
+#                         drivers' output
 #   sass.txt              instructions per kernel in the SASS
 #   ncu.txt / ncu.csv     Nsight Compute statistics of both CUDA kernels for
 #                         NCU_ORDERS (skipped when ncu is not on the PATH or
@@ -13,7 +17,7 @@
 #
 # Run from the repository root.  Environment:
 #   OUT=results/<date>   results directory
-#   ORDERS=2-8           orders p for the sweep         REPEAT=1   runs per order
+#   ORDERS="2 3 4 5 6 7 8"  orders p for the sweep      REPEAT=1   runs per order
 #   NELMT=1000000        elements                       NTESTS=5   timed runs per kernel
 #   NCU_ORDERS="7 8"     orders for ncu                 NCU_NELMT=200000
 #   NVCCEXTRA=...        extra nvcc flags for the build (e.g. -DFF_CUDA_CONTRACTION_UNROLL=0)
@@ -29,7 +33,7 @@ root=$(cd "$here/../.." && pwd)
 cd "$root"
 
 OUT=${OUT:-results/$(date +%Y%m%d-%H%M%S)}
-ORDERS=${ORDERS:-2-8}
+ORDERS=${ORDERS:-2 3 4 5 6 7 8}
 REPEAT=${REPEAT:-1}
 NELMT=${NELMT:-1000000}
 NTESTS=${NTESTS:-5}
@@ -50,27 +54,25 @@ echo "results in $OUT"
 # 1. build with the ptxas report, and tabulate it
 echo "== build (ptxas -v)"
 make -B BK1_ff_cuda_plain NVCCEXTRA="-Xptxas -v $NVCCEXTRA" > "$OUT/build.log" 2>&1
-"$here/ptxas_table.py" --csv "$OUT/regs.csv" "$OUT/build.log" | tee "$OUT/regs.txt"
+"$here/regs.sh" < "$OUT/build.log" | tee "$OUT/regs.txt"
 if [ -n "${NVCXX:-}" ]; then
     echo "== nvc++ ptxinfo"
     # shellcheck disable=SC2086
     $NVCXX -gpu=ptxinfo -c BK1_ff.cpp -o "$OUT/BK1_ff.o" > "$OUT/nvcxx.log" 2>&1 || true
-    "$here/ptxas_table.py" --csv "$OUT/regs_omp.csv" "$OUT/nvcxx.log" | tee "$OUT/regs_omp.txt"
-    echo "== nvc++ -Minfo=all (loop messages for the plane phases, BK1_ff.cpp lines 500-720)"
+    "$here/regs.sh" < "$OUT/nvcxx.log" | tee "$OUT/regs_omp.txt"
+    echo "== nvc++ -Minfo=all (loop messages of BK1_ff.cpp, the plane phases are lines 500-720)"
     # shellcheck disable=SC2086
     $NVCXX -Minfo=all -c BK1_ff.cpp -o "$OUT/BK1_ff.o" > "$OUT/minfo.log" 2>&1 || true
-    awk '/^ *([5-6][0-9][0-9]|7[0-1][0-9]), /' "$OUT/minfo.log" | grep -i 'unroll\|vector\|loop' | sort -u | tee "$OUT/minfo.txt"
+    grep -i 'unroll' "$OUT/minfo.log" | sort -u | tee "$OUT/minfo.txt"
     rm -f "$OUT/BK1_ff.o"
 fi
 
-# 2. the sweep
+# 2. the sweep: the drivers write their own CSV rows (BK_CSV)
 echo "== sweep"
-omp_arg=()
-if [ -n "${BK1_FF:-}" ]; then
-    omp_arg=(--omp "$BK1_FF")
-fi
-"$here/sweep.py" --cuda ./BK1_ff_cuda_plain "${omp_arg[@]}" --orders "$ORDERS" --nelmt "$NELMT" \
-    --ntests "$NTESTS" --repeat "$REPEAT" --csv "$OUT/sweep.csv" | tee "$OUT/sweep.txt"
+ORDERS="$ORDERS" REPEAT="$REPEAT" NELMT="$NELMT" NTESTS="$NTESTS" \
+    "$here/sweep.sh" "$OUT/sweep.csv" ./BK1_ff_cuda_plain ${BK1_FF:+"$BK1_FF"} > "$OUT/sweep.log" 2>&1 || true
+"$here/table.py" "$OUT/sweep.csv" | tee "$OUT/sweep.txt"
+"$here/table.py" "$OUT/sweep.csv" error > "$OUT/errors.txt"
 
 # 3. instructions per kernel
 echo "== sass"

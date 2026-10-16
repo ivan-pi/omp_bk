@@ -9,8 +9,9 @@ the occupancy limits, executed instructions, pipe utilisation of fma, fp64,
 alu and lsu, shared-memory load and store instructions and bank conflicts,
 and the warp stall reasons in cycles per issued instruction), skipping the
 driver's warm-up launches, and prints one table per nq with a column per
-kernel.  Metrics the local ncu does not know are dropped (ncu --query-metrics
-is consulted first), so the script works across ncu versions.
+kernel.  The metric list is checked against ncu --query-metrics first and
+metrics that ncu does not list are left out; --drop leaves out more.  The
+CSV that ncu prints is read with the csv module, nothing else is parsed.
 
     cuda/scripts/ncu_stats.py --orders 7 8                      # MassOperatorFF and MassOperatorFF2, nq = 9, 10
     cuda/scripts/ncu_stats.py --orders 8 --kernels MassOperatorFF2 --csv ncu.csv
@@ -27,7 +28,6 @@ import argparse
 import csv
 import io
 import os
-import re
 import subprocess
 import sys
 
@@ -66,7 +66,8 @@ METRICS += [(f'smsp__average_warps_issue_stalled_{s}_per_issue_active.ratio', f'
 
 
 def known_metrics(ncu):
-    """Base names ncu --query-metrics lists, or None when the query fails."""
+    """Base names ncu --query-metrics lists (first word of each line with a
+    '__' in it), or None when the query fails."""
     try:
         out = subprocess.run([ncu, '--query-metrics'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, check=False).stdout
@@ -76,17 +77,20 @@ def known_metrics(ncu):
     names = set()
     for line in out.splitlines():
         parts = line.split()
-        if parts and re.match(r'^[a-z][a-z0-9_]*__', parts[0]):
+        if parts and '__' in parts[0]:
             names.add(parts[0])
     return names or None
 
 
 def parse_csv(text):
-    """{metric name: (value, unit)} from ncu --csv output for one kernel launch."""
-    lines = [l for l in text.splitlines() if l.startswith('"') or l.startswith('ID,')]
-    if not lines:
+    """{metric name: (value, unit)} from ncu --csv output for one kernel launch.
+    ncu prints its CSV with a header line that starts with "ID"; lines before
+    it (==PROF== messages) are skipped."""
+    lines = text.splitlines()
+    start = next((i for i, l in enumerate(lines) if l.startswith('"ID"') or l.startswith('ID,')), None)
+    if start is None:
         return {}
-    reader = csv.DictReader(io.StringIO('\n'.join(lines)))
+    reader = csv.DictReader(io.StringIO('\n'.join(lines[start:])))
     values = {}
     for row in reader:
         name = row.get('Metric Name')
@@ -102,28 +106,21 @@ def parse_csv(text):
 
 
 def profile(args, kernel, p, metrics):
-    """Run ncu for one kernel and order; returns ({metric: (value, unit)}, metrics kept)."""
-    metrics = list(metrics)
-    for _ in range(len(metrics)):
-        cmd = [args.ncu, '--csv', '--kernel-name', kernel, '--launch-skip', str(args.skip),
-               '--launch-count', '1', '--metrics', ','.join(metrics),
-               args.binary, str(p), str(args.nelmt), str(args.ntests)]
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        err = proc.stderr + proc.stdout
-        bad = re.search(r"metric[^\n]*?([a-z][a-z0-9_]*__[a-z0-9_.]+)", err) if proc.returncode != 0 else None
-        if proc.returncode == 0:
-            if args.raw:
-                os.makedirs(args.raw, exist_ok=True)
-                with open(os.path.join(args.raw, f'{kernel.replace(":", "_")}_p{p}.csv'), 'w') as fh:
-                    fh.write(proc.stdout)
-            return parse_csv(proc.stdout), metrics
-        if bad and bad.group(1) in metrics:
-            print(f'dropping metric {bad.group(1)} (not available in this ncu)', file=sys.stderr)
-            metrics.remove(bad.group(1))
-            continue
-        print(f'ncu failed for {kernel} p={p}:\n{err.strip()[-2000:]}', file=sys.stderr)
-        return {}, metrics
-    return {}, metrics
+    """Run ncu for one kernel and order; {metric: (value, unit)}, empty on failure."""
+    cmd = [args.ncu, '--csv', '--kernel-name', kernel, '--launch-skip', str(args.skip),
+           '--launch-count', '1', '--metrics', ','.join(metrics),
+           args.binary, str(p), str(args.nelmt), str(args.ntests)]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        print(f'ncu failed for {kernel} p={p} (exit {proc.returncode}):', file=sys.stderr)
+        print((proc.stderr + proc.stdout).strip()[-2000:], file=sys.stderr)
+        print('a metric this ncu rejects can be left out with --drop NAME', file=sys.stderr)
+        return {}
+    if args.raw:
+        os.makedirs(args.raw, exist_ok=True)
+        with open(os.path.join(args.raw, f'{kernel.replace(":", "_")}_p{p}.csv'), 'w') as fh:
+            fh.write(proc.stdout)
+    return parse_csv(proc.stdout)
 
 
 def fmt(value, unit):
@@ -151,22 +148,22 @@ def main():
     ap.add_argument('--csv', metavar='FILE', help='write every metric to this CSV')
     ap.add_argument('--raw', metavar='DIR', help='keep the ncu CSV of every run in this directory')
     ap.add_argument('--top-stalls', type=int, default=6, help='stall reasons to print per column (default 6)')
+    ap.add_argument('--drop', nargs='*', default=[], metavar='METRIC', help='metrics to leave out')
     args = ap.parse_args()
 
     known = known_metrics(args.ncu)
-    metrics = [m for m, _ in METRICS]
+    metrics = [m for m, _ in METRICS if m not in args.drop]
     if known is not None:
         metrics = [m for m in metrics if m.split('.')[0] in known]
-        dropped = sorted({m for m, _ in METRICS} - set(metrics))
-        if dropped:
-            print('not in this ncu: ' + ', '.join(dropped), file=sys.stderr)
+    dropped = sorted({m for m, _ in METRICS} - set(metrics))
+    if dropped:
+        print('left out: ' + ', '.join(dropped), file=sys.stderr)
     labels = dict(METRICS)
 
     results = {}   # (p, kernel) -> {metric: (value, unit)}
     for p in args.orders:
         for kernel in args.kernels:
-            values, metrics = profile(args, kernel, p, metrics)
-            results[(p, kernel)] = values
+            results[(p, kernel)] = profile(args, kernel, p, metrics)
 
     rows_out = []
     for p in args.orders:

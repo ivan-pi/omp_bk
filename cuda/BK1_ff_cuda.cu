@@ -137,7 +137,7 @@ bool run_test(const bk::ffdrv::Args& args)
     }
     stream.sync();
 
-    return bk::ffdrv::report("float-float", elapsed, out, data.JxW.size(), data.ref, args.tol);
+    return bk::ffdrv::report("float-float", elapsed, out, data.JxW.size(), data.ref, args.tol, nq, args.nelmt, batch);
 }
 
 } // namespace

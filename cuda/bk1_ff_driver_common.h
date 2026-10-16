@@ -5,7 +5,7 @@
 // share: the command line and environment of BK1_ff, the test data with
 // its double reference computed on the host (bk1_sumfact.h), the dispatch
 // from the runtime order p to the compile-time nq, and the report of one
-// timed run with the ok/FAIL check.
+// timed run with the ok/FAIL check (and its CSV row when BK_CSV is set).
 
 #include <array>
 #include <cmath>
@@ -115,12 +115,14 @@ inline void print_header(const std::size_t nelmt, const int nq, const bool rando
 // The row of a timed run (elapsed seconds of the fastest of ntests) and the
 // check; returns ok.
 inline bool report(const char* label, const double elapsed, const std::vector<double>& out,
-                   const std::size_t size_JxW, const std::vector<double>& ref, const double tol)
+                   const std::size_t size_JxW, const std::vector<double>& ref, const double tol,
+                   const int nq, const std::size_t nelmt, const unsigned int batch)
 {
     const double dof_rate  = 1.0e-9 * static_cast<double>(out.size()) / elapsed;
     const double byte_rate = 1.0e-9 * sizeof(double) * static_cast<double>(2 * out.size() + size_JxW) / elapsed;
     const double err = relative_error(out, ref);
     const bool ok = err <= tol;
+    append_csv_row("cuda", label, nq, nelmt, static_cast<int>(batch), dof_rate, byte_rate, norm2(out), err, ok);
     std::cout << std::left << std::setw(12) << label << std::right
               << " GDoF/s = " << std::setw(9) << dof_rate
               << " GB/s = "   << std::setw(9) << byte_rate

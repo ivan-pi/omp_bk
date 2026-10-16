@@ -31,10 +31,11 @@ the CUDA header or either helper header.
 `make BK1_ff_cuda_plain` (any nvcc, classic runtime API) and
 `make BK1_ff_cuda` (CCCL runtime API of CUDA 13.2+, `cuda::launch`) build
 the GPU drivers, which share `cuda/bk1_ff_driver_common.h`, time the kernel
-and check it the same way. `cuda/scripts/` holds the measurement scripts
-(`run_experiments.sh` chains `ptxas_table.py`, `sweep.py`, `sass_count.sh`
-and `ncu_stats.py` into `results/<date>/`); keep their parsers in step
-with the drivers' output format.
+and check it the same way. Every driver appends a CSV row per kernel to the file named by
+`BK_CSV` (`append_csv_row` in `bk_common.h`); `cuda/scripts/` builds on
+that (`sweep.sh`, `table.py`, `regs.sh`, `ncu_stats.py`, `sass_count.sh`,
+chained by `run_experiments.sh` into `results/<date>/`) and parses no
+driver text, so keep the CSV columns stable.
 
 ## Build and check
 

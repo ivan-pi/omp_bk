@@ -107,6 +107,7 @@ status 1 on failure:
 ```sh
 ./BK1_ff <p> [nelmt] [ntests]     # same arguments and constant data as BK1; the float row prints BK1's norm
 BK_RANDOM=1 ./BK1_ff 2            # pseudo-random data (the same as BK1_amx's)
+BK_CSV=rows.csv ./BK1_ff 2        # also append one CSV row per kernel to rows.csv (all drivers)
 for p in 1 2 3 4 5 6 7 8; do ./BK1_ff $p 4096 1 | tail -1; done   # the check per order
 ```
 
@@ -172,38 +173,43 @@ checks indexing, phases and batching, not the execution by many threads.
 
 ### Measurement scripts
 
-`cuda/scripts/` holds the scripts for the GPU experiments; all run from any
-directory and take `--help`:
+All drivers append one CSV row per kernel and run to the file named by
+`BK_CSV` (`driver,kernel,nq,nelmt,batch,gdofs,gbs,norm,error,ok`, header
+first when the file is new), so a sweep is a shell loop and nothing has to
+be parsed. The scripts in `cuda/scripts/` are built on that and on the CSV
+that `ncu` prints; none of them interprets the drivers' text output.
 
 ```sh
-cuda/scripts/run_experiments.sh                 # build with ptxas -v, sweep, SASS counts, ncu -> results/<date>/
-ORDERS=1-8 REPEAT=2 BK1_FF=./BK1_ff cuda/scripts/run_experiments.sh   # with the OpenMP driver in the sweep
-make -B BK1_ff_cuda_plain NVCCEXTRA='-Xptxas -v' 2>&1 | cuda/scripts/ptxas_table.py   # registers and spills per kernel
-nvc++ ... -gpu=ptxinfo -c BK1_ff.cpp 2>&1 | cuda/scripts/ptxas_table.py              # the same for the OpenMP kernels
-cuda/scripts/sweep.py --cuda ./BK1_ff_cuda_plain --omp ./BK1_ff --orders 2-8 --repeat 2 --csv sweep.csv
+cuda/scripts/sweep.sh sweep.csv ./BK1_ff_cuda_plain ./BK1_ff   # ORDERS="2 3 4 5 6 7 8" REPEAT=1 NELMT=1000000 NTESTS=5
+cuda/scripts/table.py sweep.csv                 # best GDoF/s by kernel and nq, the run-to-run spread, failed checks
+cuda/scripts/table.py sweep.csv error           # the relative errors instead
+make -B BK1_ff_cuda_plain NVCCEXTRA='-Xptxas -v' 2>&1 | cuda/scripts/regs.sh   # registers, stack, spills per kernel
+nvc++ ... -gpu=ptxinfo -c BK1_ff.cpp 2>&1 | cuda/scripts/regs.sh              # the same for the OpenMP kernels
 cuda/scripts/ncu_stats.py --orders 7 8          # Nsight Compute statistics of both CUDA kernels at nq = 9, 10
 cuda/scripts/ncu_stats.py --binary ./BK1_ff --kernels regex:PlaneLoopILi10ELi1E --skip 0 --orders 8
 cuda/scripts/sass_count.sh BK1_ff_cuda_plain BK1_ff   # instructions per kernel in the SASS
+cuda/scripts/run_experiments.sh                 # all of the above into results/<date>/
+BK1_FF=./BK1_ff NVCXX="nvc++ <flags>" REPEAT=2 cuda/scripts/run_experiments.sh
 ```
 
-`sweep.py` runs the drivers over a range of orders, parses their rows into
-a CSV (driver, kernel, p, nq, nelmt, batch, run, GDoF/s, GB/s, norm, error,
-ok), prints a table of GDoF/s by kernel and nq and the largest run-to-run
-spread, and fails if any `ok` line or the identical check failed.
-`ptxas_table.py` tabulates a ptxas report from nvcc or nvc++ by kernel,
-nq and batch. `ncu_stats.py` profiles each kernel and order with an
-explicit metric list (duration, throughputs, issue-slot utilisation,
-eligible and active warps per scheduler, achieved occupancy, registers and
-occupancy limits, executed instructions, pipe utilisation of fma, fp64,
-alu and lsu, shared-memory loads, stores and bank conflicts, and the warp
-stall reasons in cycles per issued instruction), skipping the warm-up
-launches, drops metrics the local ncu does not know, and prints one table
-per nq with a column per kernel; the OpenMP kernels can be profiled with
-a `regex:` kernel name. `run_experiments.sh` chains them into a results
-directory with the build log and the GPU and driver versions; the
-environment variables at its top select the orders, repeats, element
-counts, extra nvcc flags and the OpenMP driver. `results/` is ignored by
-git.
+`sweep.sh` runs each driver for every order (and `REPEAT` times) with
+`BK_CSV` set and ends with the table; `table.py` pivots the CSV with the
+csv module. `regs.sh` is an awk over the fixed strings of a ptxas report,
+with `cu++filt` for the names when it is on the path. `ncu_stats.py`
+runs ncu per kernel and order with a fixed metric list (duration,
+throughputs, issue-slot utilisation, eligible and active warps per
+scheduler, achieved occupancy, registers and occupancy limits, executed
+instructions, pipe utilisation of fma, fp64, alu and lsu, shared-memory
+loads, stores and bank conflicts, warp stall reasons), skipping the
+warm-up launches, reads the CSV ncu prints and shows one table per nq
+with a column per kernel; metrics the local `ncu --query-metrics` does not
+list are left out, `--drop` leaves out more, and the OpenMP kernels are
+selected with a `regex:` name. `run_experiments.sh` chains them into a
+results directory with the build log, the drivers' output and the GPU and
+driver versions; its environment variables select orders, repeats,
+element counts, extra nvcc flags, the OpenMP driver and an nvc++ command
+for the OpenMP register table and unroll messages. `results/` is ignored
+by git.
 
 ## Apple AMX version of BK1
 

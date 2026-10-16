@@ -138,8 +138,8 @@ bool run_test(const bk::ffdrv::Args& args)
     cudaEventDestroy(stop);
     cudaStreamDestroy(stream);
 
-    bool ok = bk::ffdrv::report("float-float", elapsed, out, data.JxW.size(), data.ref, args.tol);
-    ok = bk::ffdrv::report("ff-float2", elapsed2, out2, data.JxW.size(), data.ref, args.tol) && ok;
+    bool ok = bk::ffdrv::report("float-float", elapsed, out, data.JxW.size(), data.ref, args.tol, nq, args.nelmt, batch);
+    ok = bk::ffdrv::report("ff-float2", elapsed2, out2, data.JxW.size(), data.ref, args.tol, nq, args.nelmt, batch) && ok;
     std::size_t differ = 0;
     for (std::size_t i = 0; i < out.size(); ++i) {
         if (out2[i] != out[i]) {

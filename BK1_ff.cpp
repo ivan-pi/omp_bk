@@ -994,15 +994,23 @@ double relative_error(const std::vector<T>& x, const std::vector<double>& ref)
     return std::sqrt(num) / std::sqrt(den);
 }
 
+// The rates of one timed kernel, for the CSV row.
+struct Rates {
+    double gdofs;
+    double gbs;
+    double norm;
+};
+
 // Time `kernel` on the data in precision T, print its row and return its
-// output.
+// output; the rates go to `rates`.
 template <typename T, int nq>
 std::vector<T> run_precision(
     const char* label, const sumfact_kernel<T> kernel,
     const std::size_t nelmt, const int ntests,
     const std::vector<double>& basis64,
     const std::vector<double>& JxW64,
-    const std::vector<double>& in64)
+    const std::vector<double>& in64,
+    Rates& rates)
 {
     std::vector<T> basis_T;
     std::vector<T> JxW_T;
@@ -1024,7 +1032,23 @@ std::vector<T> run_precision(
               << " GB/s = "   << std::setw(9) << byte_rate
               << " norm = "   << std::setprecision(10) << norm2(out) << std::setprecision(6)
               << "\n";
+    rates = Rates{dof_rate, byte_rate, norm2(out)};
     return out;
+}
+
+// One float-float kernel of run_test: its row, its error against the double
+// result and its CSV row (BK_CSV).
+template <int nq>
+double run_kernel(const char* label, const sumfact_kernel<double> kernel, const int batch,
+                  const std::size_t nelmt, const int ntests, const double tol,
+                  const std::vector<double>& basis, const std::vector<double>& JxW,
+                  const std::vector<double>& in, const std::vector<double>& ref)
+{
+    Rates rates{};
+    const double err = relative_error(
+        run_precision<double, nq>(label, kernel, nelmt, ntests, basis, JxW, in, rates), ref);
+    append_csv_row("omp", label, nq, nelmt, batch, rates.gdofs, rates.gbs, rates.norm, err, err <= tol);
+    return err;
 }
 
 // Returns true when the float-float result is within tol of the double one.
@@ -1048,25 +1072,28 @@ bool run_test(const std::size_t nelmt, const int ntests, const bool random_data,
               << " fma = " << (ff::hardware_fma ? "hardware" : "library call")
               << "\n";
 
+    Rates rates{};
     const std::vector<double> ref = run_precision<double, nq>(
-        "double", &SumFactorization<double, nq>, nelmt, ntests, basis, JxW, in);
+        "double", &SumFactorization<double, nq>, nelmt, ntests, basis, JxW, in, rates);
+    append_csv_row("omp", "double", nq, nelmt, 0, rates.gdofs, rates.gbs, rates.norm, std::nullopt, true);
     const double err_float = relative_error(run_precision<float, nq>(
-        "float", &SumFactorization<float, nq>, nelmt, ntests, basis, JxW, in), ref);
-    const double err_ff = relative_error(run_precision<double, nq>(
-        "float-float", &SumFactorizationFF<nq>, nelmt, ntests, basis, JxW, in), ref);
-    const double err_teams = relative_error(run_precision<double, nq>(
-        "ff-teams", &SumFactorizationFFTeams<nq>, nelmt, ntests, basis, JxW, in), ref);
-    const double err_plane = relative_error(run_precision<double, nq>(
-        "ff-plane", &SumFactorizationFFPlane<nq, 1>, nelmt, ntests, basis, JxW, in), ref);
+        "float", &SumFactorization<float, nq>, nelmt, ntests, basis, JxW, in, rates), ref);
+    append_csv_row("omp", "float", nq, nelmt, 0, rates.gdofs, rates.gbs, rates.norm, err_float, true);
     constexpr int batch = ff_plane_batch(nq);
     const std::string batch_label = "ff-plane x" + std::to_string(batch);
-    const double err_batch = relative_error(run_precision<double, nq>(
-        batch_label.c_str(), &SumFactorizationFFPlane<nq, batch>, nelmt, ntests, basis, JxW, in), ref);
-    const double err_loop = relative_error(run_precision<double, nq>(
-        "ff-loop", &SumFactorizationFFPlaneLoop<nq, 1>, nelmt, ntests, basis, JxW, in), ref);
     const std::string loop_label = "ff-loop x" + std::to_string(batch);
-    const double err_loop_batch = relative_error(run_precision<double, nq>(
-        loop_label.c_str(), &SumFactorizationFFPlaneLoop<nq, batch>, nelmt, ntests, basis, JxW, in), ref);
+    const double err_ff = run_kernel<nq>(
+        "float-float", &SumFactorizationFF<nq>, 0, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_teams = run_kernel<nq>(
+        "ff-teams", &SumFactorizationFFTeams<nq>, 1, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_plane = run_kernel<nq>(
+        "ff-plane", &SumFactorizationFFPlane<nq, 1>, 1, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_batch = run_kernel<nq>(
+        batch_label.c_str(), &SumFactorizationFFPlane<nq, batch>, batch, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_loop = run_kernel<nq>(
+        "ff-loop", &SumFactorizationFFPlaneLoop<nq, 1>, 1, nelmt, ntests, tol, basis, JxW, in, ref);
+    const double err_loop_batch = run_kernel<nq>(
+        loop_label.c_str(), &SumFactorizationFFPlaneLoop<nq, batch>, batch, nelmt, ntests, tol, basis, JxW, in, ref);
 
     const bool ok = (err_ff <= tol) && (err_teams <= tol) && (err_plane <= tol) && (err_batch <= tol)
                  && (err_loop <= tol) && (err_loop_batch <= tol);
