@@ -85,8 +85,10 @@ fi
 echo "== sweep"
 ORDERS="$ORDERS" REPEAT="$REPEAT" NELMT="$NELMT" NTESTS="$NTESTS" \
     "$here/sweep.sh" "$OUT/sweep.csv" ./BK1_ff_cuda_plain ${BK1_FF:+"$BK1_FF"} > "$OUT/sweep.log" 2>&1 || true
-"$here/table.py" "$OUT/sweep.csv" | tee "$OUT/sweep.txt"
-"$here/table.py" "$OUT/sweep.csv" error > "$OUT/errors.txt"
+# table.py exits 1 when a check failed; the chain goes on and says so at the end
+sweep_status=0
+"$here/table.py" "$OUT/sweep.csv" | tee "$OUT/sweep.txt" || sweep_status=1
+"$here/table.py" "$OUT/sweep.csv" error > "$OUT/errors.txt" || true
 
 # 3. instructions per kernel
 echo "== sass"
@@ -104,5 +106,9 @@ if [ "${NCU:-1}" != "0" ] && command -v ncu >/dev/null 2>&1; then
         --csv "$OUT/ncu.csv" --reports "$OUT/ncu_reports" | tee "$OUT/ncu.txt"
 else
     echo "== ncu skipped (not on the PATH or NCU=0)"
+fi
+if [ $sweep_status -ne 0 ]; then
+    echo "done: $OUT (a sweep check FAILED, see errors.txt)"
+    exit 1
 fi
 echo "done: $OUT"
