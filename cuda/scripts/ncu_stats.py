@@ -75,8 +75,9 @@ LABELS = dict(METRICS)
 def import_ncu_report(ncu, python_path):
     """The ncu_report module: the installed package (pip install ncu-report)
     unless --python-path / NCU_PYTHON_PATH, extras/python next to the
-    (resolved) ncu binary, or a nsight-compute installation nearby holds one,
-    which then comes first."""
+    (resolved) ncu binary, NVHPC's profilers/Nsight_Compute (NVHPC_ROOT) or a
+    nsight-compute-* directory of a toolkit (CUDA_HOME) holds one, which then
+    comes first."""
     candidates = []
     if python_path:
         candidates.append(python_path)
@@ -87,7 +88,12 @@ def import_ncu_report(ncu, python_path):
         real = os.path.dirname(os.path.realpath(exe))
         candidates.append(os.path.join(real, 'extras', 'python'))
         candidates.extend(glob.glob(os.path.join(os.path.dirname(real), 'nsight-compute-*', 'extras', 'python')))
+    for root in ('NVHPC_ROOT', 'NVHPC', 'CUDA_HOME', 'CUDA_PATH'):
+        if os.environ.get(root):
+            candidates.append(os.path.join(os.environ[root], 'profilers', 'Nsight_Compute', 'extras', 'python'))
+            candidates.extend(glob.glob(os.path.join(os.environ[root], 'nsight-compute-*', 'extras', 'python')))
     candidates.extend(glob.glob('/opt/nvidia/nsight-compute/*/extras/python'))
+    candidates.extend(glob.glob('/usr/local/cuda/nsight-compute-*/extras/python'))
     for path in candidates:
         if os.path.isfile(os.path.join(path, 'ncu_report.py')):
             sys.path.insert(0, path)
