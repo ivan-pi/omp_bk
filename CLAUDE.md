@@ -31,7 +31,10 @@ the CUDA header or either helper header.
 `make BK1_ff_cuda_plain` (any nvcc, classic runtime API) and
 `make BK1_ff_cuda` (CCCL runtime API of CUDA 13.2+, `cuda::launch`) build
 the GPU drivers, which share `cuda/bk1_ff_driver_common.h`, time the kernel
-and check it the same way.
+and check it the same way. `cuda/scripts/` holds the measurement scripts
+(`run_experiments.sh` chains `ptxas_table.py`, `sweep.py`, `sass_count.sh`
+and `ncu_stats.py` into `results/<date>/`); keep their parsers in step
+with the drivers' output format.
 
 ## Build and check
 

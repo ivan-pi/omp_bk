@@ -11,3 +11,4 @@ bw_test
 amx_pipe
 accel_gemm
 *.o
+results/

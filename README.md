@@ -170,6 +170,41 @@ and against each other bit for bit (`ok`/`FAIL`, exit status 1 on
 failure); they agree with the OpenMP kernels bit for bit. The stand-in
 checks indexing, phases and batching, not the execution by many threads.
 
+### Measurement scripts
+
+`cuda/scripts/` holds the scripts for the GPU experiments; all run from any
+directory and take `--help`:
+
+```sh
+cuda/scripts/run_experiments.sh                 # build with ptxas -v, sweep, SASS counts, ncu -> results/<date>/
+ORDERS=1-8 REPEAT=2 BK1_FF=./BK1_ff cuda/scripts/run_experiments.sh   # with the OpenMP driver in the sweep
+make -B BK1_ff_cuda_plain NVCCEXTRA='-Xptxas -v' 2>&1 | cuda/scripts/ptxas_table.py   # registers and spills per kernel
+nvc++ ... -gpu=ptxinfo -c BK1_ff.cpp 2>&1 | cuda/scripts/ptxas_table.py              # the same for the OpenMP kernels
+cuda/scripts/sweep.py --cuda ./BK1_ff_cuda_plain --omp ./BK1_ff --orders 2-8 --repeat 2 --csv sweep.csv
+cuda/scripts/ncu_stats.py --orders 7 8          # Nsight Compute statistics of both CUDA kernels at nq = 9, 10
+cuda/scripts/ncu_stats.py --binary ./BK1_ff --kernels regex:PlaneLoopILi10ELi1E --skip 0 --orders 8
+cuda/scripts/sass_count.sh BK1_ff_cuda_plain BK1_ff   # instructions per kernel in the SASS
+```
+
+`sweep.py` runs the drivers over a range of orders, parses their rows into
+a CSV (driver, kernel, p, nq, nelmt, batch, run, GDoF/s, GB/s, norm, error,
+ok), prints a table of GDoF/s by kernel and nq and the largest run-to-run
+spread, and fails if any `ok` line or the identical check failed.
+`ptxas_table.py` tabulates a ptxas report from nvcc or nvc++ by kernel,
+nq and batch. `ncu_stats.py` profiles each kernel and order with an
+explicit metric list (duration, throughputs, issue-slot utilisation,
+eligible and active warps per scheduler, achieved occupancy, registers and
+occupancy limits, executed instructions, pipe utilisation of fma, fp64,
+alu and lsu, shared-memory loads, stores and bank conflicts, and the warp
+stall reasons in cycles per issued instruction), skipping the warm-up
+launches, drops metrics the local ncu does not know, and prints one table
+per nq with a column per kernel; the OpenMP kernels can be profiled with
+a `regex:` kernel name. `run_experiments.sh` chains them into a results
+directory with the build log and the GPU and driver versions; the
+environment variables at its top select the orders, repeats, element
+counts, extra nvcc flags and the OpenMP driver. `results/` is ignored by
+git.
+
 ## Apple AMX version of BK1
 
 `amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX
