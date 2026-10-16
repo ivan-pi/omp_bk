@@ -5,8 +5,8 @@
     cuda/scripts/table.py sweep.csv gbs        # another column: gbs, error
     cuda/scripts/table.py sweep.csv gdofs min  # worst run instead of the best
 
-A kernel is a (driver, kernel, batch) triple, so "ff-loop" and "ff-loop x14"
-are separate lines.  With repeated runs the last line gives the largest
+A line is a (driver, kernel) pair; the OpenMP driver's "ff-loop x14" style
+labels are their own lines, the CUDA driver's per-order default batch is not.  With repeated runs the last line gives the largest
 run-to-run spread of GDoF/s of any kernel and order, in percent.
 """
 
@@ -29,12 +29,14 @@ def main():
     for r in rows:
         if r[column] == '':
             continue
-        key = (r['driver'], r['kernel'], r['batch'])
+        # the OpenMP driver's labels carry the batch ("ff-loop x8"); the
+        # CUDA driver's batch is the launch default per order, not a variant
+        key = (r['driver'], r['kernel'])
         values.setdefault(key, {}).setdefault(int(r['nq']), []).append(float(r[column]))
     nqs = sorted({nq for per in values.values() for nq in per})
     print(f"{column + ' by nq':<26}" + ''.join(f'{nq:>9}' for nq in nqs))
     for key in sorted(values):
-        driver, kernel, batch = key
+        driver, kernel = key
         label = f'{driver}:{kernel}'
         per = values[key]
         cells = []
