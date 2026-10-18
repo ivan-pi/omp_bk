@@ -3,11 +3,14 @@
 // arrays, with `loop vector` phases inside.
 //
 // Observed with nvc++ 25.3 (NVHPC, linuxarm64) on GH200: with the cache
-// directive the kernel faults (CUDA_ERROR_ILLEGAL_INSTRUCTION for n = 4,
-// CUDA_ERROR_MISALIGNED_ADDRESS for n = 7..10); without it (-DNO_CACHE) the
-// same kernel is correct at every n. The same directive at the top of a gang
-// loop without a worker loop below it works. Reduced from the BK1 worker
-// kernel of acc/BK1_acc.cpp in this repository.
+// directive this kernel faults at n = 4 (CUDA_ERROR_ILLEGAL_INSTRUCTION,
+// 16 workers of 64 lanes) and is correct at the other n; without the
+// directive (-DNO_CACHE) it is correct at every n. The full kernel it was
+// reduced from, the BK1 worker kernel of acc/BK1_acc.cpp in this
+// repository, shows the same fault at nq = 4 and additionally
+// CUDA_ERROR_MISALIGNED_ADDRESS at nq = 7..10; this file does not reproduce
+// the second symptom. The same directive at the top of a gang loop without
+// a worker loop below it works in every kernel of acc/BK1_acc.cpp.
 //
 // build:  nvc++ -O3 -std=c++17 -acc=gpu -Minfo=acc -o cache_worker cache_worker.cpp
 //         nvc++ -O3 -std=c++17 -acc=gpu -DNO_CACHE -o cache_worker_nocache cache_worker.cpp
