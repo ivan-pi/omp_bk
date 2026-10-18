@@ -1,0 +1,85 @@
+#!/bin/bash
+# throughput.sh -- CEED-style throughput sweep of the OpenACC executables:
+# GDoF/s versus problem size, log-spaced from DOF_MIN to DOF_MAX, for each
+# polynomial order and executable.  One run of the driver per point.
+#
+# usage:  make -C acc && acc/scripts/throughput.sh [results.csv]
+# env:    KERNELS="BK1_acc BK1_acc_batch"
+#             executables to sweep: names in acc/ or paths (with a slash).
+#             Any driver that takes p and has (p+1)^3 DoF per element
+#             qualifies (BK1_acc, BK1_acc_batch, BK3_acc); BK5_acc does not.
+#             To compare builds of one source, copy the executable under
+#             another name: cp acc/BK1_acc_batch acc/BK1_acc_batch_pad1
+#         ORDERS="1 2 3 4 5 6 7 8"   polynomial orders
+#         DOF_MIN=1e4 DOF_MAX=1e8    problem-size range in degrees of freedom
+#         PPD=4                      points per decade
+#         NTESTS=10                  repetitions per point (driver takes the minimum)
+#         BK_RANDOM                  passed through to the drivers (default: constant data)
+#
+# Output CSV columns: kernel,p,target,nelmt,dofs,gdofs,gbs
+#   kernel = the executable's basename, target = the log-spaced size point,
+#   dofs = nelmt * (p+1)^3 actually run.  Parse failures are recorded as NaN.
+# The drivers' stderr (the batch configuration line) goes to the terminal
+# once per executable and order, not into the CSV.
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+ACC=$ROOT/acc
+OUT=${1:-results.csv}
+KERNELS=${KERNELS:-"BK1_acc BK1_acc_batch"}
+ORDERS=${ORDERS:-"1 2 3 4 5 6 7 8"}
+DOF_MIN=${DOF_MIN:-1e4}
+DOF_MAX=${DOF_MAX:-1e8}
+PPD=${PPD:-4}
+NTESTS=${NTESTS:-10}
+
+# Parse the driver's "... GDoF/s = <g> GB/s = <b>" line from stdin -> "<g> <b>"
+rates() { sed -n 's/.*GDoF\/s = \([0-9.e+-]*\) GB\/s = \([0-9.e+-]*\).*/\1 \2/p'; }
+
+exe_of() {   # exe_of <kernel> -> path
+  case $1 in
+    */*) echo "$1" ;;
+    *)   echo "$ACC/$1" ;;
+  esac
+}
+
+for k in $KERNELS; do
+  if [ ! -x "$(exe_of $k)" ]; then
+    echo "missing executable: $(exe_of $k)  (make -C acc)" >&2
+    exit 2
+  fi
+done
+
+# log-spaced DoF targets
+sizes=$(awk -v lo="$DOF_MIN" -v hi="$DOF_MAX" -v ppd="$PPD" 'BEGIN {
+  n = int((log(hi) - log(lo)) / log(10) * ppd + 0.5);
+  for (i = 0; i <= n; i++) printf "%d ", exp(log(lo) + i * log(10) / ppd) + 0.5 }')
+
+echo "kernel,p,target,nelmt,dofs,gdofs,gbs" > "$OUT"
+for k in $KERNELS; do
+  exe=$(exe_of $k)
+  name=$(basename "$k")
+  for p in $ORDERS; do
+    nm3=$(( (p+1)*(p+1)*(p+1) ))
+    first=1
+    for d in $sizes; do
+      n=$(( (d + nm3/2) / nm3 ))
+      if [ $n -lt 1 ]; then
+        n=1
+      fi
+      dofs=$(( n * nm3 ))
+      if [ $first -eq 1 ]; then
+        r=$("$exe" $p $n $NTESTS | rates)         # stderr shown once: the configuration
+        first=0
+      else
+        r=$("$exe" $p $n $NTESTS 2>/dev/null | rates)
+      fi
+      g=${r%% *}
+      b=${r##* }
+      if [ -z "$r" ]; then
+        g=NaN
+        b=NaN
+      fi
+      echo "$name,$p,$d,$n,$dofs,$g,$b" | tee -a "$OUT"
+    done
+  done
+done
+echo "wrote $OUT"

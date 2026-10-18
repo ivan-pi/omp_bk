@@ -18,7 +18,9 @@ holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`);
   `make -C acc CXX=g++` builds them with GCC's `-fopenacc` host fallback,
   and `make -C acc host` the serial host build. `acc/scripts/validate.sh`
   checks every order against the OpenMP executables (constant data) and
-  against the host build (random data, `BK_RANDOM=1`).
+  against the host build (random data, `BK_RANDOM=1`);
+  `acc/scripts/throughput.sh` sweeps GDoF/s over problem size and order
+  into a CSV that `acc/scripts/plot_throughput.py` plots.
 
 ## C++ style
 

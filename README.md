@@ -76,6 +76,9 @@ make -C acc CXX=g++                # GCC -fopenacc (host fallback without an off
 make BK1 BK3 BK5 && make -C acc all host
 acc/scripts/validate.sh            # every order: constant data against BK1/BK3/BK5,
                                    # random data against the host build; exit 1 on failure
+acc/scripts/throughput.sh results.csv        # GDoF/s versus DoF, log-spaced 1e4..1e8, p = 1..8,
+                                             # for KERNELS="BK1_acc BK1_acc_batch" (CSV)
+acc/scripts/plot_throughput.py results.csv throughput.png   # one panel per executable (matplotlib)
 ```
 
 ## Apple AMX version of BK1
