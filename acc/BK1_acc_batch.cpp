@@ -12,7 +12,9 @@
 // Layouts. Every phase writes a packed array whose fastest index is the lane
 // index of that phase, so its stores, and the next phase's loads of the same
 // index, are stride-1 across lanes. The contracted index is loaded within a
-// lane. Sub-block layouts per phase, fastest index last:
+// lane. Each layout is a local lambda that maps the multi-index to the
+// linear index and returns the entry by reference. Sub-block layouts per
+// phase, fastest index last:
 //
 //   step  reads           contracts  writes            lanes over
 //   1     in  (e,i,j,k)   -          A0 (e,i,j,k)      flat copy
@@ -99,11 +101,8 @@ void SumFactorization(
         copyout(out[0:nelmt*nm*nm*nm])
     for (std::size_t g = 0; g < ngang; ++g) {
 
-        // B(mode i, quad point p) == basis[i * nq + p], shared by all directions.
-        const ndview<const T, nm, nq> B{basis};
-
         // Gang-private scratch: two boxes of EPG elements, ping-ponged by the
-        // phases through the packed views below (shared memory on the GPU).
+        // phases through the packed accessors below (shared memory on the GPU).
         T scratch[2][EPG * box];
 
         const std::size_t e0 = g * EPG;
@@ -113,8 +112,21 @@ void SumFactorization(
         const index_t nb = (nelmt - e0 < std::size_t(EPG)) ? index_t(nelmt - e0) : EPG;
 
         const T* in_b  = in  + e0 * (nm * nm * nm);
+        const T* JxW_b = JxW + e0 * box;
         T*       out_b = out + e0 * (nm * nm * nm);
-        const ndview<const T, EPG, nq, nq, nq> W{JxW + e0 * box};   // (e, r, p, q)
+
+        // Accessors: a lambda per packed layout, returning the entry by
+        // reference through its linear index. The multi-index order of each
+        // lambda is the layout order of the table at the top of the file,
+        // last index fastest.
+        // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
+        const auto B = [&](index_t i, index_t p) -> const T& {
+            return basis[i * nq + p];
+        };
+        // JxW of the batch, (e, r, p, q): the order step 4 writes
+        const auto W = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
+            return JxW_b[((e * nq + r) * nq + p) * nq + q];
+        };
 
         // step-1 : copy the batch's input, contiguous in memory, into A0
         #pragma acc loop vector
@@ -124,8 +136,12 @@ void SumFactorization(
 
         // step-2 : direction 0, one lane per fibre (e, j, k)
         {
-            const ndview<const T, EPG, nm, nm, nm> A0{scratch[0]};
-            const ndview<T, EPG, nq, nm, nm>       A1{scratch[1]};
+            const auto A0 = [&](index_t e, index_t i, index_t j, index_t k) -> const T& {
+                return scratch[0][((e * nm + i) * nm + j) * nm + k];
+            };
+            const auto A1 = [&](index_t e, index_t p, index_t j, index_t k) -> T& {
+                return scratch[1][((e * nq + p) * nm + j) * nm + k];
+            };
             #pragma acc loop vector
             for (index_t t = 0; t < nb * nm * nm; ++t) {
                 const index_t e = t / (nm * nm);
@@ -147,8 +163,12 @@ void SumFactorization(
 
         // step-3 : direction 1, one lane per fibre (e, p, k)
         {
-            const ndview<const T, EPG, nq, nm, nm> A1{scratch[1]};
-            const ndview<T, EPG, nq, nq, nm>       A2{scratch[0]};
+            const auto A1 = [&](index_t e, index_t p, index_t j, index_t k) -> const T& {
+                return scratch[1][((e * nq + p) * nm + j) * nm + k];
+            };
+            const auto A2 = [&](index_t e, index_t p, index_t q, index_t k) -> T& {
+                return scratch[0][((e * nq + p) * nq + q) * nm + k];
+            };
             #pragma acc loop vector
             for (index_t t = 0; t < nb * nq * nm; ++t) {
                 const index_t e = t / (nq * nm);
@@ -171,8 +191,12 @@ void SumFactorization(
         // step-4 : direction 2, one lane per fibre (e, p, q), fused with
         // step-5 : multiply with weights and determinant of Jacobi
         {
-            const ndview<const T, EPG, nq, nq, nm> A2{scratch[0]};
-            const ndview<T, EPG, nq, nq, nq>       A3{scratch[1]};
+            const auto A2 = [&](index_t e, index_t p, index_t q, index_t k) -> const T& {
+                return scratch[0][((e * nq + p) * nq + q) * nm + k];
+            };
+            const auto A3 = [&](index_t e, index_t r, index_t p, index_t q) -> T& {
+                return scratch[1][((e * nq + r) * nq + p) * nq + q];
+            };
             #pragma acc loop vector
             for (index_t t = 0; t < nb * nq * nq; ++t) {
                 const index_t e = t / (nq * nq);
@@ -196,8 +220,12 @@ void SumFactorization(
 
         // step-6 : direction 2, one lane per fibre (e, p, q)
         {
-            const ndview<const T, EPG, nq, nq, nq> A3{scratch[1]};
-            const ndview<T, EPG, nm, nq, nq>       A4{scratch[0]};
+            const auto A3 = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
+                return scratch[1][((e * nq + r) * nq + p) * nq + q];
+            };
+            const auto A4 = [&](index_t e, index_t k, index_t p, index_t q) -> T& {
+                return scratch[0][((e * nm + k) * nq + p) * nq + q];
+            };
             #pragma acc loop vector
             for (index_t t = 0; t < nb * nq * nq; ++t) {
                 const index_t e = t / (nq * nq);
@@ -219,8 +247,12 @@ void SumFactorization(
 
         // step-7 : direction 1, one lane per fibre (e, p, k)
         {
-            const ndview<const T, EPG, nm, nq, nq> A4{scratch[0]};
-            const ndview<T, EPG, nm, nq, nm>       A5{scratch[1]};
+            const auto A4 = [&](index_t e, index_t k, index_t p, index_t q) -> const T& {
+                return scratch[0][((e * nm + k) * nq + p) * nq + q];
+            };
+            const auto A5 = [&](index_t e, index_t j, index_t p, index_t k) -> T& {
+                return scratch[1][((e * nm + j) * nq + p) * nm + k];
+            };
             #pragma acc loop vector
             for (index_t t = 0; t < nb * nq * nm; ++t) {
                 const index_t e = t / (nq * nm);
@@ -242,8 +274,12 @@ void SumFactorization(
 
         // step-8 : direction 0, one lane per fibre (e, j, k)
         {
-            const ndview<const T, EPG, nm, nq, nm> A5{scratch[1]};
-            const ndview<T, EPG, nm, nm, nm>       A6{scratch[0]};
+            const auto A5 = [&](index_t e, index_t j, index_t p, index_t k) -> const T& {
+                return scratch[1][((e * nm + j) * nq + p) * nm + k];
+            };
+            const auto A6 = [&](index_t e, index_t i, index_t j, index_t k) -> T& {
+                return scratch[0][((e * nm + i) * nm + j) * nm + k];
+            };
             #pragma acc loop vector
             for (index_t t = 0; t < nb * nm * nm; ++t) {
                 const index_t e = t / (nm * nm);
