@@ -10,8 +10,7 @@
 //             over at C < 3 run the remaining levels sequentially.
 //   worker    gang over batches of W elements, `loop worker` over the batch's
 //             elements, `loop vector collapse(3)` per phase: several elements
-//             per block without touching the phase loops; the boxes are one
-//             gang-level array with a slice per worker.
+//             per block without touching the phase loops.
 //   batch     gang over batches of EPG elements, every phase one flat vector
 //             loop over the fibres of the batch, one lane per fibre with the
 //             fibre held in registers (the dealii-X/benchmarks structure).
@@ -62,10 +61,12 @@ namespace bk {
 #endif
 
 // BK_CACHE_BASIS (make -C acc DEFS=-DBK_CACHE_BASIS) stamps `cache(readonly:
-// basis)` at the top of every kernel's element or batch loop: the basis is
-// fetched into shared memory for the loop body instead of being left to L1,
-// and the readonly modifier (OpenACC 2.7) tells the compiler no write-back
-// is needed.
+// basis)` at the top of the element or batch loop of every kernel but
+// worker (see there): the basis is fetched into shared memory for the loop
+// body instead of being left to L1, and the readonly modifier (OpenACC 2.7)
+// tells the compiler no write-back is needed. Measured on GH200 it changes
+// nothing, within a few percent either way, at any order of elem, gang3 or
+// batch.
 #if defined(BK_CACHE_BASIS) && defined(__NVCOMPILER)
 #define BK1_CACHE_BASIS BK_PRAGMA(acc cache(readonly: basis[0:nm*nq]))
 #elif defined(BK_CACHE_BASIS)
@@ -323,16 +324,13 @@ void SumFactorizationWorker(
     [[maybe_unused]] constexpr int V = worker_vector_length(nq);   // only the pragma uses it
     const std::size_t ngang = (nelmt + W - 1) / W;
 
+    // No BK1_CACHE_BASIS here: a cache directive above the worker loop is
+    // legal OpenACC, but nvc++ miscompiles it (illegal instruction at nq = 4,
+    // misaligned address at nq = 7..10, measured on GH200), while the same
+    // phase body runs correctly with the directive in the other kernels and
+    // without it here.
     #pragma acc parallel loop gang num_workers(W) vector_length(V) BK1_DATA_CLAUSES
     for (std::size_t g = 0; g < ngang; ++g) {
-        BK1_CACHE_BASIS
-        // The boxes of the gang's W elements, one slice per worker. Declared
-        // at gang level so that nothing is privatised per worker: with the
-        // boxes declared inside the worker loop, nvc++ replicated them per
-        // worker itself, and that configuration faulted at several orders
-        // (illegal address, misaligned address, illegal instruction).
-        T w0g[W][nq * nq * nq];
-        T w1g[W][nq * nq * nq];
         #pragma acc loop worker
         for (int w = 0; w < W; ++w) {
             // A worker past the end recomputes the last element and skips the
@@ -342,8 +340,9 @@ void SumFactorizationWorker(
             const bool        live = e0 < nelmt;
             const std::size_t e    = live ? e0 : nelmt - 1;
 
-            T* const w0s = w0g[w];
-            T* const w1s = w1g[w];
+            // Worker-private boxes, replicated per worker by the compiler.
+            T w0s[nq * nq * nq];
+            T w1s[nq * nq * nq];
             BK1_ELEMENT_ACCESSORS(e)
 
             BK1_PHASES(BK_LOOP_VECTOR_COLLAPSE(3))
@@ -640,7 +639,9 @@ std::string kernel_config(const std::string& name)
     constexpr int epg = batch_elements(nq);
     std::string s = "config: kernel = " + name + " nq = " + std::to_string(nq);
 #ifdef BK_CACHE_BASIS
-    s += " cache(basis)";
+    if (name != "worker") {
+        s += " cache(basis)";
+    }
 #endif
     if (name == "gang1" || name == "gang2" || name == "gang3") {
         const int C = name[4] - '0';
