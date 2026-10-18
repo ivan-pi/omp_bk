@@ -467,26 +467,31 @@ void SumFactorizationBatch(
 
         // Accessors, returning the entry by reference through its linear
         // index, written as the sum of index times stride (the strides are
-        // compile-time constants). w0/w1 are the nq^3 boxes of the work
-        // arrays; in_e/out_e the nm^3 blocks of the batch's elements; W the
-        // weights of the batch.
-        const auto w0 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return wsp0[e * box + a * (nq * nq) + b * nq + c];
+        // compile-time constants); each holds its base pointer by value.
+        // w0/w1 are the nq^3 boxes of the work arrays; in_e/out_e the nm^3
+        // blocks of the batch's elements; W the weights of the batch.
+        T* const       w0p   = wsp0;
+        T* const       w1p   = wsp1;
+        const T* const in_b  = in  + e0 * (nm * nm * nm);
+        T* const       out_b = out + e0 * (nm * nm * nm);
+        const T* const JxW_b = JxW + e0 * box;
+        const auto w0 = [w0p](index_t e, index_t a, index_t b, index_t c) -> T& {
+            return w0p[e * box + a * (nq * nq) + b * nq + c];
         };
-        const auto w1 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return wsp1[e * box + a * (nq * nq) + b * nq + c];
+        const auto w1 = [w1p](index_t e, index_t a, index_t b, index_t c) -> T& {
+            return w1p[e * box + a * (nq * nq) + b * nq + c];
         };
-        const auto in_e = [&](index_t e, index_t i, index_t j, index_t k) -> const T& {
-            return in[(e0 + e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
+        const auto in_e = [in_b](index_t e, index_t i, index_t j, index_t k) -> const T& {
+            return in_b[e * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
         };
-        const auto out_e = [&](index_t e, index_t i, index_t j, index_t k) -> T& {
-            return out[(e0 + e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
+        const auto out_e = [out_b](index_t e, index_t i, index_t j, index_t k) -> T& {
+            return out_b[e * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
         };
-        const auto W = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
-            return JxW[(e0 + e) * box + r * (nq * nq) + p * nq + q];
+        const auto W = [JxW_b](index_t e, index_t r, index_t p, index_t q) -> const T& {
+            return JxW_b[e * box + r * (nq * nq) + p * nq + q];
         };
         // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
-        const auto B = [&](index_t i, index_t p) -> const T& {
+        const auto B = [basis](index_t i, index_t p) -> const T& {
             return basis[i * nq + p];
         };
 
