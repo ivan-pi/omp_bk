@@ -53,6 +53,14 @@ arguments as the OpenMP executables and print the same two lines, so the
 scripts' parsing carries over. `BK_RANDOM=1` replaces the constant test data
 with seeded random data.
 
+`acc/BK1_acc_batch.cpp` is a second BK1 kernel in the shape of the CUDA
+kernel of [dealii-X/benchmarks](https://github.com/dealii-X/benchmarks):
+each gang holds a batch of elements in shared memory, every phase is one flat
+vector loop over the fibres of the batch, and a lane keeps the inputs along
+the contraction direction in registers while it forms all outputs of that
+line. The batch size follows from `nq` (comment at the top of the file); the
+driver prints the chosen configuration on stderr.
+
 ```sh
 make -C acc                        # nvc++ -acc=gpu, prints the -Minfo=acc report
 make -C acc ACC="-acc=gpu -gpu=cc80"
@@ -60,6 +68,7 @@ make -C acc ACC=-acc=multicore     # OpenACC on the host cores
 make -C acc host                   # BK?_acc_host: serial host build (-acc=host) for validate.sh
 make -C acc CXX=g++                # GCC -fopenacc (host fallback without an offload toolchain)
 ./acc/BK1_acc <p> [nelmt] [ntests]
+./acc/BK1_acc_batch <p> [nelmt] [ntests]
 
 make BK1 BK3 BK5 && make -C acc all host
 acc/scripts/validate.sh            # every order: constant data against BK1/BK3/BK5,

@@ -1,9 +1,9 @@
-# OpenACC builds of the bake-off kernels (acc/BK?_acc.cpp).
+# OpenACC builds of the bake-off kernels (acc/*.cpp).
 #
 #   make -C acc                       # nvc++ for the GPU, with the -Minfo=acc report
 #   make -C acc ACC=-acc=multicore    # nvc++, OpenACC on the host cores
-#   make -C acc host                  # BK?_acc_host: the same sources run serially on
-#                                     # the host (nvc++ -acc=host); validate.sh compares
+#   make -C acc host                  # *_host: the same sources run serially on the
+#                                     # host (nvc++ -acc=host); validate.sh compares
 #                                     # the two builds on random data
 #   make -C acc CXX=g++               # GCC's OpenACC (-fopenacc): a host fallback
 #                                     # without an offload toolchain, used to check that
@@ -28,15 +28,19 @@ CXXFLAGS = -Wall -O3 -std=c++17
 
 HEADERS = acc_common.h ../bk_common.h
 
-.PHONY: all host clean
-all: BK1_acc BK3_acc BK5_acc
-host: BK1_acc_host BK3_acc_host BK5_acc_host
+# BK?_acc: one element per gang, the inner loops left to the compiler.
+# BK1_acc_batch: a batch of elements per gang, one lane per fibre.
+PROGS = BK1_acc BK3_acc BK5_acc BK1_acc_batch
 
-BK%_acc: BK%_acc.cpp $(HEADERS)
+.PHONY: all host clean
+all: $(PROGS)
+host: $(PROGS:=_host)
+
+$(PROGS): %: %.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(ACC) $(INFO) -o $@ $<
 
-BK%_acc_host: BK%_acc.cpp $(HEADERS)
+$(PROGS:=_host): %_host: %.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(HOSTACC) -o $@ $<
 
 clean:
-	$(RM) BK1_acc BK3_acc BK5_acc BK1_acc_host BK3_acc_host BK5_acc_host *.o
+	$(RM) $(PROGS) $(PROGS:=_host) *.o
