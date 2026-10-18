@@ -1,4 +1,18 @@
-# nvc++ 25.3: `cache` directive above a `loop worker` faults on the device
+# nvc++ 25.3 probes
+
+Two standalone programs about how nvc++ 25.3 treats OpenACC constructs that
+the BK1 kernels of `acc/BK1_acc.cpp` depend on.
+
+- `cache_worker.cpp` with `run.sh`: a `cache` directive above a `loop worker`
+  faults on the device (the bug report below).
+- `smem_limit.cpp` with `smem_limit.sh`: which gang-private arrays nvc++
+  places in CUDA shared memory, over a grid of array counts and sizes. The
+  BK1 gang kernel's two nq^3 boxes were placed up to nq = 7 (1372 bytes
+  each) and not from nq = 8 (2048 bytes each); the batched kernel's only at
+  one element per gang. There is no diagnostic for the silent fallback to
+  global memory and no `-gpu` option for the limit, so the probe measures it.
+
+## Bug report: `cache` above `loop worker`
 
 Standalone reproducer: `cache_worker.cpp`; `run.sh` builds it with and
 without the directive and runs every box size `n` in its own process.
