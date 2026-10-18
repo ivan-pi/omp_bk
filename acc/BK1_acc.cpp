@@ -86,8 +86,9 @@ constexpr int round_to_warps(const int lanes)
 // ---------------------------------------------------------------------------
 // The phases of one element. LOOP is the pragma stamped before each phase
 // nest: `loop vector collapse(C)` or nothing (elem). The enclosing scope provides
-// T, nq, nm, index_t, the accessors e_in(i,j,k), e_out(i,j,k), e_JxW(p,q,r),
-// B(i,p), w0(a,b,c), w1(a,b,c), and `live` (whether the store happens).
+// T, nq, nm, index_t, the pointers of BK1_ELEMENT_POINTERS and `live`
+// (whether the store happens); each lane body opens with BK1_ACCESSORS, the
+// lambdas e_in(i,j,k), e_out(i,j,k), e_JxW(p,q,r), B(i,p), w0(a,b,c), w1(a,b,c).
 // Step 1 stays a copy: step 2 reads every input nq times, once per output,
 // and it should read the box, not global memory. Step 9 is fused into
 // step 8, whose outputs are each stored once.
@@ -107,6 +108,7 @@ constexpr int round_to_warps(const int lanes)
     for (index_t i = 0; i < nm; ++i) {                                       \
         for (index_t j = 0; j < nm; ++j) {                                   \
             for (index_t k = 0; k < nm; ++k) {                               \
+                BK1_ACCESSORS                                                \
                 w0(i, j, k) = e_in(i, j, k);                                 \
             }                                                                \
         }                                                                    \
@@ -116,6 +118,7 @@ constexpr int round_to_warps(const int lanes)
     for (index_t p = 0; p < nq; ++p) {                                       \
         for (index_t j = 0; j < nm; ++j) {                                   \
             for (index_t k = 0; k < nm; ++k) {                               \
+                BK1_ACCESSORS                                                \
                 T tmp = 0;                                                   \
                 for (index_t i = 0; i < nm; ++i) {                           \
                     tmp += w0(i, j, k) * B(i, p);                            \
@@ -129,6 +132,7 @@ constexpr int round_to_warps(const int lanes)
     for (index_t q = 0; q < nq; ++q) {                                       \
         for (index_t p = 0; p < nq; ++p) {                                   \
             for (index_t k = 0; k < nm; ++k) {                               \
+                BK1_ACCESSORS                                                \
                 T tmp = 0;                                                   \
                 for (index_t j = 0; j < nm; ++j) {                           \
                     tmp += w1(p, j, k) * B(j, q);                            \
@@ -142,6 +146,7 @@ constexpr int round_to_warps(const int lanes)
     for (index_t p = 0; p < nq; ++p) {                                       \
         for (index_t q = 0; q < nq; ++q) {                                   \
             for (index_t r = 0; r < nq; ++r) {                               \
+                BK1_ACCESSORS                                                \
                 T tmp = 0;                                                   \
                 for (index_t k = 0; k < nm; ++k) {                           \
                     tmp += w0(q, p, k) * B(k, r);                            \
@@ -155,6 +160,7 @@ constexpr int round_to_warps(const int lanes)
     for (index_t q = 0; q < nq; ++q) {                                       \
         for (index_t p = 0; p < nq; ++p) {                                   \
             for (index_t k = 0; k < nm; ++k) {                               \
+                BK1_ACCESSORS                                                \
                 T tmp = 0;                                                   \
                 for (index_t r = 0; r < nq; ++r) {                           \
                     tmp += w1(p, q, r) * B(k, r);                            \
@@ -168,6 +174,7 @@ constexpr int round_to_warps(const int lanes)
     for (index_t p = 0; p < nq; ++p) {                                       \
         for (index_t j = 0; j < nm; ++j) {                                   \
             for (index_t k = 0; k < nm; ++k) {                               \
+                BK1_ACCESSORS                                                \
                 T tmp = 0;                                                   \
                 for (index_t q = 0; q < nq; ++q) {                           \
                     tmp += w0(q, p, k) * B(j, q);                            \
@@ -182,6 +189,7 @@ constexpr int round_to_warps(const int lanes)
     for (index_t i = 0; i < nm; ++i) {                                       \
         for (index_t j = 0; j < nm; ++j) {                                   \
             for (index_t k = 0; k < nm; ++k) {                               \
+                BK1_ACCESSORS                                                \
                 T tmp = 0;                                                   \
                 for (index_t p = 0; p < nq; ++p) {                           \
                     tmp += w1(p, j, k) * B(i, p);                            \
@@ -193,34 +201,39 @@ constexpr int round_to_warps(const int lanes)
         }                                                                    \
     }
 
-// Accessors of one element for the per-element kernels: the basis, the
-// element's blocks of in, out and JxW (BK1.cpp's layouts), and the two nq^3
-// work boxes w0s and w1s. The lambdas hold the pointers by value, so each is
-// a one-pointer object like the view structs of the first version, which the
-// compiler keeps in registers; capturing the boxes and arrays by reference
-// made the elem kernel run serially (4 us per element on GH200).
-#define BK1_ELEMENT_ACCESSORS(e)                                             \
+// Accessors of one element for the per-element kernels, in two parts.
+// BK1_ELEMENT_POINTERS(e) sets the element's base pointers: the blocks of
+// in, out and JxW (BK1.cpp's layouts) and the two nq^3 work boxes w0s and
+// w1s. BK1_ACCESSORS declares the lambdas over them, each holding its
+// pointer by value, and is stamped at the top of every phase's lane body:
+// declared at gang level the closures are gang-private objects that nvc++
+// places in shared memory next to the boxes, so every access reloads the
+// pointer from shared memory (the stores through the other box may alias
+// it); declared per lane they are registers.
+#define BK1_ELEMENT_POINTERS(e)                                              \
     T* const       w0p   = w0s;                                              \
     T* const       w1p   = w1s;                                              \
     const T* const in_e  = in  + (e) * (nm * nm * nm);                       \
     T* const       out_e = out + (e) * (nm * nm * nm);                       \
-    const T* const JxW_e = JxW + (e) * (nq * nq * nq);                       \
-    const auto B = [basis](index_t i, index_t p) -> const T& {               \
+    const T* const JxW_e = JxW + (e) * (nq * nq * nq);
+
+#define BK1_ACCESSORS                                                        \
+    [[maybe_unused]] const auto B = [basis](index_t i, index_t p) -> const T& {               \
         return basis[i * nq + p];                                            \
     };                                                                       \
-    const auto e_in = [in_e](index_t i, index_t j, index_t k) -> const T& {  \
+    [[maybe_unused]] const auto e_in = [in_e](index_t i, index_t j, index_t k) -> const T& {  \
         return in_e[i * (nm * nm) + j * nm + k];                             \
     };                                                                       \
-    const auto e_out = [out_e](index_t i, index_t j, index_t k) -> T& {      \
+    [[maybe_unused]] const auto e_out = [out_e](index_t i, index_t j, index_t k) -> T& {      \
         return out_e[i * (nm * nm) + j * nm + k];                            \
     };                                                                       \
-    const auto e_JxW = [JxW_e](index_t p, index_t q, index_t r) -> const T& { \
+    [[maybe_unused]] const auto e_JxW = [JxW_e](index_t p, index_t q, index_t r) -> const T& { \
         return JxW_e[p * (nq * nq) + q * nq + r];                            \
     };                                                                       \
-    const auto w0 = [w0p](index_t a, index_t b, index_t c) -> T& {           \
+    [[maybe_unused]] const auto w0 = [w0p](index_t a, index_t b, index_t c) -> T& {           \
         return w0p[a * (nq * nq) + b * nq + c];                              \
     };                                                                       \
-    const auto w1 = [w1p](index_t a, index_t b, index_t c) -> T& {           \
+    [[maybe_unused]] const auto w1 = [w1p](index_t a, index_t b, index_t c) -> T& {           \
         return w1p[a * (nq * nq) + b * nq + c];                              \
     };
 
@@ -251,7 +264,7 @@ void SumFactorizationElem(
         constexpr bool live = true;
         T w0s[nq * nq * nq];
         T w1s[nq * nq * nq];
-        BK1_ELEMENT_ACCESSORS(e)
+        BK1_ELEMENT_POINTERS(e)
 
         // No directives inside the element loop: the phases are plain loops
         // with constant trip counts that the compiler unrolls, and at low
@@ -293,7 +306,7 @@ void SumFactorizationGang(
         constexpr bool live = true;
         T w0s[nq * nq * nq];
         T w1s[nq * nq * nq];
-        BK1_ELEMENT_ACCESSORS(e)
+        BK1_ELEMENT_POINTERS(e)
 
         BK1_PHASES(BK_LOOP_VECTOR_COLLAPSE(C))
     }
@@ -331,13 +344,6 @@ void SumFactorizationWorker(
     // in the other kernels and without it here.
     #pragma acc parallel loop gang num_workers(W) vector_length(V) BK1_DATA_CLAUSES
     for (std::size_t g = 0; g < ngang; ++g) {
-        // The boxes of the gang's W elements, one slice per worker, as a
-        // gang-private array: those go to shared memory (-Minfo: "CUDA shared
-        // memory used for w0g,w1g"), whereas boxes declared inside the worker
-        // loop were placed by nvc++ 25.3 outside shared memory (no such line
-        // in its report) and the kernel ran below gang3 at most orders.
-        T w0g[W][nq * nq * nq];
-        T w1g[W][nq * nq * nq];
         #pragma acc loop worker
         for (int w = 0; w < W; ++w) {
             // A worker past the end recomputes the last element and skips the
@@ -347,9 +353,14 @@ void SumFactorizationWorker(
             const bool        live = e0 < nelmt;
             const std::size_t e    = live ? e0 : nelmt - 1;
 
-            T* const w0s = w0g[w];
-            T* const w1s = w1g[w];
-            BK1_ELEMENT_ACCESSORS(e)
+            // Worker-private boxes. nvc++ 25.3 reports no shared-memory
+            // placement for them (nor for a gang-level [W][nq^3] array with a
+            // slice per worker, which measured 2.5 to 6 times slower still),
+            // so unlike the gang kernels' boxes they live outside shared
+            // memory and this kernel runs below gang3 at most orders.
+            T w0s[nq * nq * nq];
+            T w1s[nq * nq * nq];
+            BK1_ELEMENT_POINTERS(e)
 
             BK1_PHASES(BK_LOOP_VECTOR_COLLAPSE(3))
         }
@@ -422,6 +433,32 @@ constexpr int batch_vector_length(const int nq, const int epg)
     return round_to_warps(epg * nq * nq);
 }
 
+// Accessors of the batch kernel, stamped at the top of every phase's lane
+// body (see BK1_ACCESSORS for why not at gang level). Each returns the entry
+// by reference through its linear index, index times stride with compile-
+// time strides, and holds its base pointer by value. w0/w1 are the nq^3
+// boxes of the work arrays; in_e/out_e the nm^3 blocks of the batch's
+// elements; W the weights of the batch; B the basis, B(i, p) == basis[i*nq+p].
+#define BK1_BATCH_ACCESSORS                                                  \
+    [[maybe_unused]] const auto w0 = [w0p](index_t e, index_t a, index_t b, index_t c) -> T& { \
+        return w0p[e * box + a * (nq * nq) + b * nq + c];                    \
+    };                                                                       \
+    [[maybe_unused]] const auto w1 = [w1p](index_t e, index_t a, index_t b, index_t c) -> T& { \
+        return w1p[e * box + a * (nq * nq) + b * nq + c];                    \
+    };                                                                       \
+    [[maybe_unused]] const auto in_e = [in_b](index_t e, index_t i, index_t j, index_t k) -> const T& { \
+        return in_b[e * (nm * nm * nm) + i * (nm * nm) + j * nm + k];        \
+    };                                                                       \
+    [[maybe_unused]] const auto out_e = [out_b](index_t e, index_t i, index_t j, index_t k) -> T& { \
+        return out_b[e * (nm * nm * nm) + i * (nm * nm) + j * nm + k];       \
+    };                                                                       \
+    [[maybe_unused]] const auto W = [JxW_b](index_t e, index_t r, index_t p, index_t q) -> const T& { \
+        return JxW_b[e * box + r * (nq * nq) + p * nq + q];                  \
+    };                                                                       \
+    [[maybe_unused]] const auto B = [basis](index_t i, index_t p) -> const T& {               \
+        return basis[i * nq + p];                                            \
+    };
+
 template <typename T, int nq, int EPG = batch_elements(nq), typename index_t = int>
 void SumFactorizationBatch(
     const std::size_t nelmt,
@@ -455,35 +492,17 @@ void SumFactorizationBatch(
         // the loops, so every lane still reaches every barrier.
         const index_t nb = (nelmt - e0 < std::size_t(EPG)) ? index_t(nelmt - e0) : EPG;
 
-        // Accessors, returning the entry by reference through its linear
-        // index, written as the sum of index times stride (the strides are
-        // compile-time constants); each holds its base pointer by value.
-        // w0/w1 are the nq^3 boxes of the work arrays; in_e/out_e the nm^3
-        // blocks of the batch's elements; W the weights of the batch.
+        // Base pointers of the batch (gang-private scalars, registers): the
+        // boxes, the batch's blocks of in and out, and its weights. The
+        // accessor lambdas over them, BK1_BATCH_ACCESSORS, are declared at
+        // the top of every phase's lane body for the reason given at
+        // BK1_ACCESSORS: a gang-level closure sits in shared memory and its
+        // pointer is reloaded on every access.
         T* const       w0p   = wsp0;
         T* const       w1p   = wsp1;
         const T* const in_b  = in  + e0 * (nm * nm * nm);
         T* const       out_b = out + e0 * (nm * nm * nm);
         const T* const JxW_b = JxW + e0 * box;
-        const auto w0 = [w0p](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return w0p[e * box + a * (nq * nq) + b * nq + c];
-        };
-        const auto w1 = [w1p](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return w1p[e * box + a * (nq * nq) + b * nq + c];
-        };
-        const auto in_e = [in_b](index_t e, index_t i, index_t j, index_t k) -> const T& {
-            return in_b[e * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
-        };
-        const auto out_e = [out_b](index_t e, index_t i, index_t j, index_t k) -> T& {
-            return out_b[e * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
-        };
-        const auto W = [JxW_b](index_t e, index_t r, index_t p, index_t q) -> const T& {
-            return JxW_b[e * box + r * (nq * nq) + p * nq + q];
-        };
-        // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
-        const auto B = [basis](index_t i, index_t p) -> const T& {
-            return basis[i * nq + p];
-        };
 
         // step-1 : read the input fibre, fused with
         // step-2 : direction 0, one lane per fibre (e, j, k)
@@ -491,6 +510,7 @@ void SumFactorizationBatch(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
+                    BK1_BATCH_ACCESSORS
                     T reg[nm];
                     for (index_t i = 0; i < nm; ++i) {
                         reg[i] = in_e(e, i, j, k);
@@ -511,6 +531,7 @@ void SumFactorizationBatch(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t k = 0; k < nm; ++k) {
+                    BK1_BATCH_ACCESSORS
                     T reg[nm];
                     for (index_t j = 0; j < nm; ++j) {
                         reg[j] = w1(e, p, j, k);
@@ -532,6 +553,7 @@ void SumFactorizationBatch(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t q = 0; q < nq; ++q) {
+                    BK1_BATCH_ACCESSORS
                     T reg[nm];
                     for (index_t k = 0; k < nm; ++k) {
                         reg[k] = w0(e, p, q, k);
@@ -554,6 +576,7 @@ void SumFactorizationBatch(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t q = 0; q < nq; ++q) {
+                    BK1_BATCH_ACCESSORS
                     T reg[nq];
                     for (index_t r = 0; r < nq; ++r) {
                         reg[r] = w1(e, r, p, q);
@@ -574,6 +597,7 @@ void SumFactorizationBatch(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t k = 0; k < nm; ++k) {
+                    BK1_BATCH_ACCESSORS
                     T reg[nq];
                     for (index_t q = 0; q < nq; ++q) {
                         reg[q] = w0(e, k, p, q);
@@ -595,6 +619,7 @@ void SumFactorizationBatch(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
+                    BK1_BATCH_ACCESSORS
                     T reg[nq];
                     for (index_t p = 0; p < nq; ++p) {
                         reg[p] = w1(e, j, p, k);
