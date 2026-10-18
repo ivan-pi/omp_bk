@@ -10,7 +10,8 @@
 //             over at C < 3 run the remaining levels sequentially.
 //   worker    gang over batches of W elements, `loop worker` over the batch's
 //             elements, `loop vector collapse(3)` per phase: several elements
-//             per block without touching the phase loops.
+//             per block without touching the phase loops; the boxes are one
+//             gang-level array with a slice per worker.
 //   kernels   `kernels loop` over elements, no directives inside: what the
 //             compiler makes of the phase nests on its own (-Minfo=acc).
 //   batch     gang over batches of EPG elements, every phase one flat vector
@@ -327,6 +328,13 @@ void SumFactorizationWorker(
     #pragma acc parallel loop gang num_workers(W) vector_length(V) BK1_DATA_CLAUSES
     for (std::size_t g = 0; g < ngang; ++g) {
         BK1_CACHE_BASIS
+        // The boxes of the gang's W elements, one slice per worker. Declared
+        // at gang level so that nothing is privatised per worker: with the
+        // boxes declared inside the worker loop, nvc++ replicated them per
+        // worker itself, and that configuration faulted at several orders
+        // (illegal address, misaligned address, illegal instruction).
+        T w0g[W][nq * nq * nq];
+        T w1g[W][nq * nq * nq];
         #pragma acc loop worker
         for (int w = 0; w < W; ++w) {
             // A worker past the end recomputes the last element and skips the
@@ -336,8 +344,8 @@ void SumFactorizationWorker(
             const bool        live = e0 < nelmt;
             const std::size_t e    = live ? e0 : nelmt - 1;
 
-            T w0s[nq * nq * nq];
-            T w1s[nq * nq * nq];
+            T* const w0s = w0g[w];
+            T* const w1s = w1g[w];
             BK1_ELEMENT_ACCESSORS(e)
 
             BK1_PHASES(BK_LOOP_VECTOR_COLLAPSE(3))
