@@ -80,11 +80,13 @@ constexpr int round_to_warps(const int lanes)
 }
 
 // ---------------------------------------------------------------------------
-// The eight phases of one element, steps 1 to 8 (step 9, the store to out,
-// is written by each kernel because the worker kernel guards it). LOOP is
-// the pragma stamped before each phase nest: `loop vector collapse(C)` or
-// nothing. The enclosing scope provides T, nq, nm, index_t
-// and the accessors e_in(i,j,k), e_JxW(p,q,r), B(i,p), w0(a,b,c), w1(a,b,c).
+// The phases of one element. LOOP is the pragma stamped before each phase
+// nest: `loop vector collapse(C)` or nothing. The enclosing scope provides
+// T, nq, nm, index_t, the accessors e_in(i,j,k), e_out(i,j,k), e_JxW(p,q,r),
+// B(i,p), w0(a,b,c), w1(a,b,c), and `live` (whether the store happens).
+// Step 1 stays a copy: step 2 reads every input nq times, once per output,
+// and it should read the box, not global memory. Step 9 is fused into
+// step 8, whose outputs are each stored once.
 //
 //   step  reads          contracts  writes          loops (innermost last)
 //   1     in  (i,j,k)    -          w0 (i,j,k)      i, j, k
@@ -93,8 +95,7 @@ constexpr int round_to_warps(const int lanes)
 //   4+5   w0  (q,p,k)    k -> r     w1 (p,q,r)*JxW  p, q, r
 //   6     w1  (p,q,r)    r -> k     w0 (q,p,k)      q, p, k
 //   7     w0  (q,p,k)    q -> j     w1 (p,j,k)      p, j, k
-//   8     w1  (p,j,k)    p -> i     w0 (i,j,k)      i, j, k
-//   9     w0  (i,j,k)    -          out (i,j,k)     i, j, k
+//   8+9   w1  (p,j,k)    p -> i     out (i,j,k)     i, j, k
 // ---------------------------------------------------------------------------
 #define BK1_PHASES(LOOP)                                                     \
     /* step-1 : copy in -> w0 (nm^3 sub-block of the nq^3 box) */            \
@@ -171,7 +172,8 @@ constexpr int round_to_warps(const int lanes)
             }                                                                \
         }                                                                    \
     }                                                                        \
-    /* step-8 : direction 0 */                                               \
+    /* step-8 : direction 0, and step-9 : the store to out. `live` is false  \
+       only for a worker past the end of the element range */                \
     LOOP                                                                     \
     for (index_t i = 0; i < nm; ++i) {                                       \
         for (index_t j = 0; j < nm; ++j) {                                   \
@@ -180,32 +182,42 @@ constexpr int round_to_warps(const int lanes)
                 for (index_t p = 0; p < nq; ++p) {                           \
                     tmp += w1(p, j, k) * B(i, p);                            \
                 }                                                            \
-                w0(i, j, k) = tmp;                                           \
+                if (live) {                                                  \
+                    e_out(i, j, k) = tmp;                                    \
+                }                                                            \
             }                                                                \
         }                                                                    \
     }
 
-// Accessors of one element: the basis, the element's blocks of in, out and
-// JxW (BK1.cpp's layouts), and the two nq^3 work boxes w0s and w1s. Declared
-// inside the compute region so that the pointers are device addresses.
+// Accessors of one element for the per-element kernels: the basis, the
+// element's blocks of in, out and JxW (BK1.cpp's layouts), and the two nq^3
+// work boxes w0s and w1s. The lambdas hold the pointers by value, so each is
+// a one-pointer object like the view structs of the first version, which the
+// compiler keeps in registers; capturing the boxes and arrays by reference
+// made the elem kernel run serially (4 us per element on GH200).
 #define BK1_ELEMENT_ACCESSORS(e)                                             \
-    const auto B = [&](index_t i, index_t p) -> const T& {                   \
+    T* const       w0p   = w0s;                                              \
+    T* const       w1p   = w1s;                                              \
+    const T* const in_e  = in  + (e) * (nm * nm * nm);                       \
+    T* const       out_e = out + (e) * (nm * nm * nm);                       \
+    const T* const JxW_e = JxW + (e) * (nq * nq * nq);                       \
+    const auto B = [basis](index_t i, index_t p) -> const T& {               \
         return basis[i * nq + p];                                            \
     };                                                                       \
-    const auto e_in = [&](index_t i, index_t j, index_t k) -> const T& {     \
-        return in[(e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];        \
+    const auto e_in = [in_e](index_t i, index_t j, index_t k) -> const T& {  \
+        return in_e[i * (nm * nm) + j * nm + k];                             \
     };                                                                       \
-    const auto e_out = [&](index_t i, index_t j, index_t k) -> T& {          \
-        return out[(e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];       \
+    const auto e_out = [out_e](index_t i, index_t j, index_t k) -> T& {      \
+        return out_e[i * (nm * nm) + j * nm + k];                            \
     };                                                                       \
-    const auto e_JxW = [&](index_t p, index_t q, index_t r) -> const T& {    \
-        return JxW[(e) * (nq * nq * nq) + p * (nq * nq) + q * nq + r];       \
+    const auto e_JxW = [JxW_e](index_t p, index_t q, index_t r) -> const T& { \
+        return JxW_e[p * (nq * nq) + q * nq + r];                            \
     };                                                                       \
-    const auto w0 = [&](index_t a, index_t b, index_t c) -> T& {             \
-        return w0s[a * (nq * nq) + b * nq + c];                              \
+    const auto w0 = [w0p](index_t a, index_t b, index_t c) -> T& {           \
+        return w0p[a * (nq * nq) + b * nq + c];                              \
     };                                                                       \
-    const auto w1 = [&](index_t a, index_t b, index_t c) -> T& {             \
-        return w1s[a * (nq * nq) + b * nq + c];                              \
+    const auto w1 = [w1p](index_t a, index_t b, index_t c) -> T& {           \
+        return w1p[a * (nq * nq) + b * nq + c];                              \
     };
 
 // The data clauses of every kernel: no-ops when the arrays are already
@@ -232,6 +244,7 @@ void SumFactorizationElem(
     #pragma acc parallel loop BK1_DATA_CLAUSES
     for (std::size_t e = 0; e < nelmt; ++e) {
         BK1_CACHE_BASIS
+        constexpr bool live = true;
         T w0s[nq * nq * nq];
         T w1s[nq * nq * nq];
         BK1_ELEMENT_ACCESSORS(e)
@@ -241,15 +254,6 @@ void SumFactorizationElem(
         // order it keeps the boxes in registers. An explicit `loop seq` on
         // them is not harmless: it is what made this kernel slow at p = 1.
         BK1_PHASES()
-
-        // step-9 : copy w0 -> out
-        for (index_t i = 0; i < nm; ++i) {
-            for (index_t j = 0; j < nm; ++j) {
-                for (index_t k = 0; k < nm; ++k) {
-                    e_out(i, j, k) = w0(i, j, k);
-                }
-            }
-        }
     }
 }
 
@@ -282,21 +286,12 @@ void SumFactorizationGang(
     #pragma acc parallel loop gang vector_length(vlen) BK1_DATA_CLAUSES
     for (std::size_t e = 0; e < nelmt; ++e) {
         BK1_CACHE_BASIS
+        constexpr bool live = true;
         T w0s[nq * nq * nq];
         T w1s[nq * nq * nq];
         BK1_ELEMENT_ACCESSORS(e)
 
         BK1_PHASES(BK_LOOP_VECTOR_COLLAPSE(C))
-
-        // step-9 : copy w0 -> out
-        BK_LOOP_VECTOR_COLLAPSE(C)
-        for (index_t i = 0; i < nm; ++i) {
-            for (index_t j = 0; j < nm; ++j) {
-                for (index_t k = 0; k < nm; ++k) {
-                    e_out(i, j, k) = w0(i, j, k);
-                }
-            }
-        }
     }
 }
 
@@ -342,18 +337,6 @@ void SumFactorizationWorker(
             BK1_ELEMENT_ACCESSORS(e)
 
             BK1_PHASES(BK_LOOP_VECTOR_COLLAPSE(3))
-
-            // step-9 : copy w0 -> out
-            BK_LOOP_VECTOR_COLLAPSE(3)
-            for (index_t i = 0; i < nm; ++i) {
-                for (index_t j = 0; j < nm; ++j) {
-                    for (index_t k = 0; k < nm; ++k) {
-                        if (live) {
-                            e_out(i, j, k) = w0(i, j, k);
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -374,20 +357,12 @@ void SumFactorizationKernels(
     #pragma acc kernels loop BK1_DATA_CLAUSES
     for (std::size_t e = 0; e < nelmt; ++e) {
         BK1_CACHE_BASIS
+        constexpr bool live = true;
         T w0s[nq * nq * nq];
         T w1s[nq * nq * nq];
         BK1_ELEMENT_ACCESSORS(e)
 
         BK1_PHASES()
-
-        // step-9 : copy w0 -> out
-        for (index_t i = 0; i < nm; ++i) {
-            for (index_t j = 0; j < nm; ++j) {
-                for (index_t k = 0; k < nm; ++k) {
-                    e_out(i, j, k) = w0(i, j, k);
-                }
-            }
-        }
     }
 }
 
