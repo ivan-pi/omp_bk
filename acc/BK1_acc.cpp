@@ -325,10 +325,10 @@ void SumFactorizationWorker(
     const std::size_t ngang = (nelmt + W - 1) / W;
 
     // No BK1_CACHE_BASIS here: a cache directive above the worker loop is
-    // legal OpenACC, but nvc++ miscompiles it (illegal instruction at nq = 4,
-    // misaligned address at nq = 7..10, measured on GH200), while the same
-    // phase body runs correctly with the directive in the other kernels and
-    // without it here.
+    // legal OpenACC, but nvc++ 25.3 (NVHPC, linuxarm64) miscompiles it
+    // (illegal instruction at nq = 4, misaligned address at nq = 7..10, on
+    // GH200), while the same phase body runs correctly with the directive
+    // in the other kernels and without it here.
     #pragma acc parallel loop gang num_workers(W) vector_length(V) BK1_DATA_CLAUSES
     for (std::size_t g = 0; g < ngang; ++g) {
         #pragma acc loop worker
