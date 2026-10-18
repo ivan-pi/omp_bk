@@ -14,3 +14,5 @@ acc/BK1_acc_host
 acc/BK3_acc_host
 acc/BK5_acc_host
 __pycache__/
+acc/repro/cache_worker
+acc/repro/cache_worker_nocache

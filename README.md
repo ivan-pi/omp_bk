@@ -80,6 +80,13 @@ acc/scripts/throughput.sh results.csv        # GDoF/s versus DoF, log-spaced 1e4
 acc/scripts/plot_throughput.py results.csv throughput.png   # one panel per kernel (matplotlib)
 ```
 
+`acc/repro/cache_worker.cpp` is a standalone reproducer of an nvc++ 25.3
+code-generation fault: a `cache(readonly:)` directive at the top of a gang
+loop whose body is a `loop worker` faults on the device, while the same
+kernel without the directive is correct (`acc/repro/run.sh` builds and runs
+both forms). The worker kernel of `BK1_acc` leaves the directive out for
+this reason.
+
 ## Apple AMX version of BK1
 
 `amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX
