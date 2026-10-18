@@ -331,6 +331,13 @@ void SumFactorizationWorker(
     // in the other kernels and without it here.
     #pragma acc parallel loop gang num_workers(W) vector_length(V) BK1_DATA_CLAUSES
     for (std::size_t g = 0; g < ngang; ++g) {
+        // The boxes of the gang's W elements, one slice per worker, as a
+        // gang-private array: those go to shared memory (-Minfo: "CUDA shared
+        // memory used for w0g,w1g"), whereas boxes declared inside the worker
+        // loop were placed by nvc++ 25.3 outside shared memory (no such line
+        // in its report) and the kernel ran below gang3 at most orders.
+        T w0g[W][nq * nq * nq];
+        T w1g[W][nq * nq * nq];
         #pragma acc loop worker
         for (int w = 0; w < W; ++w) {
             // A worker past the end recomputes the last element and skips the
@@ -340,9 +347,8 @@ void SumFactorizationWorker(
             const bool        live = e0 < nelmt;
             const std::size_t e    = live ? e0 : nelmt - 1;
 
-            // Worker-private boxes, replicated per worker by the compiler.
-            T w0s[nq * nq * nq];
-            T w1s[nq * nq * nq];
+            T* const w0s = w0g[w];
+            T* const w1s = w1g[w];
             BK1_ELEMENT_ACCESSORS(e)
 
             BK1_PHASES(BK_LOOP_VECTOR_COLLAPSE(3))
