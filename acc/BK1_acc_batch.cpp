@@ -10,26 +10,26 @@
 // the compiler doing the index decomposition, and the barrier nvc++ places
 // between consecutive vector loops = __syncthreads().
 //
-// Layouts. Every phase writes a packed array whose fastest index is the lane
-// index of that phase, so its stores, and the next phase's loads of the same
-// index, are stride-1 across lanes. The contracted index is loaded within a
-// lane. Each layout is a local lambda that maps the multi-index to the
-// linear index and returns the entry by reference. Sub-block layouts per
-// phase, fastest index last:
+// Layouts. The two work arrays are boxes of nq^3 entries per element in
+// every phase; a phase that produces nm values along an index fills the
+// first nm. Every phase writes with the lane index as the fastest box index,
+// so its stores, and the next phase's loads of the same index, are stride-1
+// across lanes; the contracted index is loaded within a lane. Per phase,
+// fastest index last:
 //
-//   step  reads           contracts  writes            lanes over
-//   1     in  (e,i,j,k)   -          A0 (e,i,j,k)      flat copy
-//   2     A0  (e,i,j,k)   i -> p     A1 (e,p,j,k)      (e,j,k)
-//   3     A1  (e,p,j,k)   j -> q     A2 (e,p,q,k)      (e,p,k)
-//   4+5   A2  (e,p,q,k)   k -> r     A3 (e,r,p,q)*JxW  (e,p,q)  loads stride nm across lanes
-//   6     A3  (e,r,p,q)   r -> k     A4 (e,k,p,q)      (e,p,q)
-//   7     A4  (e,k,p,q)   q -> j     A5 (e,j,p,k)      (e,p,k)  loads stride nq across lanes
-//   8     A5  (e,j,p,k)   p -> i     A6 (e,i,j,k)      (e,j,k)
-//   9     A6  (e,i,j,k)   -          out (e,i,j,k)     flat copy
+//   step  reads              contracts  writes              lanes over
+//   1+2   in   (e,i,j,k)     i -> p     wsp1 (e,p,j,k)      (e,j,k)
+//   3     wsp1 (e,p,j,k)     j -> q     wsp0 (e,p,q,k)      (e,p,k)
+//   4+5   wsp0 (e,p,q,k)     k -> r     wsp1 (e,r,p,q)*JxW  (e,p,q)  loads stride nq across lanes
+//   6     wsp1 (e,r,p,q)     r -> k     wsp0 (e,k,p,q)      (e,p,q)
+//   7     wsp0 (e,k,p,q)     q -> j     wsp1 (e,j,p,k)      (e,p,k)  loads stride nq across lanes
+//   8+9   wsp1 (e,j,p,k)     p -> i     out  (e,i,j,k)      (e,j,k)
 //
 // Steps 4 and 7 contract the index that the previous phase had fastest, so
 // their fibre loads are strided across lanes; one such phase per direction
-// sweep is the minimum for a three-direction chain.
+// sweep is the minimum for a three-direction chain. The input copy, the JxW
+// multiply and the output copy are fused into steps 2, 4 and 8, so a batch
+// passes through six vector loops and five barriers.
 //
 // JxW is read in the order step 4 writes: the weight of point (p,q,r) of
 // element e sits at e*nq^3 + r*nq^2 + p*nq + q. BK1.cpp uses p*nq^2 + q*nq
@@ -102,10 +102,9 @@ void SumFactorization(
         copyout(out[0:nelmt*nm*nm*nm])
     for (std::size_t g = 0; g < ngang; ++g) {
 
-        // Gang-private work arrays, two boxes of EPG elements each (shared
-        // memory on the GPU). The phases alternate between them: a phase
-        // writes a layout transposed from the one it reads, so it cannot run
-        // in place. A0, A2, A4 and A6 live in wsp0; A1, A3 and A5 in wsp1.
+        // Gang-private work arrays (shared memory on the GPU). The phases
+        // alternate between them: a phase writes a layout transposed from
+        // the one it reads, so it cannot run in place.
         T wsp0[EPG * box];
         T wsp1[EPG * box];
 
@@ -115,80 +114,65 @@ void SumFactorization(
         // the loops, so every lane still reaches every barrier.
         const index_t nb = (nelmt - e0 < std::size_t(EPG)) ? index_t(nelmt - e0) : EPG;
 
-        const T* in_b  = in  + e0 * (nm * nm * nm);
-        const T* JxW_b = JxW + e0 * box;
-        T*       out_b = out + e0 * (nm * nm * nm);
-
-        // Accessors: a lambda per packed layout, returning the entry by
-        // reference through its linear index. The multi-index order of each
-        // lambda is the layout order of the table at the top of the file,
-        // last index fastest.
+        // Accessors, returning the entry by reference through its linear
+        // index. w0/w1 are the nq^3 boxes of the work arrays; in_e/out_e the
+        // nm^3 blocks of the batch's elements; W the weights of the batch.
+        const auto w0 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
+            return wsp0[((e * nq + a) * nq + b) * nq + c];
+        };
+        const auto w1 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
+            return wsp1[((e * nq + a) * nq + b) * nq + c];
+        };
+        const auto in_e = [&](index_t e, index_t i, index_t j, index_t k) -> const T& {
+            return in[(e0 + e) * (nm * nm * nm) + (i * nm + j) * nm + k];
+        };
+        const auto out_e = [&](index_t e, index_t i, index_t j, index_t k) -> T& {
+            return out[(e0 + e) * (nm * nm * nm) + (i * nm + j) * nm + k];
+        };
+        const auto W = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
+            return JxW[(e0 + e) * box + (r * nq + p) * nq + q];
+        };
         // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
         const auto B = [&](index_t i, index_t p) -> const T& {
             return basis[i * nq + p];
         };
-        // JxW of the batch, (e, r, p, q): the order step 4 writes
-        const auto W = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
-            return JxW_b[((e * nq + r) * nq + p) * nq + q];
-        };
 
-        // step-1 : copy the batch's input, contiguous in memory, into A0
-        #pragma acc loop vector
-        for (index_t t = 0; t < nb * nm * nm * nm; ++t) {
-            wsp0[t] = in_b[t];
-        }
-
+        // step-1 : read the input fibre, fused with
         // step-2 : direction 0, one lane per fibre (e, j, k)
-        {
-            const auto A0 = [&](index_t e, index_t i, index_t j, index_t k) -> const T& {
-                return wsp0[((e * nm + i) * nm + j) * nm + k];
-            };
-            const auto A1 = [&](index_t e, index_t p, index_t j, index_t k) -> T& {
-                return wsp1[((e * nq + p) * nm + j) * nm + k];
-            };
-            #pragma acc loop vector collapse(3)
-            for (index_t e = 0; e < nb; ++e) {
-                for (index_t j = 0; j < nm; ++j) {
-                    for (index_t k = 0; k < nm; ++k) {
-                        T reg[nm];
+        #pragma acc loop vector collapse(3)
+        for (index_t e = 0; e < nb; ++e) {
+            for (index_t j = 0; j < nm; ++j) {
+                for (index_t k = 0; k < nm; ++k) {
+                    T reg[nm];
+                    for (index_t i = 0; i < nm; ++i) {
+                        reg[i] = in_e(e, i, j, k);
+                    }
+                    for (index_t p = 0; p < nq; ++p) {
+                        T tmp = 0;
                         for (index_t i = 0; i < nm; ++i) {
-                            reg[i] = A0(e, i, j, k);
+                            tmp += reg[i] * B(i, p);
                         }
-                        for (index_t p = 0; p < nq; ++p) {
-                            T tmp = 0;
-                            for (index_t i = 0; i < nm; ++i) {
-                                tmp += reg[i] * B(i, p);
-                            }
-                            A1(e, p, j, k) = tmp;
-                        }
+                        w1(e, p, j, k) = tmp;
                     }
                 }
             }
         }
 
         // step-3 : direction 1, one lane per fibre (e, p, k)
-        {
-            const auto A1 = [&](index_t e, index_t p, index_t j, index_t k) -> const T& {
-                return wsp1[((e * nq + p) * nm + j) * nm + k];
-            };
-            const auto A2 = [&](index_t e, index_t p, index_t q, index_t k) -> T& {
-                return wsp0[((e * nq + p) * nq + q) * nm + k];
-            };
-            #pragma acc loop vector collapse(3)
-            for (index_t e = 0; e < nb; ++e) {
-                for (index_t p = 0; p < nq; ++p) {
-                    for (index_t k = 0; k < nm; ++k) {
-                        T reg[nm];
+        #pragma acc loop vector collapse(3)
+        for (index_t e = 0; e < nb; ++e) {
+            for (index_t p = 0; p < nq; ++p) {
+                for (index_t k = 0; k < nm; ++k) {
+                    T reg[nm];
+                    for (index_t j = 0; j < nm; ++j) {
+                        reg[j] = w1(e, p, j, k);
+                    }
+                    for (index_t q = 0; q < nq; ++q) {
+                        T tmp = 0;
                         for (index_t j = 0; j < nm; ++j) {
-                            reg[j] = A1(e, p, j, k);
+                            tmp += reg[j] * B(j, q);
                         }
-                        for (index_t q = 0; q < nq; ++q) {
-                            T tmp = 0;
-                            for (index_t j = 0; j < nm; ++j) {
-                                tmp += reg[j] * B(j, q);
-                            }
-                            A2(e, p, q, k) = tmp;
-                        }
+                        w0(e, p, q, k) = tmp;
                     }
                 }
             }
@@ -196,28 +180,20 @@ void SumFactorization(
 
         // step-4 : direction 2, one lane per fibre (e, p, q), fused with
         // step-5 : multiply with weights and determinant of Jacobi
-        {
-            const auto A2 = [&](index_t e, index_t p, index_t q, index_t k) -> const T& {
-                return wsp0[((e * nq + p) * nq + q) * nm + k];
-            };
-            const auto A3 = [&](index_t e, index_t r, index_t p, index_t q) -> T& {
-                return wsp1[((e * nq + r) * nq + p) * nq + q];
-            };
-            #pragma acc loop vector collapse(3)
-            for (index_t e = 0; e < nb; ++e) {
-                for (index_t p = 0; p < nq; ++p) {
-                    for (index_t q = 0; q < nq; ++q) {
-                        T reg[nm];
+        #pragma acc loop vector collapse(3)
+        for (index_t e = 0; e < nb; ++e) {
+            for (index_t p = 0; p < nq; ++p) {
+                for (index_t q = 0; q < nq; ++q) {
+                    T reg[nm];
+                    for (index_t k = 0; k < nm; ++k) {
+                        reg[k] = w0(e, p, q, k);
+                    }
+                    for (index_t r = 0; r < nq; ++r) {
+                        T tmp = 0;
                         for (index_t k = 0; k < nm; ++k) {
-                            reg[k] = A2(e, p, q, k);
+                            tmp += reg[k] * B(k, r);
                         }
-                        for (index_t r = 0; r < nq; ++r) {
-                            T tmp = 0;
-                            for (index_t k = 0; k < nm; ++k) {
-                                tmp += reg[k] * B(k, r);
-                            }
-                            A3(e, r, p, q) = tmp * W(e, r, p, q);
-                        }
+                        w1(e, r, p, q) = tmp * W(e, r, p, q);
                     }
                 }
             }
@@ -226,93 +202,64 @@ void SumFactorization(
         // Reverse operations
 
         // step-6 : direction 2, one lane per fibre (e, p, q)
-        {
-            const auto A3 = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
-                return wsp1[((e * nq + r) * nq + p) * nq + q];
-            };
-            const auto A4 = [&](index_t e, index_t k, index_t p, index_t q) -> T& {
-                return wsp0[((e * nm + k) * nq + p) * nq + q];
-            };
-            #pragma acc loop vector collapse(3)
-            for (index_t e = 0; e < nb; ++e) {
-                for (index_t p = 0; p < nq; ++p) {
-                    for (index_t q = 0; q < nq; ++q) {
-                        T reg[nq];
+        #pragma acc loop vector collapse(3)
+        for (index_t e = 0; e < nb; ++e) {
+            for (index_t p = 0; p < nq; ++p) {
+                for (index_t q = 0; q < nq; ++q) {
+                    T reg[nq];
+                    for (index_t r = 0; r < nq; ++r) {
+                        reg[r] = w1(e, r, p, q);
+                    }
+                    for (index_t k = 0; k < nm; ++k) {
+                        T tmp = 0;
                         for (index_t r = 0; r < nq; ++r) {
-                            reg[r] = A3(e, r, p, q);
+                            tmp += reg[r] * B(k, r);
                         }
-                        for (index_t k = 0; k < nm; ++k) {
-                            T tmp = 0;
-                            for (index_t r = 0; r < nq; ++r) {
-                                tmp += reg[r] * B(k, r);
-                            }
-                            A4(e, k, p, q) = tmp;
-                        }
+                        w0(e, k, p, q) = tmp;
                     }
                 }
             }
         }
 
         // step-7 : direction 1, one lane per fibre (e, p, k)
-        {
-            const auto A4 = [&](index_t e, index_t k, index_t p, index_t q) -> const T& {
-                return wsp0[((e * nm + k) * nq + p) * nq + q];
-            };
-            const auto A5 = [&](index_t e, index_t j, index_t p, index_t k) -> T& {
-                return wsp1[((e * nm + j) * nq + p) * nm + k];
-            };
-            #pragma acc loop vector collapse(3)
-            for (index_t e = 0; e < nb; ++e) {
-                for (index_t p = 0; p < nq; ++p) {
-                    for (index_t k = 0; k < nm; ++k) {
-                        T reg[nq];
+        #pragma acc loop vector collapse(3)
+        for (index_t e = 0; e < nb; ++e) {
+            for (index_t p = 0; p < nq; ++p) {
+                for (index_t k = 0; k < nm; ++k) {
+                    T reg[nq];
+                    for (index_t q = 0; q < nq; ++q) {
+                        reg[q] = w0(e, k, p, q);
+                    }
+                    for (index_t j = 0; j < nm; ++j) {
+                        T tmp = 0;
                         for (index_t q = 0; q < nq; ++q) {
-                            reg[q] = A4(e, k, p, q);
+                            tmp += reg[q] * B(j, q);
                         }
-                        for (index_t j = 0; j < nm; ++j) {
-                            T tmp = 0;
-                            for (index_t q = 0; q < nq; ++q) {
-                                tmp += reg[q] * B(j, q);
-                            }
-                            A5(e, j, p, k) = tmp;
-                        }
+                        w1(e, j, p, k) = tmp;
                     }
                 }
             }
         }
 
-        // step-8 : direction 0, one lane per fibre (e, j, k)
-        {
-            const auto A5 = [&](index_t e, index_t j, index_t p, index_t k) -> const T& {
-                return wsp1[((e * nm + j) * nq + p) * nm + k];
-            };
-            const auto A6 = [&](index_t e, index_t i, index_t j, index_t k) -> T& {
-                return wsp0[((e * nm + i) * nm + j) * nm + k];
-            };
-            #pragma acc loop vector collapse(3)
-            for (index_t e = 0; e < nb; ++e) {
-                for (index_t j = 0; j < nm; ++j) {
-                    for (index_t k = 0; k < nm; ++k) {
-                        T reg[nq];
+        // step-8 : direction 0, one lane per fibre (e, j, k), fused with
+        // step-9 : the outputs go straight to the element's output block
+        #pragma acc loop vector collapse(3)
+        for (index_t e = 0; e < nb; ++e) {
+            for (index_t j = 0; j < nm; ++j) {
+                for (index_t k = 0; k < nm; ++k) {
+                    T reg[nq];
+                    for (index_t p = 0; p < nq; ++p) {
+                        reg[p] = w1(e, j, p, k);
+                    }
+                    for (index_t i = 0; i < nm; ++i) {
+                        T tmp = 0;
                         for (index_t p = 0; p < nq; ++p) {
-                            reg[p] = A5(e, j, p, k);
+                            tmp += reg[p] * B(i, p);
                         }
-                        for (index_t i = 0; i < nm; ++i) {
-                            T tmp = 0;
-                            for (index_t p = 0; p < nq; ++p) {
-                                tmp += reg[p] * B(i, p);
-                            }
-                            A6(e, i, j, k) = tmp;
-                        }
+                        out_e(e, i, j, k) = tmp;
                     }
                 }
             }
-        }
-
-        // step-9 : copy A6, contiguous, to the batch's output
-        #pragma acc loop vector
-        for (index_t t = 0; t < nb * nm * nm * nm; ++t) {
-            out_b[t] = wsp0[t];
         }
     }
 }
