@@ -90,7 +90,7 @@ void SumFactorization(
 
     constexpr int nm = nq - 1;
     [[maybe_unused]] constexpr int vlen = vector_length(nq, EPG);   // only the pragma uses it
-    constexpr int box = nq * nq * nq;             // scratch per element
+    constexpr int box = nq * nq * nq;             // work array entries per element
 
     const std::size_t ngang = (nelmt + EPG - 1) / EPG;
 
@@ -102,9 +102,12 @@ void SumFactorization(
         copyout(out[0:nelmt*nm*nm*nm])
     for (std::size_t g = 0; g < ngang; ++g) {
 
-        // Gang-private scratch: two boxes of EPG elements, ping-ponged by the
-        // phases through the packed accessors below (shared memory on the GPU).
-        T scratch[2][EPG * box];
+        // Gang-private work arrays, two boxes of EPG elements each (shared
+        // memory on the GPU). The phases alternate between them: a phase
+        // writes a layout transposed from the one it reads, so it cannot run
+        // in place. A0, A2, A4 and A6 live in wsp0; A1, A3 and A5 in wsp1.
+        T wsp0[EPG * box];
+        T wsp1[EPG * box];
 
         const std::size_t e0 = g * EPG;
         // Elements in this batch; the last batch may be short. The phases
@@ -132,16 +135,16 @@ void SumFactorization(
         // step-1 : copy the batch's input, contiguous in memory, into A0
         #pragma acc loop vector
         for (index_t t = 0; t < nb * nm * nm * nm; ++t) {
-            scratch[0][t] = in_b[t];
+            wsp0[t] = in_b[t];
         }
 
         // step-2 : direction 0, one lane per fibre (e, j, k)
         {
             const auto A0 = [&](index_t e, index_t i, index_t j, index_t k) -> const T& {
-                return scratch[0][((e * nm + i) * nm + j) * nm + k];
+                return wsp0[((e * nm + i) * nm + j) * nm + k];
             };
             const auto A1 = [&](index_t e, index_t p, index_t j, index_t k) -> T& {
-                return scratch[1][((e * nq + p) * nm + j) * nm + k];
+                return wsp1[((e * nq + p) * nm + j) * nm + k];
             };
             #pragma acc loop vector collapse(3)
             for (index_t e = 0; e < nb; ++e) {
@@ -166,10 +169,10 @@ void SumFactorization(
         // step-3 : direction 1, one lane per fibre (e, p, k)
         {
             const auto A1 = [&](index_t e, index_t p, index_t j, index_t k) -> const T& {
-                return scratch[1][((e * nq + p) * nm + j) * nm + k];
+                return wsp1[((e * nq + p) * nm + j) * nm + k];
             };
             const auto A2 = [&](index_t e, index_t p, index_t q, index_t k) -> T& {
-                return scratch[0][((e * nq + p) * nq + q) * nm + k];
+                return wsp0[((e * nq + p) * nq + q) * nm + k];
             };
             #pragma acc loop vector collapse(3)
             for (index_t e = 0; e < nb; ++e) {
@@ -195,10 +198,10 @@ void SumFactorization(
         // step-5 : multiply with weights and determinant of Jacobi
         {
             const auto A2 = [&](index_t e, index_t p, index_t q, index_t k) -> const T& {
-                return scratch[0][((e * nq + p) * nq + q) * nm + k];
+                return wsp0[((e * nq + p) * nq + q) * nm + k];
             };
             const auto A3 = [&](index_t e, index_t r, index_t p, index_t q) -> T& {
-                return scratch[1][((e * nq + r) * nq + p) * nq + q];
+                return wsp1[((e * nq + r) * nq + p) * nq + q];
             };
             #pragma acc loop vector collapse(3)
             for (index_t e = 0; e < nb; ++e) {
@@ -225,10 +228,10 @@ void SumFactorization(
         // step-6 : direction 2, one lane per fibre (e, p, q)
         {
             const auto A3 = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
-                return scratch[1][((e * nq + r) * nq + p) * nq + q];
+                return wsp1[((e * nq + r) * nq + p) * nq + q];
             };
             const auto A4 = [&](index_t e, index_t k, index_t p, index_t q) -> T& {
-                return scratch[0][((e * nm + k) * nq + p) * nq + q];
+                return wsp0[((e * nm + k) * nq + p) * nq + q];
             };
             #pragma acc loop vector collapse(3)
             for (index_t e = 0; e < nb; ++e) {
@@ -253,10 +256,10 @@ void SumFactorization(
         // step-7 : direction 1, one lane per fibre (e, p, k)
         {
             const auto A4 = [&](index_t e, index_t k, index_t p, index_t q) -> const T& {
-                return scratch[0][((e * nm + k) * nq + p) * nq + q];
+                return wsp0[((e * nm + k) * nq + p) * nq + q];
             };
             const auto A5 = [&](index_t e, index_t j, index_t p, index_t k) -> T& {
-                return scratch[1][((e * nm + j) * nq + p) * nm + k];
+                return wsp1[((e * nm + j) * nq + p) * nm + k];
             };
             #pragma acc loop vector collapse(3)
             for (index_t e = 0; e < nb; ++e) {
@@ -281,10 +284,10 @@ void SumFactorization(
         // step-8 : direction 0, one lane per fibre (e, j, k)
         {
             const auto A5 = [&](index_t e, index_t j, index_t p, index_t k) -> const T& {
-                return scratch[1][((e * nm + j) * nq + p) * nm + k];
+                return wsp1[((e * nm + j) * nq + p) * nm + k];
             };
             const auto A6 = [&](index_t e, index_t i, index_t j, index_t k) -> T& {
-                return scratch[0][((e * nm + i) * nm + j) * nm + k];
+                return wsp0[((e * nm + i) * nm + j) * nm + k];
             };
             #pragma acc loop vector collapse(3)
             for (index_t e = 0; e < nb; ++e) {
@@ -309,7 +312,7 @@ void SumFactorization(
         // step-9 : copy A6, contiguous, to the batch's output
         #pragma acc loop vector
         for (index_t t = 0; t < nb * nm * nm * nm; ++t) {
-            out_b[t] = scratch[0][t];
+            out_b[t] = wsp0[t];
         }
     }
 }
