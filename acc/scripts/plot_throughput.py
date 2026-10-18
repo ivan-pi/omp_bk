@@ -3,9 +3,9 @@
 
 usage: acc/scripts/plot_throughput.py results.csv [out.png] [figure title]
 
-One panel per executable in the CSV (in order of first appearance): GDoF/s
-(linear, shared axis) versus degrees of freedom (log), one curve per
-polynomial order with its own legend entry.  Needs matplotlib.
+One panel per kernel in the CSV (in order of first appearance), at most
+three per row: GDoF/s (linear, shared axis) versus degrees of freedom (log),
+one curve per polynomial order with its own legend entry.  Needs matplotlib.
 """
 import csv
 import math
@@ -46,8 +46,13 @@ ymax = max(g for byp in data.values() for pts in byp.values() for _, g in pts) *
 colors = plt.get_cmap("tab10")
 ocolor = {p: colors(i % 10) for i, p in enumerate(orders)}
 
-fig, axes = plt.subplots(1, len(kernels), figsize=(5.2 * len(kernels), 3.9), squeeze=False)
-for ax, k in zip(axes[0], kernels):
+cols = min(3, len(kernels))
+rows = (len(kernels) + cols - 1) // cols
+fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 3.9 * rows), squeeze=False)
+axes = axes.flatten()
+for ax in axes[len(kernels):]:
+    ax.set_visible(False)
+for ax, k in zip(axes, kernels):
     for p in sorted(data[k]):
         pts = sorted(data[k][p])
         ax.plot([d for d, _ in pts], [g for _, g in pts], "o-", ms=2.5, lw=1.2,
