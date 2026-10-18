@@ -1,14 +1,17 @@
 // BK1 (mass matrix) with OpenACC offloading, batched: each gang holds EPG
 // elements in shared memory and every phase is one flat vector loop over the
-// fibres of the whole batch, one lane per fibre. A lane loads the inputs
-// along the contraction direction into registers and forms every output of
-// that line, so each shared-memory value is read once per phase instead of
-// once per output. This is the structure of the CUDA kernel in
+// fibres of the whole batch, one lane per fibre: a lane forms every output
+// of its line from the inputs along the contraction direction. This is the
+// structure of the CUDA kernel in
 // dealii-X/benchmarks (CEED_BK/include/kernels/BK1/templated_cuda_kernels.cuh)
 // written in OpenACC: gang = thread block, `loop vector collapse(3)` over
 // (element, free index, free index) = the block-stride loop over fibres with
 // the compiler doing the index decomposition, and the barrier nvc++ places
-// between consecutive vector loops = __syncthreads().
+// between consecutive vector loops = __syncthreads(). The CUDA kernel copies
+// each fibre into a register array first because its two workspaces are
+// pointers into one shared buffer; here wsp0 and wsp1 are distinct arrays,
+// so the compiler can keep the fibre in registers across the output loop by
+// itself and the loads are written in place.
 //
 // Layouts. The two work arrays are boxes of nq^3 entries per element in
 // every phase; a phase that produces nm values along an index fills the
@@ -143,14 +146,10 @@ void SumFactorization(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
-                    T reg[nm];
-                    for (index_t i = 0; i < nm; ++i) {
-                        reg[i] = in_e(e, i, j, k);
-                    }
                     for (index_t p = 0; p < nq; ++p) {
                         T tmp = 0;
                         for (index_t i = 0; i < nm; ++i) {
-                            tmp += reg[i] * B(i, p);
+                            tmp += in_e(e, i, j, k) * B(i, p);
                         }
                         w1(e, p, j, k) = tmp;
                     }
@@ -163,14 +162,10 @@ void SumFactorization(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t k = 0; k < nm; ++k) {
-                    T reg[nm];
-                    for (index_t j = 0; j < nm; ++j) {
-                        reg[j] = w1(e, p, j, k);
-                    }
                     for (index_t q = 0; q < nq; ++q) {
                         T tmp = 0;
                         for (index_t j = 0; j < nm; ++j) {
-                            tmp += reg[j] * B(j, q);
+                            tmp += w1(e, p, j, k) * B(j, q);
                         }
                         w0(e, p, q, k) = tmp;
                     }
@@ -184,14 +179,10 @@ void SumFactorization(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t q = 0; q < nq; ++q) {
-                    T reg[nm];
-                    for (index_t k = 0; k < nm; ++k) {
-                        reg[k] = w0(e, p, q, k);
-                    }
                     for (index_t r = 0; r < nq; ++r) {
                         T tmp = 0;
                         for (index_t k = 0; k < nm; ++k) {
-                            tmp += reg[k] * B(k, r);
+                            tmp += w0(e, p, q, k) * B(k, r);
                         }
                         w1(e, r, p, q) = tmp * W(e, r, p, q);
                     }
@@ -206,14 +197,10 @@ void SumFactorization(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t q = 0; q < nq; ++q) {
-                    T reg[nq];
-                    for (index_t r = 0; r < nq; ++r) {
-                        reg[r] = w1(e, r, p, q);
-                    }
                     for (index_t k = 0; k < nm; ++k) {
                         T tmp = 0;
                         for (index_t r = 0; r < nq; ++r) {
-                            tmp += reg[r] * B(k, r);
+                            tmp += w1(e, r, p, q) * B(k, r);
                         }
                         w0(e, k, p, q) = tmp;
                     }
@@ -226,14 +213,10 @@ void SumFactorization(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t p = 0; p < nq; ++p) {
                 for (index_t k = 0; k < nm; ++k) {
-                    T reg[nq];
-                    for (index_t q = 0; q < nq; ++q) {
-                        reg[q] = w0(e, k, p, q);
-                    }
                     for (index_t j = 0; j < nm; ++j) {
                         T tmp = 0;
                         for (index_t q = 0; q < nq; ++q) {
-                            tmp += reg[q] * B(j, q);
+                            tmp += w0(e, k, p, q) * B(j, q);
                         }
                         w1(e, j, p, k) = tmp;
                     }
@@ -247,14 +230,10 @@ void SumFactorization(
         for (index_t e = 0; e < nb; ++e) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
-                    T reg[nq];
-                    for (index_t p = 0; p < nq; ++p) {
-                        reg[p] = w1(e, j, p, k);
-                    }
                     for (index_t i = 0; i < nm; ++i) {
                         T tmp = 0;
                         for (index_t p = 0; p < nq; ++p) {
-                            tmp += reg[p] * B(i, p);
+                            tmp += w1(e, j, p, k) * B(i, p);
                         }
                         out_e(e, i, j, k) = tmp;
                     }
