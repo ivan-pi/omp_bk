@@ -60,9 +60,8 @@ vector loop over the fibres of the batch, and a lane keeps the inputs along
 the contraction direction in registers while it forms all outputs of that
 line. The batch size follows from `nq` (comment at the top of the file); the
 driver prints the chosen configuration on stderr. The batch knobs are
-build-time macros, e.g. `make -C acc BK1_acc_batch DEFS="-DBK_EPG=5
--DBK_BOX_PAD=1"` (`BK_TARGET_LANES`, `BK_MAX_SCRATCH_KB`, `BK_EPG`,
-`BK_BOX_PAD`; see the file).
+build-time macros, e.g. `make -C acc BK1_acc_batch DEFS=-DBK_EPG=3`
+(`BK_TARGET_LANES`, `BK_MAX_SCRATCH_KB`, `BK_EPG`; see the file).
 
 ```sh
 make -C acc                        # nvc++ -acc=gpu, prints the -Minfo=acc report

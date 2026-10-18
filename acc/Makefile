@@ -12,7 +12,7 @@
 # ACC, INFO and HOSTACC can be overridden on the command line, e.g.
 #   make -C acc ACC="-acc=gpu -gpu=cc80"
 # DEFS passes -D options to every build, e.g. the batch knobs of BK1_acc_batch:
-#   make -C acc BK1_acc_batch DEFS="-DBK_EPG=5 -DBK_BOX_PAD=1"
+#   make -C acc BK1_acc_batch DEFS=-DBK_EPG=3
 
 CXX = nvc++
 

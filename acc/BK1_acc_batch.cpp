@@ -62,22 +62,21 @@ namespace bk {
 //                     allocation of a block is 48 KB (default 48)
 //   BK_EPG            fixed elements per gang for every order, overriding
 //                     the two above
-//   BK_BOX_PAD        extra entries on the fastest box extent (default 0);
-//                     1 makes the stride odd for even nq, which removes the
-//                     bank conflicts of the strided loads in steps 4 and 7
+// Measured on GH200 with 1e6 elements: at nq = 9 and 10 the best batch is 3
+// elements (256 and 320 lanes), and 512 lanes is the worst of 2..6 elements
+// at both orders. Padding the fastest box extent to an odd stride, to clear
+// the bank conflicts of the strided loads in steps 4 and 7, lost 5 to 21
+// percent at nq = 4, 8 and 10: it breaks the stride-1 runs of every other
+// access into 2-way conflicts, and those are the majority.
 #ifndef BK_TARGET_LANES
 #define BK_TARGET_LANES 512
 #endif
 #ifndef BK_MAX_SCRATCH_KB
 #define BK_MAX_SCRATCH_KB 48
 #endif
-#ifndef BK_BOX_PAD
-#define BK_BOX_PAD 0
-#endif
 
-// Leading dimension and entries of one element's work box.
-constexpr int box_ld(const int nq) { return nq + BK_BOX_PAD; }
-constexpr int box_entries(const int nq) { return nq * nq * box_ld(nq); }
+// Entries of one element's work box.
+constexpr int box_entries(const int nq) { return nq * nq * nq; }
 
 // Elements per gang: enough fibres (nq^2 per element) to reach the lane
 // target, capped by the shared-memory budget. With the defaults the cap
@@ -118,9 +117,7 @@ void SumFactorization(
 
     constexpr int nm = nq - 1;
     [[maybe_unused]] constexpr int vlen = vector_length(nq, EPG);   // only the pragma uses it
-    constexpr int ld  = box_ld(nq);               // fastest box stride
     constexpr int box = box_entries(nq);          // work array entries per element
-    constexpr int nq3 = nq * nq * nq;             // JxW entries per element
     static_assert(2 * EPG * box * int(sizeof(T)) <= 48 * 1024,
                   "the two work boxes must fit the static shared memory of a block");
 
@@ -152,10 +149,10 @@ void SumFactorization(
         // arrays; in_e/out_e the nm^3 blocks of the batch's elements; W the
         // weights of the batch.
         const auto w0 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return wsp0[e * box + a * (nq * ld) + b * ld + c];
+            return wsp0[e * box + a * (nq * nq) + b * nq + c];
         };
         const auto w1 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return wsp1[e * box + a * (nq * ld) + b * ld + c];
+            return wsp1[e * box + a * (nq * nq) + b * nq + c];
         };
         const auto in_e = [&](index_t e, index_t i, index_t j, index_t k) -> const T& {
             return in[(e0 + e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
@@ -164,7 +161,7 @@ void SumFactorization(
             return out[(e0 + e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
         };
         const auto W = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
-            return JxW[(e0 + e) * nq3 + r * (nq * nq) + p * nq + q];
+            return JxW[(e0 + e) * box + r * (nq * nq) + p * nq + q];
         };
         // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
         const auto B = [&](index_t i, index_t p) -> const T& {
@@ -370,8 +367,7 @@ void run_test(const std::size_t nelmt, const int ntests, const bool random)
     constexpr int epg = elements_per_gang(nq);
     std::cerr << "batch: nq = " << nq << " elements/gang = " << epg
               << " vector_length = " << vector_length(nq, epg)
-              << " scratch = " << 2 * epg * box_entries(nq) * sizeof(T) << " bytes"
-              << " box_pad = " << BK_BOX_PAD << "\n";
+              << " scratch = " << 2 * epg * box_entries(nq) * sizeof(T) << " bytes\n";
 }
 
 // Default element count, the same 2^19 as BK1.cpp.
