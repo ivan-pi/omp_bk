@@ -58,8 +58,10 @@ namespace bk {
 
 // Elements per gang: enough fibres (nq^2 per element) to fill about 512
 // lanes, capped so that the two work boxes stay within the 48 KB static
-// shared-memory allocation of a block. nq = 4: 32 elements; nq = 8: 8;
-// nq = 10: 6 (the shared-memory cap, 48000 bytes).
+// shared-memory allocation of a block. With the lane target at 512 the cap
+// never binds for nq <= 10: nq = 4: 32 elements (16 KB); nq = 8: 8 (32 KB);
+// nq = 9: 6 (34 KB); nq = 10: 5 (40 KB). Raising target_lanes is what
+// would run into it.
 constexpr int elements_per_gang(const int nq)
 {
     constexpr int target_lanes = 512;
