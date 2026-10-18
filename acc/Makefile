@@ -11,6 +11,8 @@
 #
 # ACC, INFO and HOSTACC can be overridden on the command line, e.g.
 #   make -C acc ACC="-acc=gpu -gpu=cc80"
+# DEFS passes -D options to every build, e.g. the batch knobs of BK1_acc_batch:
+#   make -C acc BK1_acc_batch DEFS="-DBK_EPG=5 -DBK_BOX_PAD=1"
 
 CXX = nvc++
 
@@ -25,6 +27,7 @@ else
 endif
 
 CXXFLAGS = -Wall -O3 -std=c++17
+DEFS =
 
 HEADERS = acc_common.h ../bk_common.h
 
@@ -37,10 +40,10 @@ all: $(PROGS)
 host: $(PROGS:=_host)
 
 $(PROGS): %: %.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS) $(ACC) $(INFO) -o $@ $<
+	$(CXX) $(CXXFLAGS) $(DEFS) $(ACC) $(INFO) -o $@ $<
 
 $(PROGS:=_host): %_host: %.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS) $(HOSTACC) -o $@ $<
+	$(CXX) $(CXXFLAGS) $(DEFS) $(HOSTACC) -o $@ $<
 
 clean:
 	$(RM) $(PROGS) $(PROGS:=_host) *.o

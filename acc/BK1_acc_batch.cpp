@@ -56,25 +56,47 @@
 
 namespace bk {
 
-// Elements per gang: enough fibres (nq^2 per element) to fill about 512
-// lanes, capped so that the two work boxes stay within the 48 KB static
-// shared-memory allocation of a block. With the lane target at 512 the cap
+// Batch configuration, overridable at build time (make -C acc DEFS=-D...):
+//   BK_TARGET_LANES   fibres per gang the batch size aims for (default 512)
+//   BK_MAX_SCRATCH_KB cap on the two work boxes, the static shared-memory
+//                     allocation of a block is 48 KB (default 48)
+//   BK_EPG            fixed elements per gang for every order, overriding
+//                     the two above
+//   BK_BOX_PAD        extra entries on the fastest box extent (default 0);
+//                     1 makes the stride odd for even nq, which removes the
+//                     bank conflicts of the strided loads in steps 4 and 7
+#ifndef BK_TARGET_LANES
+#define BK_TARGET_LANES 512
+#endif
+#ifndef BK_MAX_SCRATCH_KB
+#define BK_MAX_SCRATCH_KB 48
+#endif
+#ifndef BK_BOX_PAD
+#define BK_BOX_PAD 0
+#endif
+
+// Leading dimension and entries of one element's work box.
+constexpr int box_ld(const int nq) { return nq + BK_BOX_PAD; }
+constexpr int box_entries(const int nq) { return nq * nq * box_ld(nq); }
+
+// Elements per gang: enough fibres (nq^2 per element) to reach the lane
+// target, capped by the shared-memory budget. With the defaults the cap
 // never binds for nq <= 10: nq = 4: 32 elements (16 KB); nq = 8: 8 (32 KB);
-// nq = 9: 6 (34 KB); nq = 10: 5 (40 KB). Raising target_lanes is what
-// would run into it.
+// nq = 9: 6 (34 KB); nq = 10: 5 (40 KB).
 constexpr int elements_per_gang(const int nq)
 {
-    constexpr int target_lanes = 512;
-    constexpr int max_scratch_bytes = 48 * 1024;
-    const int by_lanes = target_lanes / (nq * nq);
-    const int by_shared = max_scratch_bytes / (2 * nq * nq * nq * int(sizeof(float)));
+#ifdef BK_EPG
+    return BK_EPG;
+#else
+    const int by_lanes = BK_TARGET_LANES / (nq * nq);
+    const int by_shared = (BK_MAX_SCRATCH_KB * 1024) / (2 * box_entries(nq) * int(sizeof(float)));
     const int n = by_lanes < by_shared ? by_lanes : by_shared;
     return n < 1 ? 1 : n;
+#endif
 }
 
 // Vector length: the batch's fibre count rounded up to whole warps. Phases
-// with more iterations than lanes (the flat copies, nq^3 per element) are
-// strip-mined by the compiler.
+// with more iterations than lanes are strip-mined by the compiler.
 constexpr int vector_length(const int nq, const int epg)
 {
     constexpr int warp = 32;
@@ -96,7 +118,11 @@ void SumFactorization(
 
     constexpr int nm = nq - 1;
     [[maybe_unused]] constexpr int vlen = vector_length(nq, EPG);   // only the pragma uses it
-    constexpr int box = nq * nq * nq;             // work array entries per element
+    constexpr int ld  = box_ld(nq);               // fastest box stride
+    constexpr int box = box_entries(nq);          // work array entries per element
+    constexpr int nq3 = nq * nq * nq;             // JxW entries per element
+    static_assert(2 * EPG * box * int(sizeof(T)) <= 48 * 1024,
+                  "the two work boxes must fit the static shared memory of a block");
 
     const std::size_t ngang = (nelmt + EPG - 1) / EPG;
 
@@ -126,10 +152,10 @@ void SumFactorization(
         // arrays; in_e/out_e the nm^3 blocks of the batch's elements; W the
         // weights of the batch.
         const auto w0 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return wsp0[e * box + a * (nq * nq) + b * nq + c];
+            return wsp0[e * box + a * (nq * ld) + b * ld + c];
         };
         const auto w1 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return wsp1[e * box + a * (nq * nq) + b * nq + c];
+            return wsp1[e * box + a * (nq * ld) + b * ld + c];
         };
         const auto in_e = [&](index_t e, index_t i, index_t j, index_t k) -> const T& {
             return in[(e0 + e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
@@ -138,7 +164,7 @@ void SumFactorization(
             return out[(e0 + e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
         };
         const auto W = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
-            return JxW[(e0 + e) * box + r * (nq * nq) + p * nq + q];
+            return JxW[(e0 + e) * nq3 + r * (nq * nq) + p * nq + q];
         };
         // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
         const auto B = [&](index_t i, index_t p) -> const T& {
@@ -344,7 +370,8 @@ void run_test(const std::size_t nelmt, const int ntests, const bool random)
     constexpr int epg = elements_per_gang(nq);
     std::cerr << "batch: nq = " << nq << " elements/gang = " << epg
               << " vector_length = " << vector_length(nq, epg)
-              << " scratch = " << 2 * epg * nq * nq * nq * sizeof(T) << " bytes\n";
+              << " scratch = " << 2 * epg * box_entries(nq) * sizeof(T) << " bytes"
+              << " box_pad = " << BK_BOX_PAD << "\n";
 }
 
 // Default element count, the same 2^19 as BK1.cpp.
