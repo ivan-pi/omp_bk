@@ -5,9 +5,10 @@
 // that line, so each shared-memory value is read once per phase instead of
 // once per output. This is the structure of the CUDA kernel in
 // dealii-X/benchmarks (CEED_BK/include/kernels/BK1/templated_cuda_kernels.cuh)
-// written in OpenACC: gang = thread block, flat `loop vector` = block-stride
-// loop, and the barrier nvc++ places between consecutive vector loops =
-// __syncthreads().
+// written in OpenACC: gang = thread block, `loop vector collapse(3)` over
+// (element, free index, free index) = the block-stride loop over fibres with
+// the compiler doing the index decomposition, and the barrier nvc++ places
+// between consecutive vector loops = __syncthreads().
 //
 // Layouts. Every phase writes a packed array whose fastest index is the lane
 // index of that phase, so its stores, and the next phase's loads of the same
@@ -142,21 +143,22 @@ void SumFactorization(
             const auto A1 = [&](index_t e, index_t p, index_t j, index_t k) -> T& {
                 return scratch[1][((e * nq + p) * nm + j) * nm + k];
             };
-            #pragma acc loop vector
-            for (index_t t = 0; t < nb * nm * nm; ++t) {
-                const index_t e = t / (nm * nm);
-                const index_t j = (t / nm) % nm;
-                const index_t k = t % nm;
-                T reg[nm];
-                for (index_t i = 0; i < nm; ++i) {
-                    reg[i] = A0(e, i, j, k);
-                }
-                for (index_t p = 0; p < nq; ++p) {
-                    T tmp = 0;
-                    for (index_t i = 0; i < nm; ++i) {
-                        tmp += reg[i] * B(i, p);
+            #pragma acc loop vector collapse(3)
+            for (index_t e = 0; e < nb; ++e) {
+                for (index_t j = 0; j < nm; ++j) {
+                    for (index_t k = 0; k < nm; ++k) {
+                        T reg[nm];
+                        for (index_t i = 0; i < nm; ++i) {
+                            reg[i] = A0(e, i, j, k);
+                        }
+                        for (index_t p = 0; p < nq; ++p) {
+                            T tmp = 0;
+                            for (index_t i = 0; i < nm; ++i) {
+                                tmp += reg[i] * B(i, p);
+                            }
+                            A1(e, p, j, k) = tmp;
+                        }
                     }
-                    A1(e, p, j, k) = tmp;
                 }
             }
         }
@@ -169,21 +171,22 @@ void SumFactorization(
             const auto A2 = [&](index_t e, index_t p, index_t q, index_t k) -> T& {
                 return scratch[0][((e * nq + p) * nq + q) * nm + k];
             };
-            #pragma acc loop vector
-            for (index_t t = 0; t < nb * nq * nm; ++t) {
-                const index_t e = t / (nq * nm);
-                const index_t p = (t / nm) % nq;
-                const index_t k = t % nm;
-                T reg[nm];
-                for (index_t j = 0; j < nm; ++j) {
-                    reg[j] = A1(e, p, j, k);
-                }
-                for (index_t q = 0; q < nq; ++q) {
-                    T tmp = 0;
-                    for (index_t j = 0; j < nm; ++j) {
-                        tmp += reg[j] * B(j, q);
+            #pragma acc loop vector collapse(3)
+            for (index_t e = 0; e < nb; ++e) {
+                for (index_t p = 0; p < nq; ++p) {
+                    for (index_t k = 0; k < nm; ++k) {
+                        T reg[nm];
+                        for (index_t j = 0; j < nm; ++j) {
+                            reg[j] = A1(e, p, j, k);
+                        }
+                        for (index_t q = 0; q < nq; ++q) {
+                            T tmp = 0;
+                            for (index_t j = 0; j < nm; ++j) {
+                                tmp += reg[j] * B(j, q);
+                            }
+                            A2(e, p, q, k) = tmp;
+                        }
                     }
-                    A2(e, p, q, k) = tmp;
                 }
             }
         }
@@ -197,21 +200,22 @@ void SumFactorization(
             const auto A3 = [&](index_t e, index_t r, index_t p, index_t q) -> T& {
                 return scratch[1][((e * nq + r) * nq + p) * nq + q];
             };
-            #pragma acc loop vector
-            for (index_t t = 0; t < nb * nq * nq; ++t) {
-                const index_t e = t / (nq * nq);
-                const index_t p = (t / nq) % nq;
-                const index_t q = t % nq;
-                T reg[nm];
-                for (index_t k = 0; k < nm; ++k) {
-                    reg[k] = A2(e, p, q, k);
-                }
-                for (index_t r = 0; r < nq; ++r) {
-                    T tmp = 0;
-                    for (index_t k = 0; k < nm; ++k) {
-                        tmp += reg[k] * B(k, r);
+            #pragma acc loop vector collapse(3)
+            for (index_t e = 0; e < nb; ++e) {
+                for (index_t p = 0; p < nq; ++p) {
+                    for (index_t q = 0; q < nq; ++q) {
+                        T reg[nm];
+                        for (index_t k = 0; k < nm; ++k) {
+                            reg[k] = A2(e, p, q, k);
+                        }
+                        for (index_t r = 0; r < nq; ++r) {
+                            T tmp = 0;
+                            for (index_t k = 0; k < nm; ++k) {
+                                tmp += reg[k] * B(k, r);
+                            }
+                            A3(e, r, p, q) = tmp * W(e, r, p, q);
+                        }
                     }
-                    A3(e, r, p, q) = tmp * W(e, r, p, q);
                 }
             }
         }
@@ -226,21 +230,22 @@ void SumFactorization(
             const auto A4 = [&](index_t e, index_t k, index_t p, index_t q) -> T& {
                 return scratch[0][((e * nm + k) * nq + p) * nq + q];
             };
-            #pragma acc loop vector
-            for (index_t t = 0; t < nb * nq * nq; ++t) {
-                const index_t e = t / (nq * nq);
-                const index_t p = (t / nq) % nq;
-                const index_t q = t % nq;
-                T reg[nq];
-                for (index_t r = 0; r < nq; ++r) {
-                    reg[r] = A3(e, r, p, q);
-                }
-                for (index_t k = 0; k < nm; ++k) {
-                    T tmp = 0;
-                    for (index_t r = 0; r < nq; ++r) {
-                        tmp += reg[r] * B(k, r);
+            #pragma acc loop vector collapse(3)
+            for (index_t e = 0; e < nb; ++e) {
+                for (index_t p = 0; p < nq; ++p) {
+                    for (index_t q = 0; q < nq; ++q) {
+                        T reg[nq];
+                        for (index_t r = 0; r < nq; ++r) {
+                            reg[r] = A3(e, r, p, q);
+                        }
+                        for (index_t k = 0; k < nm; ++k) {
+                            T tmp = 0;
+                            for (index_t r = 0; r < nq; ++r) {
+                                tmp += reg[r] * B(k, r);
+                            }
+                            A4(e, k, p, q) = tmp;
+                        }
                     }
-                    A4(e, k, p, q) = tmp;
                 }
             }
         }
@@ -253,21 +258,22 @@ void SumFactorization(
             const auto A5 = [&](index_t e, index_t j, index_t p, index_t k) -> T& {
                 return scratch[1][((e * nm + j) * nq + p) * nm + k];
             };
-            #pragma acc loop vector
-            for (index_t t = 0; t < nb * nq * nm; ++t) {
-                const index_t e = t / (nq * nm);
-                const index_t p = (t / nm) % nq;
-                const index_t k = t % nm;
-                T reg[nq];
-                for (index_t q = 0; q < nq; ++q) {
-                    reg[q] = A4(e, k, p, q);
-                }
-                for (index_t j = 0; j < nm; ++j) {
-                    T tmp = 0;
-                    for (index_t q = 0; q < nq; ++q) {
-                        tmp += reg[q] * B(j, q);
+            #pragma acc loop vector collapse(3)
+            for (index_t e = 0; e < nb; ++e) {
+                for (index_t p = 0; p < nq; ++p) {
+                    for (index_t k = 0; k < nm; ++k) {
+                        T reg[nq];
+                        for (index_t q = 0; q < nq; ++q) {
+                            reg[q] = A4(e, k, p, q);
+                        }
+                        for (index_t j = 0; j < nm; ++j) {
+                            T tmp = 0;
+                            for (index_t q = 0; q < nq; ++q) {
+                                tmp += reg[q] * B(j, q);
+                            }
+                            A5(e, j, p, k) = tmp;
+                        }
                     }
-                    A5(e, j, p, k) = tmp;
                 }
             }
         }
@@ -280,21 +286,22 @@ void SumFactorization(
             const auto A6 = [&](index_t e, index_t i, index_t j, index_t k) -> T& {
                 return scratch[0][((e * nm + i) * nm + j) * nm + k];
             };
-            #pragma acc loop vector
-            for (index_t t = 0; t < nb * nm * nm; ++t) {
-                const index_t e = t / (nm * nm);
-                const index_t j = (t / nm) % nm;
-                const index_t k = t % nm;
-                T reg[nq];
-                for (index_t p = 0; p < nq; ++p) {
-                    reg[p] = A5(e, j, p, k);
-                }
-                for (index_t i = 0; i < nm; ++i) {
-                    T tmp = 0;
-                    for (index_t p = 0; p < nq; ++p) {
-                        tmp += reg[p] * B(i, p);
+            #pragma acc loop vector collapse(3)
+            for (index_t e = 0; e < nb; ++e) {
+                for (index_t j = 0; j < nm; ++j) {
+                    for (index_t k = 0; k < nm; ++k) {
+                        T reg[nq];
+                        for (index_t p = 0; p < nq; ++p) {
+                            reg[p] = A5(e, j, p, k);
+                        }
+                        for (index_t i = 0; i < nm; ++i) {
+                            T tmp = 0;
+                            for (index_t p = 0; p < nq; ++p) {
+                                tmp += reg[p] * B(i, p);
+                            }
+                            A6(e, i, j, k) = tmp;
+                        }
                     }
-                    A6(e, i, j, k) = tmp;
                 }
             }
         }
