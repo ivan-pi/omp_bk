@@ -7,9 +7,9 @@
 # env:    KERNELS="elem gang1 gang2 gang3 worker batch"
 #             kernels of BK1_acc to sweep (BK_KERNEL names).  A token
 #             name@path runs that kernel from another build of the driver,
-#             e.g. batch@acc/BK1_acc_lanes256 after
-#               make -C acc BK1_acc -B DEFS=-DBK_TARGET_LANES=256 && cp acc/BK1_acc acc/BK1_acc_lanes256
-#             and is recorded as batch@BK1_acc_lanes256.
+#             e.g. batch@acc/BK1_acc_epg3 after
+#               make -C acc BK1_acc -B DEFS=-DBK_EPG=3 && cp acc/BK1_acc acc/BK1_acc_epg3
+#             and is recorded as batch@BK1_acc_epg3.
 #         EXE=acc/BK1_acc            the driver for tokens without a path
 #         ORDERS="1 2 3 4 5 6 7 8"   polynomial orders
 #         DOF_MIN=1e4 DOF_MAX=1e8    problem-size range in degrees of freedom

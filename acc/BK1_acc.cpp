@@ -28,9 +28,9 @@
 // Environment: BK_KERNEL selects the kernel; BK_RANDOM=1 fills in and JxW
 // with seeded random data (see acc_common.h); the default is the constant
 // data of BK1.cpp. Build-time knobs (make -C acc DEFS=-D...): BK_CACHE_BASIS
-// for every kernel, and BK_TARGET_LANES, BK_MAX_SCRATCH_KB, BK_EPG for the
-// batch kernel (see batch_elements). The driver prints the kernel's
-// configuration on stderr.
+// for every kernel, and BK_EPG, the elements per gang of the batch kernel
+// (see batch_elements for the measured table it overrides). The driver
+// prints the kernel's configuration on stderr.
 
 #include <algorithm>
 #include <array>
@@ -390,40 +390,32 @@ void SumFactorizationWorker(
 //   7     wsp0 (e,k,p,q)     q -> j     wsp1 (e,j,p,k)      (e,p,k)  loads stride nq across lanes
 //   8+9   wsp1 (e,j,p,k)     p -> i     out  (e,i,j,k)      (e,j,k)
 //
-// Measured on GH200 with 1e6 elements: at nq = 9 and 10 the best batch is 3
-// elements (256 and 320 lanes), and 512 lanes is the worst of 2..6 elements
-// at both orders. Padding the fastest box extent to an odd stride, to clear
-// the bank conflicts of the strided loads in steps 4 and 7, lost 5 to 21
-// percent at nq = 4, 8 and 10: it breaks the stride-1 runs of every other
-// access into 2-way conflicts, and those are the majority.
+// Elements per gang: a table of the best measured values (GH200, nvc++ 25.3,
+// plateau at 1e8 DoF), overridable at build time with BK_EPG (make -C acc
+// DEFS=-DBK_EPG=3), which fixes the batch for every order. The sweep over
+// lane targets of 256, 320, 384 and 512 fibres per gang gave, in GDoF/s:
 //
-// Batch configuration, overridable at build time (make -C acc DEFS=-D...):
-//   BK_TARGET_LANES   fibres per gang the batch size aims for (default 512)
-//   BK_MAX_SCRATCH_KB cap on the two work boxes, the static shared-memory
-//                     allocation of a block is 48 KB (default 48)
-//   BK_EPG            fixed elements per gang for every order, overriding
-//                     the two above
+//   nq    3     4     5     6     7     8     9    10
+//   256  38.5  52.7  65.7  62.7  53.8  52.5  56.3  34.7
+//   320  39.7  56.7  61.1  63.5  55.6  39.7  56.3  42.0
+//   384  42.4  53.3  51.7  55.6  38.9  43.1  43.9  42.1
+//   512  28.6  44.6  53.7  41.8  45.3  48.3  52.0  47.8
+//
+// 512 lanes is the worst setting at every order but nq = 10, and the
+// optimum moves by 30 percent between neighbouring settings at nq = 6 to 8
+// without following lane utilisation, occupancy or shared memory, so the
+// batch is tabulated rather than derived. Padding the fastest box extent to
+// an odd stride, to clear the bank conflicts of the strided loads in steps
+// 4 and 7, lost 5 to 21 percent: it breaks the stride-1 runs of every other
+// access into 2-way conflicts, and those are the majority.
 // ---------------------------------------------------------------------------
-#ifndef BK_TARGET_LANES
-#define BK_TARGET_LANES 512
-#endif
-#ifndef BK_MAX_SCRATCH_KB
-#define BK_MAX_SCRATCH_KB 48
-#endif
-
-// Elements per gang: enough fibres (nq^2 per element) to reach the lane
-// target, capped by the shared-memory budget. With the defaults the cap
-// never binds for nq <= 10: nq = 4: 32 elements (16 KB); nq = 8: 8 (32 KB);
-// nq = 9: 6 (34 KB); nq = 10: 5 (40 KB).
 constexpr int batch_elements(const int nq)
 {
 #ifdef BK_EPG
     return BK_EPG;
 #else
-    const int by_lanes = BK_TARGET_LANES / (nq * nq);
-    const int by_shared = (BK_MAX_SCRATCH_KB * 1024) / (2 * nq * nq * nq * int(sizeof(float)));
-    const int n = by_lanes < by_shared ? by_lanes : by_shared;
-    return n < 1 ? 1 : n;
+    constexpr int table[] = {0, 0, 0, 42, 20, 10, 8, 6, 4, 3, 5};   // indexed by nq
+    return (nq >= 3 && nq <= 10) ? table[nq] : 1;
 #endif
 }
 

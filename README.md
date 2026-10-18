@@ -60,8 +60,8 @@ per fibre, the structure of the CUDA kernel in
 [dealii-X/benchmarks](https://github.com/dealii-X/benchmarks)). The driver
 prints the kernel's configuration on stderr. Build-time knobs go through
 `DEFS`, e.g. `make -C acc BK1_acc DEFS="-DBK_EPG=3 -DBK_CACHE_BASIS"`
-(`BK_CACHE_BASIS`; `BK_TARGET_LANES`, `BK_MAX_SCRATCH_KB`, `BK_EPG` for the
-batch kernel).
+(`BK_CACHE_BASIS`; `BK_EPG` overrides the batch kernel's measured table of
+elements per gang).
 
 ```sh
 make -C acc                        # nvc++ -acc=gpu, prints the -Minfo=acc report
