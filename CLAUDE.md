@@ -12,9 +12,10 @@ holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`);
 - `amx/scripts/validate.sh` checks the AMX kernel against the serial
   reference on random data; the emulator also enforces the 128-byte
   alignment of pair/quad loads and stores, so run it after any layout change.
-- `make -C acc` builds the OpenACC kernels (`BK?_acc`, one element per gang,
-  and `BK1_acc_batch`, a batch of elements per gang with one lane per fibre)
-  with `nvc++` (`-Minfo=acc` on);
+- `make -C acc` builds the OpenACC kernels with `nvc++` (`-Minfo=acc` on);
+  `BK1_acc` holds several kernels selected with `BK_KERNEL` (elem, gang1..3,
+  worker, kernels, batch) and shares their phase body through the
+  `BK1_PHASES` macro;
   `make -C acc CXX=g++` builds them with GCC's `-fopenacc` host fallback,
   and `make -C acc host` the serial host build. `acc/scripts/validate.sh`
   checks every order against the OpenMP executables (constant data) and

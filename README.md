@@ -46,22 +46,23 @@ solution norm (useful as a quick correctness check).
 
 ## OpenACC versions
 
-`acc/BK1_acc.cpp`, `acc/BK3_acc.cpp` and `acc/BK5_acc.cpp` are the same
-kernels with OpenACC directives: a plain `acc parallel loop` over the
-elements, with the inner loop nests left to the compiler. They take the same
-arguments as the OpenMP executables and print the same two lines, so the
-scripts' parsing carries over. `BK_RANDOM=1` replaces the constant test data
-with seeded random data.
+`acc/BK1_acc.cpp`, `acc/BK3_acc.cpp` and `acc/BK5_acc.cpp` are the kernels
+with OpenACC directives. They take the same arguments as the OpenMP
+executables and print the same two lines, so the scripts' parsing carries
+over; `BK_RANDOM=1` replaces the constant test data with seeded random data.
 
-`acc/BK1_acc_batch.cpp` is a second BK1 kernel in the shape of the CUDA
-kernel of [dealii-X/benchmarks](https://github.com/dealii-X/benchmarks):
-each gang holds a batch of elements in shared memory, every phase is one flat
-vector loop over the fibres of the batch, and a lane keeps the inputs along
-the contraction direction in registers while it forms all outputs of that
-line. The batch size follows from `nq` (comment at the top of the file); the
-driver prints the chosen configuration on stderr. The batch knobs are
-build-time macros, e.g. `make -C acc BK1_acc_batch DEFS=-DBK_EPG=3`
-(`BK_TARGET_LANES`, `BK_MAX_SCRATCH_KB`, `BK_EPG`; see the file).
+`BK1_acc` holds several kernels, selected at run time with `BK_KERNEL`
+(the file's header describes them): `elem` (default, one thread per element,
+the compiler's schedule), `gang1`, `gang2`, `gang3` (one gang per element,
+the phases collapsed 1 to 3 levels onto the vector lanes), `worker` (several
+elements per gang, one worker each), `kernels` (the `kernels` construct, the
+compiler's own analysis) and `batch` (a batch of elements per gang, one lane
+per fibre, the structure of the CUDA kernel in
+[dealii-X/benchmarks](https://github.com/dealii-X/benchmarks)). The driver
+prints the kernel's configuration on stderr. Build-time knobs go through
+`DEFS`, e.g. `make -C acc BK1_acc DEFS="-DBK_EPG=3 -DBK_CACHE_BASIS"`
+(`BK_CACHE_BASIS`; `BK_TARGET_LANES`, `BK_MAX_SCRATCH_KB`, `BK_EPG` for the
+batch kernel).
 
 ```sh
 make -C acc                        # nvc++ -acc=gpu, prints the -Minfo=acc report
@@ -70,14 +71,14 @@ make -C acc ACC=-acc=multicore     # OpenACC on the host cores
 make -C acc host                   # BK?_acc_host: serial host build (-acc=host) for validate.sh
 make -C acc CXX=g++                # GCC -fopenacc (host fallback without an offload toolchain)
 ./acc/BK1_acc <p> [nelmt] [ntests]
-./acc/BK1_acc_batch <p> [nelmt] [ntests]
+BK_KERNEL=batch ./acc/BK1_acc <p> [nelmt] [ntests]
 
 make BK1 BK3 BK5 && make -C acc all host
-acc/scripts/validate.sh            # every order: constant data against BK1/BK3/BK5,
+acc/scripts/validate.sh            # every kernel and order: constant data against BK1/BK3/BK5,
                                    # random data against the host build; exit 1 on failure
 acc/scripts/throughput.sh results.csv        # GDoF/s versus DoF, log-spaced 1e4..1e8, p = 1..8,
-                                             # for KERNELS="BK1_acc BK1_acc_batch" (CSV)
-acc/scripts/plot_throughput.py results.csv throughput.png   # one panel per executable (matplotlib)
+                                             # for KERNELS="elem gang1 gang2 gang3 worker kernels batch" (CSV)
+acc/scripts/plot_throughput.py results.csv throughput.png   # one panel per kernel (matplotlib)
 ```
 
 ## Apple AMX version of BK1

@@ -11,8 +11,8 @@
 #
 # ACC, INFO and HOSTACC can be overridden on the command line, e.g.
 #   make -C acc ACC="-acc=gpu -gpu=cc80"
-# DEFS passes -D options to every build, e.g. the batch knobs of BK1_acc_batch:
-#   make -C acc BK1_acc_batch DEFS=-DBK_EPG=3
+# DEFS passes -D options to every build, e.g. the knobs of BK1_acc:
+#   make -C acc BK1_acc DEFS="-DBK_EPG=3 -DBK_CACHE_BASIS"
 
 CXX = nvc++
 
@@ -31,9 +31,10 @@ DEFS =
 
 HEADERS = acc_common.h ../bk_common.h
 
-# BK?_acc: one element per gang, the inner loops left to the compiler.
-# BK1_acc_batch: a batch of elements per gang, one lane per fibre.
-PROGS = BK1_acc BK3_acc BK5_acc BK1_acc_batch
+# BK1_acc holds several kernels, selected at run time with BK_KERNEL (see
+# the file's header); BK3_acc and BK5_acc are one element per gang with the
+# inner loops left to the compiler.
+PROGS = BK1_acc BK3_acc BK5_acc
 
 .PHONY: all host clean
 all: $(PROGS)
