@@ -57,12 +57,13 @@
 namespace bk {
 
 // Elements per gang: enough fibres (nq^2 per element) to fill about 512
-// lanes, capped so that the two scratch boxes stay within 32 KB of shared
-// memory. nq = 4: 32 elements; nq = 8: 8; nq = 10: 4 (the shared-memory cap).
+// lanes, capped so that the two work boxes stay within the 48 KB static
+// shared-memory allocation of a block. nq = 4: 32 elements; nq = 8: 8;
+// nq = 10: 6 (the shared-memory cap, 48000 bytes).
 constexpr int elements_per_gang(const int nq)
 {
     constexpr int target_lanes = 512;
-    constexpr int max_scratch_bytes = 32 * 1024;
+    constexpr int max_scratch_bytes = 48 * 1024;
     const int by_lanes = target_lanes / (nq * nq);
     const int by_shared = max_scratch_bytes / (2 * nq * nq * nq * int(sizeof(float)));
     const int n = by_lanes < by_shared ? by_lanes : by_shared;
