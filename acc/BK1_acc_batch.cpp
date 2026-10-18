@@ -121,22 +121,24 @@ void SumFactorization(
         const index_t nb = (nelmt - e0 < std::size_t(EPG)) ? index_t(nelmt - e0) : EPG;
 
         // Accessors, returning the entry by reference through its linear
-        // index. w0/w1 are the nq^3 boxes of the work arrays; in_e/out_e the
-        // nm^3 blocks of the batch's elements; W the weights of the batch.
+        // index, written as the sum of index times stride (the strides are
+        // compile-time constants). w0/w1 are the nq^3 boxes of the work
+        // arrays; in_e/out_e the nm^3 blocks of the batch's elements; W the
+        // weights of the batch.
         const auto w0 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return wsp0[((e * nq + a) * nq + b) * nq + c];
+            return wsp0[e * box + a * (nq * nq) + b * nq + c];
         };
         const auto w1 = [&](index_t e, index_t a, index_t b, index_t c) -> T& {
-            return wsp1[((e * nq + a) * nq + b) * nq + c];
+            return wsp1[e * box + a * (nq * nq) + b * nq + c];
         };
         const auto in_e = [&](index_t e, index_t i, index_t j, index_t k) -> const T& {
-            return in[(e0 + e) * (nm * nm * nm) + (i * nm + j) * nm + k];
+            return in[(e0 + e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
         };
         const auto out_e = [&](index_t e, index_t i, index_t j, index_t k) -> T& {
-            return out[(e0 + e) * (nm * nm * nm) + (i * nm + j) * nm + k];
+            return out[(e0 + e) * (nm * nm * nm) + i * (nm * nm) + j * nm + k];
         };
         const auto W = [&](index_t e, index_t r, index_t p, index_t q) -> const T& {
-            return JxW[(e0 + e) * box + (r * nq + p) * nq + q];
+            return JxW[(e0 + e) * box + r * (nq * nq) + p * nq + q];
         };
         // B(mode i, quad point p) == basis[i * nq + p], shared by all directions
         const auto B = [&](index_t i, index_t p) -> const T& {
