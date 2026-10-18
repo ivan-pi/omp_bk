@@ -391,22 +391,23 @@ void SumFactorizationWorker(
 //   8+9   wsp1 (e,j,p,k)     p -> i     out  (e,i,j,k)      (e,j,k)
 //
 // Elements per gang: a table of the best measured values (GH200, nvc++ 25.3,
-// plateau at 1e8 DoF), overridable at build time with BK_EPG (make -C acc
-// DEFS=-DBK_EPG=3), which fixes the batch for every order. The sweep over
-// lane targets of 256, 320, 384 and 512 fibres per gang gave, in GDoF/s:
+// plateau = best of 3e7 and 1e8 DoF), overridable at build time with BK_EPG
+// (make -C acc DEFS=-DBK_EPG=3), which fixes the batch for every order. The
+// sweep over 2..56 elements per gang (acc/scripts/plot_epg.py draws it)
+// gave the best, in GDoF/s, and the lane count it implies:
 //
-//   nq    3     4     5     6     7     8     9    10
-//   256  38.5  52.7  65.7  62.7  53.8  52.5  56.3  34.7
-//   320  39.7  56.7  61.1  63.5  55.6  39.7  56.3  42.0
-//   384  42.4  53.3  51.7  55.6  38.9  43.1  43.9  42.1
-//   512  28.6  44.6  53.7  41.8  45.3  48.3  52.0  47.8
+//   nq         3     4     5     6     7     8     9    10
+//   elements  10     6     5     3     3     2     3     6
+//   lanes     96    96   128   128   160   128   256   608
+//   GDoF/s  46.4  62.4  67.8  67.5  64.1  56.4  56.3  50.8
 //
-// 512 lanes is the worst setting at every order but nq = 10, and the
-// optimum moves by 30 percent between neighbouring settings at nq = 6 to 8
-// without following lane utilisation, occupancy or shared memory, so the
-// batch is tabulated rather than derived. Padding the fastest box extent to
-// an odd stride, to clear the bank conflicts of the strided loads in steps
-// 4 and 7, lost 5 to 21 percent: it breaks the stride-1 runs of every other
+// The dependence is jagged: at nq = 7 the plateau is 64 at 3 elements and
+// 39 at 7, at nq = 8 it is 56 at 2 and 40 at 5, with no monotone relation
+// to lanes, occupancy or shared memory, so the batch is tabulated rather
+// than derived; builds that clamp to the same batch repeat within 1 to 4
+// percent, so the differences are real. Padding the fastest box extent to an
+// odd stride, to clear the bank conflicts of the strided loads in steps 4
+// and 7, lost 5 to 21 percent: it breaks the stride-1 runs of every other
 // access into 2-way conflicts, and those are the majority.
 // ---------------------------------------------------------------------------
 constexpr int batch_elements(const int nq)
@@ -417,7 +418,7 @@ constexpr int batch_elements(const int nq)
     const int cap = (48 * 1024) / (2 * nq * nq * nq * int(sizeof(float)));
     return BK_EPG < cap ? BK_EPG : cap;
 #else
-    constexpr int table[] = {0, 0, 0, 42, 20, 10, 8, 6, 4, 3, 5};   // indexed by nq
+    constexpr int table[] = {0, 0, 0, 10, 6, 5, 3, 3, 2, 3, 6};   // indexed by nq
     return (nq >= 3 && nq <= 10) ? table[nq] : 1;
 #endif
 }

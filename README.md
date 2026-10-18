@@ -78,6 +78,8 @@ acc/scripts/validate.sh            # every kernel and order: constant data again
 acc/scripts/throughput.sh results.csv        # GDoF/s versus DoF, log-spaced 1e4..1e8, p = 1..8,
                                              # for KERNELS="elem gang1 gang2 gang3 worker batch" (CSV)
 acc/scripts/plot_throughput.py results.csv throughput.png   # one panel per kernel (matplotlib)
+acc/scripts/plot_epg.py epg.csv epg.png      # batch kernel: plateau against elements per gang, from a
+                                             # sweep of batch@<build>_epg<N> tokens (see the script)
 ```
 
 `acc/repro/cache_worker.cpp` is a standalone reproducer of an nvc++ 25.3
