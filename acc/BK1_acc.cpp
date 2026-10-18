@@ -12,13 +12,11 @@
 //             elements, `loop vector collapse(3)` per phase: several elements
 //             per block without touching the phase loops; the boxes are one
 //             gang-level array with a slice per worker.
-//   kernels   `kernels loop` over elements, no directives inside: what the
-//             compiler makes of the phase nests on its own (-Minfo=acc).
 //   batch     gang over batches of EPG elements, every phase one flat vector
 //             loop over the fibres of the batch, one lane per fibre with the
 //             fibre held in registers (the dealii-X/benchmarks structure).
 //
-// The per-element kernels (elem, gang, worker, kernels) share one phase body
+// The per-element kernels (elem, gang, worker) share one phase body
 // (BK1_PHASES) over two nq^3 boxes w0 and w1 with the fastest index last.
 // Each phase's innermost loop is the fastest index of the array it writes,
 // so when the nest is collapsed onto vector lanes the lane-adjacent accesses
@@ -86,7 +84,7 @@ constexpr int round_to_warps(const int lanes)
 
 // ---------------------------------------------------------------------------
 // The phases of one element. LOOP is the pragma stamped before each phase
-// nest: `loop vector collapse(C)` or nothing. The enclosing scope provides
+// nest: `loop vector collapse(C)` or nothing (elem). The enclosing scope provides
 // T, nq, nm, index_t, the accessors e_in(i,j,k), e_out(i,j,k), e_JxW(p,q,r),
 // B(i,p), w0(a,b,c), w1(a,b,c), and `live` (whether the store happens).
 // Step 1 stays a copy: step 2 reads every input nq times, once per output,
@@ -354,31 +352,6 @@ void SumFactorizationWorker(
 }
 
 // ---------------------------------------------------------------------------
-// kernels: the `kernels` construct, the compiler decides what to parallelise
-// ---------------------------------------------------------------------------
-template <typename T, int nq, typename index_t = int>
-void SumFactorizationKernels(
-    const std::size_t nelmt,
-    const T* __restrict__ basis,
-    const T* __restrict__ JxW,
-    const T* __restrict__ in,
-    T* __restrict__ out)
-{
-    constexpr int nm = nq - 1;
-
-    #pragma acc kernels loop BK1_DATA_CLAUSES
-    for (std::size_t e = 0; e < nelmt; ++e) {
-        BK1_CACHE_BASIS
-        constexpr bool live = true;
-        T w0s[nq * nq * nq];
-        T w1s[nq * nq * nq];
-        BK1_ELEMENT_ACCESSORS(e)
-
-        BK1_PHASES()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // batch: a batch of EPG elements per gang, one lane per fibre.
 //
 // Every phase is one vector loop over the fibres of the whole batch; a lane
@@ -637,7 +610,7 @@ void SumFactorizationBatch(
 // ---------------------------------------------------------------------------
 // Kernel selection by name, and the configuration line each one reports
 // ---------------------------------------------------------------------------
-inline const char* kernel_names() { return "elem gang1 gang2 gang3 worker kernels batch"; }
+inline const char* kernel_names() { return "elem gang1 gang2 gang3 worker batch"; }
 
 template <typename T, int nq>
 bool run_kernel(const std::string& name, const std::size_t nelmt,
@@ -653,8 +626,6 @@ bool run_kernel(const std::string& name, const std::size_t nelmt,
         SumFactorizationGang<T, nq, 3>(nelmt, basis, JxW, in, out);
     } else if (name == "worker") {
         SumFactorizationWorker<T, nq>(nelmt, basis, JxW, in, out);
-    } else if (name == "kernels") {
-        SumFactorizationKernels<T, nq>(nelmt, basis, JxW, in, out);
     } else if (name == "batch") {
         SumFactorizationBatch<T, nq>(nelmt, basis, JxW, in, out);
     } else {

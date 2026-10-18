@@ -4,7 +4,7 @@
 # polynomial order and kernel.  One run of the driver per point.
 #
 # usage:  make -C acc && acc/scripts/throughput.sh [results.csv]
-# env:    KERNELS="elem gang1 gang2 gang3 worker kernels batch"
+# env:    KERNELS="elem gang1 gang2 gang3 worker batch"
 #             kernels of BK1_acc to sweep (BK_KERNEL names).  A token
 #             name@path runs that kernel from another build of the driver,
 #             e.g. batch@acc/BK1_acc_lanes256 after
@@ -25,7 +25,7 @@
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ACC=$ROOT/acc
 OUT=${1:-results.csv}
-KERNELS=${KERNELS:-"elem gang1 gang2 gang3 worker kernels batch"}
+KERNELS=${KERNELS:-"elem gang1 gang2 gang3 worker batch"}
 EXE=${EXE:-$ACC/BK1_acc}
 ORDERS=${ORDERS:-"1 2 3 4 5 6 7 8"}
 DOF_MIN=${DOF_MIN:-1e4}

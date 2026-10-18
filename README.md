@@ -55,8 +55,7 @@ over; `BK_RANDOM=1` replaces the constant test data with seeded random data.
 (the file's header describes them): `elem` (default, one thread per element,
 the compiler's schedule), `gang1`, `gang2`, `gang3` (one gang per element,
 the phases collapsed 1 to 3 levels onto the vector lanes), `worker` (several
-elements per gang, one worker each), `kernels` (the `kernels` construct, the
-compiler's own analysis) and `batch` (a batch of elements per gang, one lane
+elements per gang, one worker each) and `batch` (a batch of elements per gang, one lane
 per fibre, the structure of the CUDA kernel in
 [dealii-X/benchmarks](https://github.com/dealii-X/benchmarks)). The driver
 prints the kernel's configuration on stderr. Build-time knobs go through
@@ -77,7 +76,7 @@ make BK1 BK3 BK5 && make -C acc all host
 acc/scripts/validate.sh            # every kernel and order: constant data against BK1/BK3/BK5,
                                    # random data against the host build; exit 1 on failure
 acc/scripts/throughput.sh results.csv        # GDoF/s versus DoF, log-spaced 1e4..1e8, p = 1..8,
-                                             # for KERNELS="elem gang1 gang2 gang3 worker kernels batch" (CSV)
+                                             # for KERNELS="elem gang1 gang2 gang3 worker batch" (CSV)
 acc/scripts/plot_throughput.py results.csv throughput.png   # one panel per kernel (matplotlib)
 ```
 

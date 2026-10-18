@@ -4,7 +4,7 @@
 # is non-zero on any failure.
 #
 # usage: make BK1 BK3 BK5 && make -C acc all host && acc/scripts/validate.sh [nelmt=1234] [tol=1e-5]
-# env:   BK1_KERNELS="elem gang1 gang2 gang3 worker kernels batch"   kernels of BK1_acc to check
+# env:   BK1_KERNELS="elem gang1 gang2 gang3 worker batch"   kernels of BK1_acc to check
 #
 # Two checks per executable and order:
 #  (a) constant data: the norm must match the OpenMP executable in the
@@ -93,7 +93,7 @@ for exe in $ACC/BK1_acc $ACC/BK3_acc $ACC/BK5_acc; do
   fi
 done
 
-BK1_KERNELS=${BK1_KERNELS:-"elem gang1 gang2 gang3 worker kernels batch"}
+BK1_KERNELS=${BK1_KERNELS:-"elem gang1 gang2 gang3 worker batch"}
 
 for P in 1 2 3 4 5 6 7 8; do          # BK1, BK3: p; nm = p + 1 modes per direction
   for V in $BK1_KERNELS; do

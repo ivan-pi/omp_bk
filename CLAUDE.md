@@ -14,7 +14,7 @@ holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`);
   alignment of pair/quad loads and stores, so run it after any layout change.
 - `make -C acc` builds the OpenACC kernels with `nvc++` (`-Minfo=acc` on);
   `BK1_acc` holds several kernels selected with `BK_KERNEL` (elem, gang1..3,
-  worker, kernels, batch) and shares their phase body through the
+  worker, batch) and shares their phase body through the
   `BK1_PHASES` macro;
   `make -C acc CXX=g++` builds them with GCC's `-fopenacc` host fallback,
   and `make -C acc host` the serial host build. `acc/scripts/validate.sh`
