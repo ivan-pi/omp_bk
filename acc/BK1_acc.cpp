@@ -62,11 +62,15 @@ namespace bk {
 #define BK_LOOP_VECTOR_COLLAPSE(C) BK_PRAGMA(acc loop vector)
 #endif
 
-// BK_CACHE_BASIS (make -C acc DEFS=-DBK_CACHE_BASIS) stamps `cache(basis)`
-// at the top of every kernel's element or batch loop: the basis is fetched
-// into shared memory for the loop body instead of being left to L1.
-#ifdef BK_CACHE_BASIS
-#define BK1_CACHE_BASIS BK_PRAGMA(acc cache(basis[0:nm*nq]))
+// BK_CACHE_BASIS (make -C acc DEFS=-DBK_CACHE_BASIS) stamps `cache(readonly:
+// basis)` at the top of every kernel's element or batch loop: the basis is
+// fetched into shared memory for the loop body instead of being left to L1,
+// and the readonly modifier (OpenACC 2.7) tells the compiler no write-back
+// is needed.
+#if defined(BK_CACHE_BASIS) && defined(__NVCOMPILER)
+#define BK1_CACHE_BASIS BK_PRAGMA(acc cache(readonly: basis[0:nm*nq]))
+#elif defined(BK_CACHE_BASIS)
+#define BK1_CACHE_BASIS BK_PRAGMA(acc cache(basis[0:nm*nq]))   /* GCC: no readonly modifier */
 #else
 #define BK1_CACHE_BASIS
 #endif
