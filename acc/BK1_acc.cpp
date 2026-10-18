@@ -412,7 +412,10 @@ void SumFactorizationWorker(
 constexpr int batch_elements(const int nq)
 {
 #ifdef BK_EPG
-    return BK_EPG;
+    // Clamped to the 48 KB static shared memory of a block, so that one
+    // build with a large BK_EPG still compiles at every order.
+    const int cap = (48 * 1024) / (2 * nq * nq * nq * int(sizeof(float)));
+    return BK_EPG < cap ? BK_EPG : cap;
 #else
     constexpr int table[] = {0, 0, 0, 42, 20, 10, 8, 6, 4, 3, 5};   // indexed by nq
     return (nq >= 3 && nq <= 10) ? table[nq] : 1;
