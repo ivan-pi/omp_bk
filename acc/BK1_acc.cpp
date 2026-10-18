@@ -3,7 +3,7 @@
 //
 //   elem      `parallel loop` over elements, the compiler's schedule (gang and
 //             vector over elements); the element's two work boxes are private
-//             to its thread, the phases run sequentially inside it.
+//             to its thread, the phases are plain loops inside it.
 //   gang1..3  `parallel loop gang` over elements, each phase nest under
 //             `loop vector collapse(C)`; the boxes are gang-private (shared
 //             memory). C = 1, 2, 3 collapsed levels; the lanes that are left
@@ -82,8 +82,8 @@ constexpr int round_to_warps(const int lanes)
 // ---------------------------------------------------------------------------
 // The eight phases of one element, steps 1 to 8 (step 9, the store to out,
 // is written by each kernel because the worker kernel guards it). LOOP is
-// the pragma stamped before each phase nest: `loop seq`, `loop vector
-// collapse(C)`, or nothing. The enclosing scope provides T, nq, nm, index_t
+// the pragma stamped before each phase nest: `loop vector collapse(C)` or
+// nothing. The enclosing scope provides T, nq, nm, index_t
 // and the accessors e_in(i,j,k), e_JxW(p,q,r), B(i,p), w0(a,b,c), w1(a,b,c).
 //
 //   step  reads          contracts  writes          loops (innermost last)
@@ -236,10 +236,13 @@ void SumFactorizationElem(
         T w1s[nq * nq * nq];
         BK1_ELEMENT_ACCESSORS(e)
 
-        BK1_PHASES(BK_PRAGMA(acc loop seq))
+        // No directives inside the element loop: the phases are plain loops
+        // with constant trip counts that the compiler unrolls, and at low
+        // order it keeps the boxes in registers. An explicit `loop seq` on
+        // them is not harmless: it is what made this kernel slow at p = 1.
+        BK1_PHASES()
 
         // step-9 : copy w0 -> out
-        #pragma acc loop seq
         for (index_t i = 0; i < nm; ++i) {
             for (index_t j = 0; j < nm; ++j) {
                 for (index_t k = 0; k < nm; ++k) {
