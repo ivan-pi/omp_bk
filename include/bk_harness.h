@@ -1,6 +1,6 @@
 // bk_harness.h -- host side of the GPU kernel harnesses (openmp/offload/,
-// sycl/, tinytc/): kernel selection, the double-precision references (host
-// OpenMP), the BK1 and BK5 data layouts and the accuracy check.  No SYCL.
+// sycl/, tinytc/): kernel selection, the double-precision references of BK1,
+// BK3 and BK5 (host OpenMP), the data layouts and the accuracy check.  No SYCL.
 
 #ifndef BK_HARNESS_H
 #define BK_HARNESS_H
@@ -248,6 +248,136 @@ inline void reference_bk5(const int nq, const std::size_t nelmt, const std::vect
                         s += rt[(i * nq + j) * nq + n] * D[n * nq + k];
                     }
                     out[e * nq3 + (i * nq + j) * nq + k] = s;
+                }
+            }
+        }
+    }
+}
+
+// BK3 in double: in(e, i, j, k), basis(i, p), D(n, p), G(e, f, p, q, r)
+// (six symmetric factors rr rs rt ss st tt, factor-major) -> out(e, i, j, k):
+// interpolate to the quadrature points, derivatives with D(n, p), fluxes
+// with G, transposed derivatives with D(p, n), interpolate back (BK3.cpp).
+inline void reference_bk3(const int nq, const std::size_t nelmt, const std::vector<float>& basis,
+                          const std::vector<float>& D, const std::vector<float>& G,
+                          const std::vector<float>& in, std::vector<double>& out)
+{
+    assert(nq <= ref_max_nq);
+    const int nm = nq - 1;
+    const int nq3 = nq * nq * nq;
+    constexpr int box = ref_max_nq * ref_max_nq * ref_max_nq;
+    [[maybe_unused]] const bool parallel = ref_parallel();
+    #pragma omp parallel for if(parallel)
+    for (std::size_t e = 0; e < nelmt; ++e) {
+        double a[box];
+        double b[box];
+        double u[box];
+        double fr[box];
+        double fs[box];
+        double ft[box];
+        const float* ei = in.data() + e * nm * nm * nm;
+        const float* eG = G.data() + e * 6 * nq3;
+        const auto B = [&](const int i, const int p) { return double(basis[i * nq + p]); };
+        const auto Dm = [&](const int n, const int p) { return double(D[n * nq + p]); };
+        // forward: a(p,j,k), b(p,q,k), u(p,q,r)
+        for (int p = 0; p < nq; ++p) {
+            for (int j = 0; j < nm; ++j) {
+                for (int k = 0; k < nm; ++k) {
+                    double s = 0;
+                    for (int i = 0; i < nm; ++i) {
+                        s += double(ei[(i * nm + j) * nm + k]) * B(i, p);
+                    }
+                    a[(p * nm + j) * nm + k] = s;
+                }
+            }
+        }
+        for (int p = 0; p < nq; ++p) {
+            for (int q = 0; q < nq; ++q) {
+                for (int k = 0; k < nm; ++k) {
+                    double s = 0;
+                    for (int j = 0; j < nm; ++j) {
+                        s += a[(p * nm + j) * nm + k] * B(j, q);
+                    }
+                    b[(p * nq + q) * nm + k] = s;
+                }
+            }
+        }
+        for (int p = 0; p < nq; ++p) {
+            for (int q = 0; q < nq; ++q) {
+                for (int r = 0; r < nq; ++r) {
+                    double s = 0;
+                    for (int k = 0; k < nm; ++k) {
+                        s += b[(p * nq + q) * nm + k] * B(k, r);
+                    }
+                    u[(p * nq + q) * nq + r] = s;
+                }
+            }
+        }
+        // derivatives and fluxes
+        for (int p = 0; p < nq; ++p) {
+            for (int q = 0; q < nq; ++q) {
+                for (int r = 0; r < nq; ++r) {
+                    double qr = 0;
+                    double qs = 0;
+                    double qt = 0;
+                    for (int n = 0; n < nq; ++n) {
+                        qr += u[(n * nq + q) * nq + r] * Dm(n, p);
+                        qs += u[(p * nq + n) * nq + r] * Dm(n, q);
+                        qt += u[(p * nq + q) * nq + n] * Dm(n, r);
+                    }
+                    const int x = (p * nq + q) * nq + r;
+                    const auto g = [&](const int f) { return double(eG[f * nq3 + x]); };
+                    fr[x] = g(0) * qr + g(1) * qs + g(2) * qt;
+                    fs[x] = g(1) * qr + g(3) * qs + g(4) * qt;
+                    ft[x] = g(2) * qr + g(4) * qs + g(5) * qt;
+                }
+            }
+        }
+        // transposed derivatives: u(p,q,r) = w
+        for (int p = 0; p < nq; ++p) {
+            for (int q = 0; q < nq; ++q) {
+                for (int r = 0; r < nq; ++r) {
+                    double s = 0;
+                    for (int n = 0; n < nq; ++n) {
+                        s += fr[(n * nq + q) * nq + r] * Dm(p, n);
+                        s += fs[(p * nq + n) * nq + r] * Dm(q, n);
+                        s += ft[(p * nq + q) * nq + n] * Dm(r, n);
+                    }
+                    u[(p * nq + q) * nq + r] = s;
+                }
+            }
+        }
+        // backward: b(p,q,k), a(p,j,k), out(i,j,k)
+        for (int p = 0; p < nq; ++p) {
+            for (int q = 0; q < nq; ++q) {
+                for (int k = 0; k < nm; ++k) {
+                    double s = 0;
+                    for (int r = 0; r < nq; ++r) {
+                        s += u[(p * nq + q) * nq + r] * B(k, r);
+                    }
+                    b[(p * nq + q) * nm + k] = s;
+                }
+            }
+        }
+        for (int p = 0; p < nq; ++p) {
+            for (int j = 0; j < nm; ++j) {
+                for (int k = 0; k < nm; ++k) {
+                    double s = 0;
+                    for (int q = 0; q < nq; ++q) {
+                        s += b[(p * nq + q) * nm + k] * B(j, q);
+                    }
+                    a[(p * nm + j) * nm + k] = s;
+                }
+            }
+        }
+        for (int i = 0; i < nm; ++i) {
+            for (int j = 0; j < nm; ++j) {
+                for (int k = 0; k < nm; ++k) {
+                    double s = 0;
+                    for (int p = 0; p < nq; ++p) {
+                        s += a[(p * nm + j) * nm + k] * B(i, p);
+                    }
+                    out[e * nm * nm * nm + (i * nm + j) * nm + k] = s;
                 }
             }
         }

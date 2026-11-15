@@ -18,9 +18,9 @@ The tree is organized by approach; the file names say the kernel.
 | Directory | Contents |
 |-----------|----------|
 | `include/` | Shared across approaches: `bk_common.h` (test data, command line, order dispatch, timing), `bk_harness.h` (references, layouts and checks of the GPU harnesses), `bk_sycl.h` (SYCL timing), `bk1_gpu.h` and `bk1_gpu_steps.h` (BK1 GPU helpers used by OpenMP offload and SYCL) |
-| `openmp/` | The portable drivers `BK1.cpp`, `BK3.cpp`, `BK5.cpp`, `BK1_ff.cpp` (host or offload), `bk1_sumfact.h`, `float_float.h` |
-| `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`) and BK5 (`bk5_offload.cpp`) |
-| `sycl/` | `bk1_sycl.cpp`, `bk5_sycl.cpp` |
+| `openmp/` | The portable drivers `BK1.cpp`, `BK3.cpp`, `BK5.cpp`, `BK1_ff.cpp` (host or offload), `bk1_sumfact.h`, `bk3_sumfact.h`, `float_float.h` |
+| `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
+| `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
 | `tinytc/` | `bk_tinytc.cpp` (driver for both kernels), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received), `repro_slm/` (bug reproducer) |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
@@ -152,6 +152,7 @@ scripts/run.sh BK1_4 4 524288 10           # OMP_TARGET_OFFLOAD=MANDATORY on lev
 PROFILE=1 scripts/run.sh BK1_4 4           # plus the per-kernel device times
 scripts/build.sh BK1_ff_4 && scripts/run.sh BK1_ff_4 4 524288 3
 scripts/build.sh bk1_offload_4 bk5_sycl_6  # kernel variants: OpenMP offload and SYCL
+scripts/build.sh bk3_offload_4 bk3_sycl_4  # BK3: port of the CUDA kernel (cu) and column sweeps (sf)
 scripts/build.sh bk_tinytc                 # tinytc driver (tinytc from /opt/tinytc/latest)
 scripts/study/sweep.sh gpu_results.csv     # BK1, BK3, BK5 at ORDERS="2 4 6", plus STREAM
 ```
@@ -166,7 +167,9 @@ the float-float split/join need.
 
 `roofline/stream_omp.cpp` is a STREAM-like bandwidth test on device-allocated
 float arrays: read, write, copy, scale, add and triad, plus `bk1p2`, which
-reproduces BK1's p = 2 traffic with one element per thread.
+reproduces BK1's p = 2 traffic with one element per thread, and `read9`, 9
+reads per write as in BK3 (428 GB/s on the A770: read-heavy traffic does
+not reach the 459 GB/s of copy).
 
 ### Results
 
@@ -181,6 +184,23 @@ offload, SYCL, tinytc) with the scripts that produced them; the roofline
 | BK5 (6 factors)  | 14.0 | 13.5 | 13.5 | 12.2 | 12.3 | 11.7 | 13.5 | 11.5 |
 
 All of them are memory-bound, at 71-97% of the STREAM bandwidth roof.
+
+BK3 (`bk3_offload`, `bk3_sycl`; `results/a770/bk3_pick_a770.txt`, median of
+3 runs at ~2e7 DoFs, best of the two APIs) against two roofs: STREAM copy
+(459 GB/s) and `stream_omp`'s read9 (428 GB/s), which has BK3's mix of ~90%
+reads (in + G against out):
+
+| p             | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
+|---------------|------|------|------|------|------|------|------|------|
+| GDoF/s        | 4.45 | 6.31 | 6.59 | 7.95 | 7.43 | 8.83 | 7.29 | 8.24 |
+| % of copy     | 86   | 89   | 79   | 86   | 75   | 84   | 67   | 73   |
+| % of read9    | 92   | 96   | 84   | 92   | 80   | 90   | 72   | 79   |
+
+What mattered: SIMD8 (`_sg8` in SYCL; IGC picks it by itself for the OpenMP
+`cu`) and the basis matrices held in registers (`sfr`, OpenMP suffix `r`).
+At p = 5, 7, 8 the compute steps (~11 GDoF/s alone) and the G stream (~9.4
+GDoF/s alone) overlap poorly; SLM padding, fill groups, prefetching G and
+a compile-time work-group size changed little there.
 
 The measurements below are of the portable drivers in `openmp/` (one
 element per thread), on an Arc A770 (16 GB) with icpx 2026.1, compute
