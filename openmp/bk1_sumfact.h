@@ -6,10 +6,7 @@
 // the drivers.  The float-float kernel of BK1_ff.cpp is a separate routine
 // with the same interface in double; it is timed by the same harness.
 
-#include <algorithm>
-#include <chrono>
 #include <cstddef>
-#include <limits>
 #include <type_traits>
 
 #include "bk_common.h"
@@ -181,21 +178,13 @@ double time_sumfact(
     [[maybe_unused]] const std::size_t size_JxW   = nelmt * nq * nq * nq;
     [[maybe_unused]] constexpr std::size_t size_basis = nm * nq;
 
-    using std::chrono::high_resolution_clock;
-    using std::chrono::duration;
-
-    double elapsed = std::numeric_limits<double>::max();
-
+    double elapsed = 0.0;
     #pragma omp target data \
         map(to: basis[:size_basis]) \
         map(to: JxW[:size_JxW], in[:size_inout]) \
         map(tofrom: out[:size_inout])
-    for (int t = 0; t < ntests; ++t) {
-        const auto start = high_resolution_clock::now();
-        kernel(nelmt, basis, JxW, in, out);
-        const auto stop = high_resolution_clock::now();
-        const duration<double> rep_time = stop - start;
-        elapsed = std::min(elapsed, rep_time.count());
+    {
+        elapsed = time_min(ntests, [&] { kernel(nelmt, basis, JxW, in, out); });
     }
     return elapsed;
 }

@@ -24,56 +24,21 @@ void run_test(const std::size_t nelmt, const int ntests)
     const std::vector<T> in (nelmt * nm * nm * nm, T(3.0));
     std::vector<T>       out(nelmt * nm * nm * nm);
 
-    const std::size_t size_inout = in.size();
-    const std::size_t size_JxW   = JxW.size();
-
     // minimum wall time over ntests repetitions
     const double elapsed = time_sumfact<T, nq>(
         nelmt, ntests, basis.data(), JxW.data(), in.data(), out.data());
 
-    // Performance in GDoF/s
-    const auto dof_rate = [&](double seconds) {
-        return 1.0e-9 * size_inout / seconds;
-    };
-    // Effective bandwidth in GB/s: read in + write out + read JxW
-    const auto byte_rate = [&](double seconds) {
-        return 1.0e-9 * sizeof(T) * (2 * size_inout + size_JxW) / seconds;
-    };
-
-    std::cout << "SumFactorization -> nelmt = " << nelmt
-              << " GDoF/s = " << dof_rate(elapsed)
-              << " GB/s = "   << byte_rate(elapsed) << "\n";
-
+    // bytes: read in + write out + read JxW
+    print_rates(nelmt, in.size(), sizeof(T) * (2 * in.size() + JxW.size()), elapsed);
     std::cout << "norm = " << norm2(out.data(), out.size()) << "\n";
 }
 
-// Default element count. Note: the historical literal was `2 << 18`, which
-// is 2^19 = 524288 -- NOT 2^18. The same value is kept here, spelled
-// unambiguously.
-constexpr std::size_t default_nelmt = std::size_t(1) << 19;   // = 524288
-
+// <p> [nelmt] [ntests]: polynomial order p = 1..8, nq = p + 2
 int main(int argc, char** argv)
 {
-    const int p = (argc > 1) ? std::atoi(argv[1]) : 2;
-    const std::size_t nelmt =
-        (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
-    const int ntests = (argc > 3) ? std::atoi(argv[3]) : 5;
-
-    // Runtime p -> compile-time nq: one kernel instantiation per supported
-    // order, nq = p + 2 (each case label must pair with its literal + 2).
-    switch (p) {
-        case 1: run_test<float,  3>(nelmt, ntests); break;
-        case 2: run_test<float,  4>(nelmt, ntests); break;
-        case 3: run_test<float,  5>(nelmt, ntests); break;
-        case 4: run_test<float,  6>(nelmt, ntests); break;
-        case 5: run_test<float,  7>(nelmt, ntests); break;
-        case 6: run_test<float,  8>(nelmt, ntests); break;
-        case 7: run_test<float,  9>(nelmt, ntests); break;
-        case 8: run_test<float, 10>(nelmt, ntests); break;
-        default:
-            std::cerr << "unsupported polynomial order p = " << p
-                      << " (supported: 1..8)\n";
-            return 1;
-    }
-    return 0;
+    const run_args a = parse_args(argc, argv, 2);
+    const bool ok = with_order<1, 8>("polynomial order p", a.order, [&](auto P) {
+        run_test<float, decltype(P)::value + 2>(a.nelmt, a.ntests);
+    });
+    return ok ? 0 : 1;
 }

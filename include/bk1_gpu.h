@@ -4,9 +4,11 @@
 #ifndef BK1_GPU_H
 #define BK1_GPU_H
 
+#include "bk_common.h"
+
 namespace bk1gpu {
 
-constexpr int round_up(const int n, const int m) { return ((n + m - 1) / m) * m; }
+using bk::round_up;
 
 // Threads per team: one per point of the nq^3 box, whole sub-groups of 16.
 #ifndef TEAM_ROUND

@@ -17,7 +17,7 @@ The tree is organized by approach; the file names say the kernel.
 
 | Directory | Contents |
 |-----------|----------|
-| `include/` | Shared by every approach: `bk_common.h` (options, timing, test data), `bk1_gpu.h` and `bk1_gpu_steps.h` (BK1 GPU helpers used by OpenMP offload and SYCL) |
+| `include/` | Shared across approaches: `bk_common.h` (test data, command line, order dispatch, timing), `bk_harness.h` (references, layouts and checks of the GPU harnesses), `bk_sycl.h` (SYCL timing), `bk1_gpu.h` and `bk1_gpu_steps.h` (BK1 GPU helpers used by OpenMP offload and SYCL) |
 | `openmp/` | The portable drivers `BK1.cpp`, `BK3.cpp`, `BK5.cpp`, `BK1_ff.cpp` (host or offload), `bk1_sumfact.h`, `float_float.h` |
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk5_sycl.cpp` |
@@ -29,11 +29,11 @@ The tree is organized by approach; the file names say the kernel.
 
 ## Requirements
 
-- CMake 3.21 or later and a C++17 compiler with OpenMP support (e.g. GCC or
-  Clang).
-- To run the kernels on a GPU, an OpenMP-offload-capable toolchain
-  (e.g. GCC built with `nvptx`/`amdgcn` offload, or Clang with the matching
-  offload runtime). Without a GPU the `target` regions run as a host fallback.
+- CMake 3.21 or later and a C++17 compiler with OpenMP (e.g. GCC or Clang)
+  for the host build; there the `target` regions run on the host.
+- For the GPU builds: the Intel oneAPI DPC++/C++ compiler (icpx) and an
+  Intel GPU with the Level Zero driver; tinytc (in `/opt/tinytc`) for
+  `bk_tinytc`.
 
 ## Build
 
@@ -55,9 +55,9 @@ cmake --preset host -B build/ff8 -DCMAKE_CXX_FLAGS=-DFF_PLANE_BATCH=8
 ## Run
 
 ```
-build/host/BK1 <p> [nelmt] [ntests]      # BK1/BK3: p is the polynomial order, nq = p + 2
+build/host/BK1 <p> [nelmt] [ntests]      # p: polynomial order; BK1, BK3: nq = p + 2
 build/host/BK3 <p> [nelmt] [ntests]
-build/host/BK5 <nq> [nelmt] [ntests]     # BK5: first argument is nq directly
+build/host/BK5 <p> [nelmt] [ntests]      # BK5: nq = p + 1
 ```
 
 - `nelmt`  — number of elements (default 524288).
@@ -83,7 +83,7 @@ rate is 1/32 or 1/64 of fp32, this recovers near-double accuracy at 15 fp32
 flops per multiply-add while moving the same 8 bytes per value as double
 (the split and join cost one fp64 operation per value loaded or stored).
 
-There are two float-float kernels with the same arithmetic. `float-float`
+There are three float-float kernels with the same arithmetic. `float-float`
 runs one element per thread with the work arrays in thread-local memory, as
 `BK1` does. `ff-teams` (`SumFactorizationFFTeams`) runs one element per
 team: the hi and lo work arrays are declared at team scope, so they are
@@ -125,32 +125,33 @@ first output line says `fma = hardware`).
 
 ## Intel GPUs (icpx, Arc A770)
 
-The CMake preset `a770` builds for an Intel GPU with icpx, ahead of time
-(OpenMP: `-fiopenmp -fopenmp-targets=spir64_gen`; SYCL:
-`-fsycl -fsycl-targets=spir64_gen`; ocloc device `acm-g10` for the Arc
-A770/A750 by default, `GPU_DEVICE=...` for others; `ocloc compile --help`
-lists the names), with `-fp-model=precise` against icpx's fast default.
-`scripts/build.sh` sets up the oneAPI environment, configures `build/a770`
-and builds the named targets one after another. Each binary holds one
-polynomial order: for the `openmp/` drivers the build compiles a copy with
-only that `case` of the order switch (`cmake/keep_case.cmake`), the other
-programs take `-DNQ=<nq>`, so the device compiler sees one kernel set at a
-time. No GPU target is in `all`; `all_<prog>` builds every order of a
-program. Every compile, link and run goes through a systemd user scope
-capped at `MEM_MAX` (8G) that prints its peak memory (`scripts/capped` is
-the preset's compiler launcher), so that a too-large problem fails on its
-own, and GPU compiles never run two at a time. The host data grow as nelmt * nq^3, and
-BK3 at the default 524288 elements needs ~7.5 GB at p = 6 and ~11 GB at
-p = 7. `common.sh` also sets up the oneAPI environment, including the `umf`
-library that the 2025+ Level Zero adapter needs (without it `sycl-ls` lists
-no devices).
+The CMake preset `a770` builds for an Intel GPU with icpx, ahead of time for
+the ocloc device `acm-g10` (Arc A770/A750; `GPU_DEVICE=...` for others,
+`ocloc compile --help` lists the names), with `-fp-model=precise` against
+icpx's fast default. `scripts/build.sh` sets up the oneAPI environment
+(`common.sh`, including the `umf` library the Level Zero adapter needs),
+configures `build/a770` and builds the named targets one after another.
+
+- **One order per binary,** so the device compiler sees one kernel set at a
+  time, named by the polynomial order p (`BK5_3`, `bk1_offload_4`): the
+  `openmp/` drivers are built with `-DBK_ORDER=<p>`, the other programs with
+  `-DNQ=<nq>`. No GPU target is in `all`; `all_<prog>` builds every order of
+  a program.
+- **Memory cap:** every compile, link and run goes through a systemd user
+  scope capped at `MEM_MAX` (8G) that prints its peak memory
+  (`scripts/capped` is the preset's compiler launcher), and GPU compiles
+  never run two at a time. The host data grow as nelmt * nq^3: BK3 at the
+  default 524288 elements needs ~7.5 GB at p = 6 and ~11 GB at p = 7.
+- **Checks:** the kernel-variant harnesses compare every result with a
+  double-precision reference computed on the host, one element per OpenMP
+  thread (`BK_PARALLEL=0`: one thread).
 
 ```sh
-scripts/build.sh BK1_4                     # -> build/a770/BK1_4 (BK1, BK3, BK1_ff: p; BK5: nq)
+scripts/build.sh BK1_4                     # -> build/a770/BK1_4 (p = 4)
 scripts/run.sh BK1_4 4 524288 10           # OMP_TARGET_OFFLOAD=MANDATORY on level_zero:0
 PROFILE=1 scripts/run.sh BK1_4 4           # plus the per-kernel device times
 scripts/build.sh BK1_ff_4 && scripts/run.sh BK1_ff_4 4 524288 3
-scripts/build.sh bk1_offload_6 bk5_sycl_7  # kernel variants: OpenMP offload and SYCL, by nq
+scripts/build.sh bk1_offload_4 bk5_sycl_6  # kernel variants: OpenMP offload and SYCL
 scripts/build.sh bk_tinytc                 # tinytc driver (tinytc from /opt/tinytc/latest)
 scripts/study/sweep.sh gpu_results.csv     # BK1, BK3, BK5 at ORDERS="2 4 6", plus STREAM
 ```
@@ -167,8 +168,23 @@ the float-float split/join need.
 float arrays: read, write, copy, scale, add and triad, plus `bk1p2`, which
 reproduces BK1's p = 2 traffic with one element per thread.
 
-The measurements below were taken on an Arc A770 (16 GB) with icpx 2026.1,
-compute runtime 26.22, 524288 elements, in float. Each value is the minimum
+### Results
+
+`results/a770/` holds the measurements of the kernel variants (OpenMP
+offload, SYCL, tinytc) with the scripts that produced them; the roofline
+(`roofline_a770.png`) and `tinytc_compare_a770.txt` summarize them. At
+~5.6e7 DoFs the best OpenMP or SYCL variant reaches, in GDoF/s:
+
+| p                | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
+|------------------|------|------|------|------|------|------|------|------|
+| BK1              | 19.8 | 24.4 | 23.4 | 25.5 | 26.3 | 29.5 | 27.6 | 26.0 |
+| BK5 (6 factors)  | 14.0 | 13.5 | 13.5 | 12.2 | 12.3 | 11.7 | 13.5 | 11.5 |
+
+All of them are memory-bound, at 71-97% of the STREAM bandwidth roof.
+
+The measurements below are of the portable drivers in `openmp/` (one
+element per thread), on an Arc A770 (16 GB) with icpx 2026.1, compute
+runtime 26.22, 524288 elements, in float. Each value is the minimum
 over 10 runs (3 for BK1_ff at p = 4, 6). Separate runs differ by up to
 ~20% (BK1 at p = 2 measured 12.7-16.0 GDoF/s); STREAM varies by under 1%.
 

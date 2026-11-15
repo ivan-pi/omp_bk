@@ -842,34 +842,18 @@ bool run_test(const std::size_t nelmt, const int ntests, const bool random_data,
     return ok;
 }
 
-constexpr std::size_t default_nelmt = std::size_t(1) << 19;   // = 524288, as BK1
-
 } // namespace
 
 int main(int argc, char** argv)
 {
-    const int p = (argc > 1) ? std::atoi(argv[1]) : 2;
-    const std::size_t nelmt =
-        (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
-    const int ntests = (argc > 3) ? std::atoi(argv[3]) : 5;
+    const run_args a = parse_args(argc, argv, 2);
     const bool random_data = get_env("BK_RANDOM").has_value();
     const double tol = std::atof(get_env("BK_TOL").value_or("1e-10").c_str());
 
-    // Runtime p -> compile-time nq = p + 2, one instantiation per order.
+    // p = 1..8, nq = p + 2
     bool ok = false;
-    switch (p) {
-        case 1: ok = run_test< 3>(nelmt, ntests, random_data, tol); break;
-        case 2: ok = run_test< 4>(nelmt, ntests, random_data, tol); break;
-        case 3: ok = run_test< 5>(nelmt, ntests, random_data, tol); break;
-        case 4: ok = run_test< 6>(nelmt, ntests, random_data, tol); break;
-        case 5: ok = run_test< 7>(nelmt, ntests, random_data, tol); break;
-        case 6: ok = run_test< 8>(nelmt, ntests, random_data, tol); break;
-        case 7: ok = run_test< 9>(nelmt, ntests, random_data, tol); break;
-        case 8: ok = run_test<10>(nelmt, ntests, random_data, tol); break;
-        default:
-            std::cerr << "unsupported polynomial order p = " << p
-                      << " (supported: 1..8)\n";
-            return 1;
-    }
-    return ok ? 0 : 1;
+    const bool supported = with_order<1, 8>("polynomial order p", a.order, [&](auto P) {
+        ok = run_test<decltype(P)::value + 2>(a.nelmt, a.ntests, random_data, tol);
+    });
+    return (supported && ok) ? 0 : 1;
 }

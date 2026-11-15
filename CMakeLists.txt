@@ -10,17 +10,17 @@
 #   Intel GPU (icpx, BK_GPU_DEVICE = an ocloc device such as acm-g10; preset "a770"):
 #     one binary per order, ahead-of-time compiled for BK_GPU_DEVICE, none of
 #     them in `all` (each takes minutes and gigabytes to build):
-#       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<nq>   openmp/ drivers, OpenMP offload
-#       bk1_offload_<nq> bk5_offload_<nq>      openmp/offload/ kernel variants
-#       bk1_sycl_<nq> bk5_sycl_<nq>            sycl/ (_jit: JIT-compiled, for
+#       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<p>    openmp/ drivers, OpenMP offload (-DBK_ORDER=p)
+#       bk1_offload_<p> bk5_offload_<p>        openmp/offload/ kernel variants (-DNQ=nq)
+#       bk1_sycl_<p> bk5_sycl_<p>              sycl/ (-DNQ=nq; _jit: JIT-compiled, for
 #                                              specialization constants)
+#     named by the polynomial order p (BK1: nq = p + 2, BK5: nq = p + 1),
 #       all_<prog>                             every order of <prog>
 #     and in `all`: stream_omp (OpenMP offload) and bk_tinytc (if tinytc is found).
 #
-# The drivers in openmp/ instantiate every order in a switch; the GPU builds
-# compile a copy with only the requested `case` (cmake/keep_case.cmake), so
-# the device compiler sees one kernel set at a time.  Compiles and links of
-# the GPU targets run in the job pool bk_gpu (Ninja; BK_GPU_JOBS at a time).
+# One order per binary, so the device compiler sees one kernel set at a
+# time.  Compiles and links of the GPU targets run in the job pool bk_gpu
+# (Ninja; BK_GPU_JOBS at a time).
 #
 # No build type is needed: the flags below include -O3, and the benchmark
 # keeps its asserts (no -DNDEBUG).
@@ -36,9 +36,8 @@ set(BK_GPU_DEVICE "" CACHE STRING "ocloc device for the Intel GPU targets (e.g. 
 set(BK_GPU_JOBS 1 CACHE STRING "GPU compiles and links run at the same time (Ninja job pool)")
 set(BK_EXTRA_FLAGS "" CACHE STRING "extra compile and link flags of the GPU targets")
 set(BK_ORDERS_P "1;2;3;4;5;6;7;8" CACHE STRING "orders p of BK1_<p>, BK3_<p>, BK1_ff_<p>")
-set(BK_ORDERS_BK5 "2;3;4;5;6;7;8" CACHE STRING "nq of BK5_<nq>")
-set(BK_ORDERS_BK1_GPU "3;4;5;6;7;8;9;10" CACHE STRING "nq of bk1_offload_<nq>, bk1_sycl_<nq>")
-set(BK_ORDERS_BK5_GPU "2;3;4;5;6;7;8;9" CACHE STRING "nq of bk5_offload_<nq>, bk5_sycl_<nq>")
+set(BK_ORDERS_BK5 "1;2;3;4;5;6;7" CACHE STRING "orders p of BK5_<p>")
+set(BK_ORDERS_GPU "1;2;3;4;5;6;7;8" CACHE STRING "orders p of bk1_offload_<p>, bk5_offload_<p>, bk1_sycl_<p>, bk5_sycl_<p>")
 set(BK_TINYTC_ROOT "/opt/tinytc/latest" CACHE PATH "tinytc install searched for bk_tinytc")
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
@@ -70,7 +69,7 @@ if(NOT BK_GPU_DEVICE)
 
     function(bk_host name src)
         add_executable(${name} ${src})
-        target_include_directories(${name} PRIVATE ${BK_INCLUDE} ${BK_OPENMP} ${CMAKE_SOURCE_DIR}/amx)
+        target_include_directories(${name} PRIVATE ${BK_INCLUDE} ${BK_OPENMP})
         if(OpenMP_CXX_FOUND)
             target_link_libraries(${name} PRIVATE OpenMP::OpenMP_CXX)
         endif()
@@ -85,6 +84,9 @@ if(NOT BK_GPU_DEVICE)
     bk_host(BK1_amx amx/BK1_amx.cpp)
     bk_host(bw_test roofline/bw_test.cpp)
     bk_host(amx_pipe roofline/amx_pipe.cpp)
+    # amx.h
+    target_include_directories(bw_test PRIVATE ${CMAKE_SOURCE_DIR}/amx)
+    target_include_directories(amx_pipe PRIVATE ${CMAKE_SOURCE_DIR}/amx)
     # host fallback of the GPU bandwidth test
     bk_host(stream_omp roofline/stream_omp.cpp)
     if(APPLE)
@@ -103,90 +105,63 @@ set_property(GLOBAL APPEND PROPERTY JOB_POOLS bk_gpu=${BK_GPU_JOBS})
 separate_arguments(bk_extra UNIX_COMMAND "${BK_EXTRA_FLAGS}")
 
 # api: omp (OpenMP offload, AOT), sycl (AOT), sycl_jit (SPIR-V, compiled at
-# run time), sycl_rt (plain SYCL host code, for run-time compiled kernels)
+# run time), sycl_rt (plain SYCL host code, for run-time compiled kernels).
+# The SYCL programs use host OpenMP for their references (-fiopenmp, no
+# offload targets).
 function(bk_gpu_target name api)
-    target_include_directories(${name} PRIVATE ${BK_INCLUDE} ${BK_OPENMP})
+    target_include_directories(${name} PRIVATE ${BK_INCLUDE})
     if(api STREQUAL "omp")
+        target_include_directories(${name} PRIVATE ${BK_OPENMP})
         target_compile_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64_gen)
         target_link_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64_gen
                             "SHELL:-Xopenmp-target-backend=spir64_gen \"-device ${BK_GPU_DEVICE}\"")
     elseif(api STREQUAL "sycl")
-        target_compile_options(${name} PRIVATE -fsycl -fsycl-targets=spir64_gen)
-        target_link_options(${name} PRIVATE -fsycl -fsycl-targets=spir64_gen
+        target_compile_options(${name} PRIVATE -fsycl -fsycl-targets=spir64_gen -fiopenmp)
+        target_link_options(${name} PRIVATE -fsycl -fsycl-targets=spir64_gen -fiopenmp
                             "SHELL:-Xsycl-target-backend=spir64_gen \"-device ${BK_GPU_DEVICE}\"")
     elseif(api STREQUAL "sycl_jit")
-        target_compile_options(${name} PRIVATE -fsycl -fsycl-targets=spir64)
-        target_link_options(${name} PRIVATE -fsycl -fsycl-targets=spir64)
+        target_compile_options(${name} PRIVATE -fsycl -fsycl-targets=spir64 -fiopenmp)
+        target_link_options(${name} PRIVATE -fsycl -fsycl-targets=spir64 -fiopenmp)
     else()
-        target_compile_options(${name} PRIVATE -fsycl)
-        target_link_options(${name} PRIVATE -fsycl)
+        target_compile_options(${name} PRIVATE -fsycl -fiopenmp)
+        target_link_options(${name} PRIVATE -fsycl -fiopenmp)
     endif()
     target_compile_options(${name} PRIVATE ${bk_extra})
     target_link_options(${name} PRIVATE ${bk_extra})
     set_target_properties(${name} PROPERTIES JOB_POOL_COMPILE bk_gpu JOB_POOL_LINK bk_gpu)
 endfunction()
 
+# <src> once per order p, -D<define>=<p + offset>: targets <prog>_<p>[<suffix>]
+# and all_<prog>[<suffix>]
+function(bk_gpu_orders prog src api define offset suffix)
+    add_custom_target(all_${prog}${suffix})
+    foreach(order IN LISTS ARGN)
+        set(name ${prog}_${order}${suffix})
+        math(EXPR value "${order} + ${offset}")
+        add_executable(${name} EXCLUDE_FROM_ALL ${src})
+        target_compile_definitions(${name} PRIVATE ${define}=${value})
+        bk_gpu_target(${name} ${api})
+        add_dependencies(all_${prog}${suffix} ${name})
+    endforeach()
+endfunction()
+
+bk_gpu_orders(BK1 openmp/BK1.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
+bk_gpu_orders(BK3 openmp/BK3.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
+bk_gpu_orders(BK1_ff openmp/BK1_ff.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
+bk_gpu_orders(BK5 openmp/BK5.cpp omp BK_ORDER 0 "" ${BK_ORDERS_BK5})
+bk_gpu_orders(bk1_offload openmp/offload/bk1_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk5_offload openmp/offload/bk5_offload.cpp omp NQ 1 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl NQ 1 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl_jit NQ 2 _jit ${BK_ORDERS_GPU})
+bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl_jit NQ 1 _jit ${BK_ORDERS_GPU})
+
 # The A770 has no fp64 hardware: BK1_ff (double reference, float-float
 # split/join) is compiled with IGC's FP64 emulation.
-function(bk_dp_emulation name)
-    set(launch env IGC_EnableDPEmulation=1 ${CMAKE_CXX_COMPILER_LAUNCHER})
-    set(link env IGC_EnableDPEmulation=1 ${CMAKE_CXX_LINKER_LAUNCHER})
-    set_target_properties(${name} PROPERTIES CXX_COMPILER_LAUNCHER "${launch}" CXX_LINKER_LAUNCHER "${link}")
-endfunction()
-
-# openmp/<prog>.cpp, one order per binary: <prog>_<order>
-function(bk_gpu_driver prog)
-    add_custom_target(all_${prog})
-    foreach(order IN LISTS ARGN)
-        set(name ${prog}_${order})
-        set(src ${CMAKE_BINARY_DIR}/src/${name}.cpp)
-        add_custom_command(OUTPUT ${src}
-            COMMAND ${CMAKE_COMMAND} -DIN=${BK_OPENMP}/${prog}.cpp -DOUT=${src} -DORDER=${order}
-                    -P ${CMAKE_SOURCE_DIR}/cmake/keep_case.cmake
-            DEPENDS ${BK_OPENMP}/${prog}.cpp ${CMAKE_SOURCE_DIR}/cmake/keep_case.cmake
-            COMMENT "${prog}.cpp with only case ${order}")
-        add_executable(${name} EXCLUDE_FROM_ALL ${src})
-        bk_gpu_target(${name} omp)
-        if(prog STREQUAL "BK1_ff")
-            bk_dp_emulation(${name})
-        endif()
-        add_dependencies(all_${prog} ${name})
-    endforeach()
-endfunction()
-
-# <src> compiled once per nq (-DNQ=<nq>): <prog>_<nq>
-function(bk_gpu_nq prog src api)
-    add_custom_target(all_${prog})
-    foreach(nq IN LISTS ARGN)
-        set(name ${prog}_${nq})
-        add_executable(${name} EXCLUDE_FROM_ALL ${src})
-        target_compile_definitions(${name} PRIVATE NQ=${nq})
-        bk_gpu_target(${name} ${api})
-        add_dependencies(all_${prog} ${name})
-    endforeach()
-endfunction()
-
-bk_gpu_driver(BK1 ${BK_ORDERS_P})
-bk_gpu_driver(BK3 ${BK_ORDERS_P})
-bk_gpu_driver(BK1_ff ${BK_ORDERS_P})
-bk_gpu_driver(BK5 ${BK_ORDERS_BK5})
-bk_gpu_nq(bk1_offload openmp/offload/bk1_offload.cpp omp ${BK_ORDERS_BK1_GPU})
-bk_gpu_nq(bk5_offload openmp/offload/bk5_offload.cpp omp ${BK_ORDERS_BK5_GPU})
-bk_gpu_nq(bk1_sycl sycl/bk1_sycl.cpp sycl ${BK_ORDERS_BK1_GPU})
-bk_gpu_nq(bk5_sycl sycl/bk5_sycl.cpp sycl ${BK_ORDERS_BK5_GPU})
-
-# JIT builds of the SYCL kernels: bk1_sycl_<nq>_jit, bk5_sycl_<nq>_jit
-foreach(prog bk1_sycl bk5_sycl)
-    if(prog STREQUAL "bk1_sycl")
-        set(orders ${BK_ORDERS_BK1_GPU})
-    else()
-        set(orders ${BK_ORDERS_BK5_GPU})
-    endif()
-    foreach(nq IN LISTS orders)
-        add_executable(${prog}_${nq}_jit EXCLUDE_FROM_ALL sycl/${prog}.cpp)
-        target_compile_definitions(${prog}_${nq}_jit PRIVATE NQ=${nq})
-        bk_gpu_target(${prog}_${nq}_jit sycl_jit)
-    endforeach()
+set(dp_compile env IGC_EnableDPEmulation=1 ${CMAKE_CXX_COMPILER_LAUNCHER})
+set(dp_link env IGC_EnableDPEmulation=1 ${CMAKE_CXX_LINKER_LAUNCHER})
+foreach(p IN LISTS BK_ORDERS_P)
+    set_target_properties(BK1_ff_${p} PROPERTIES CXX_COMPILER_LAUNCHER "${dp_compile}" CXX_LINKER_LAUNCHER "${dp_link}")
 endforeach()
 
 add_executable(stream_omp roofline/stream_omp.cpp)

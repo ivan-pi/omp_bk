@@ -607,10 +607,6 @@ struct Options {
     // Read BK_KERNEL / BK_LAYOUT / BK_DENSE / BK_BATCH / BK_NEON_NB / BK_PARALLEL;
     // dense_default applies when BK_DENSE is unset.
     static Options from_env(bool dense_default) {
-        auto env_int = [](const char* name, int fallback) {
-            auto v = get_env(name);
-            return v ? std::atoi(v->c_str()) : fallback;
-        };
         Options o;
         const std::string kernel = get_env("BK_KERNEL").value_or("amx");
         if (kernel == "neon") {
@@ -1119,8 +1115,6 @@ void run_test(const std::size_t nelmt, const int ntests)
               << "  max |amx - ref| = " << max_err
               << "  relative = " << max_err / max_ref << "\n";
 }
-
-constexpr std::size_t default_nelmt = std::size_t(1) << 19;   // = 524288
 
 int main(int argc, char** argv)
 {

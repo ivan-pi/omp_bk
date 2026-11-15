@@ -3,16 +3,17 @@
 # time for $GPU_DEVICE), one target after another.
 #
 # usage:  scripts/build.sh <target>...              -> $BUILD_DIR/<target>
-#   BK1_<p> BK3_<p> BK1_ff_<p> BK5_<nq>     openmp/ drivers, one order each
-#   bk1_offload_<nq> bk5_offload_<nq>       openmp/offload/ kernel variants
-#   bk1_sycl_<nq> bk5_sycl_<nq>             sycl/ (bk1_sycl_<nq>_jit: built for
+#   BK1_<p> BK3_<p> BK1_ff_<p> BK5_<p>      openmp/ drivers, one order each
+#   bk1_offload_<p> bk5_offload_<p>         openmp/offload/ kernel variants
+#   bk1_sycl_<p> bk5_sycl_<p>               sycl/ (bk1_sycl_<p>_jit: built for
 #                                           JIT compilation, which the
 #                                           specialization-constant variant
 #                                           needs to fold nq)
 #   stream_omp                              roofline/ bandwidth test
 #   bk_tinytc                               tinytc/ driver (tinytc in /opt/tinytc/latest)
 #   all_<prog>                              every order of <prog>
-# e.g.    scripts/build.sh BK1_4 bk5_offload_7 all_bk1_sycl
+# e.g.    scripts/build.sh BK1_4 bk5_offload_6 all_bk1_sycl
+# (every target is named by the polynomial order p)
 #
 # The first call configures $BUILD_DIR with the preset; later calls reuse it.
 # Each compile and link runs at low priority in a memory-capped scope
@@ -37,10 +38,14 @@ fi
 oneapi_env
 mkdir -p "$BUILD_DIR/logs"
 cd "$REPO"
-if ! cmake --preset a770 -B "$BUILD_DIR" -DBK_GPU_DEVICE="$GPU_DEVICE" \
-        -DBK_EXTRA_FLAGS="${EXTRA_FLAGS:-}" > "$BUILD_DIR/logs/configure.log" 2>&1; then
-    cat "$BUILD_DIR/logs/configure.log" >&2
-    exit 1
+# configure when the tree is new or its device or flags differ
+cached() { sed -n "s/^$1:[A-Z]*=//p" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; }
+if [ "$(cached BK_GPU_DEVICE)" != "$GPU_DEVICE" ] || [ "$(cached BK_EXTRA_FLAGS)" != "${EXTRA_FLAGS:-}" ]; then
+    if ! cmake --preset a770 -B "$BUILD_DIR" -DBK_GPU_DEVICE="$GPU_DEVICE" \
+            -DBK_EXTRA_FLAGS="${EXTRA_FLAGS:-}" > "$BUILD_DIR/logs/configure.log" 2>&1; then
+        cat "$BUILD_DIR/logs/configure.log" >&2
+        exit 1
+    fi
 fi
 
 status=0

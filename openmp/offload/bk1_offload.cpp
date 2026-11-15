@@ -3,8 +3,8 @@
 // per build (-DNQ=n, nq = p + 2), all kernel variants in one binary, each
 // timed with the drivers' harness and checked against SumFactorization.
 //
-//   scripts/build.sh bk1_offload_6         (-> build/a770/bk1_offload_6)
-//   scripts/run.sh bk1_offload_6 [nelmt] [ntests]
+//   scripts/build.sh bk1_offload_<p>       (-> build/a770/bk1_offload_<p>)
+//   scripts/run.sh bk1_offload_<p> [nelmt] [ntests]
 //   BK_KERNEL="teams teams1p" ...             run a subset (default: all)
 //   BK_REF=0 ...                              skip the (slow) reference kernel;
 //                                             the first variant is the reference
@@ -21,11 +21,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <sstream>
 #include <string>
 #include <vector>
 
 #include "bk_common.h"
+#include "bk_harness.h"
 #include "bk1_sumfact.h"
 #include "bk1_gpu.h"
 #include "bk1_offload/teams.h"
@@ -50,7 +50,7 @@ struct variant {
     bool jxw_transposed = false;   // kernel reads JxW stored as (e, r, q, p)
 };
 
-// Fixed batches go through cap_batch (common.h): every variant shares one
+// Fixed batches go through cap_batch (bk1_gpu.h): every variant shares one
 // device image, and one that does not fit the SLM or 1024 threads at a high
 // order keeps the whole image from loading.
 const variant variants[] = {
@@ -75,7 +75,6 @@ const variant variants[] = {
     {"gsR128",  &GridStrideRaw<float, NQ, plane_batch(NQ, 128), gs_block(NQ, plane_batch(NQ, 128))>},
     {"gsW1",    &GridStrideWS<float, NQ, 1, gs_block(NQ, 1)>},
     {"gsW128",  &GridStrideWS<float, NQ, plane_batch(NQ, 128), gs_block(NQ, plane_batch(NQ, 128))>},
-    {"gsW_b1",  &GridStrideWS<float, NQ, 1, gs_block(NQ, 1)>},
     {"gsW_b2",  &GridStrideWS<float, NQ, cap_batch(NQ, 2), gs_block(NQ, cap_batch(NQ, 2))>},
     {"gsW_b3",  &GridStrideWS<float, NQ, cap_batch(NQ, 3), gs_block(NQ, cap_batch(NQ, 3))>},
     {"gsW_b4",  &GridStrideWS<float, NQ, cap_batch(NQ, 4), gs_block(NQ, cap_batch(NQ, 4))>},
@@ -114,21 +113,6 @@ const variant variants[] = {
     {"planeX256", &SumFactorizationPlaneTid<float, NQ, plane_batch(NQ, 256), true>},
 };
 
-bool selected(const char* name, const std::string& list)
-{
-    if (list.empty()) {
-        return true;
-    }
-    std::istringstream ss(list);
-    std::string w;
-    while (ss >> w) {
-        if (w == name) {
-            return true;
-        }
-    }
-    return false;
-}
-
 } // namespace
 
 int main(int argc, char** argv)
@@ -137,61 +121,81 @@ int main(int argc, char** argv)
     constexpr int nm = nq - 1;
     const std::size_t nelmt = (argc > 1) ? std::size_t(std::atoll(argv[1])) : std::size_t(1) << 19;
     const int ntests = (argc > 2) ? std::atoi(argv[2]) : 10;
-    const std::string list = get_env("BK_KERNEL").value_or("");
     const bool with_ref = get_env("BK_REF").value_or("1") != "0";
-    g_grid = std::atoi(get_env("BK_TEAMS").value_or("0").c_str());
+    g_grid = env_int("BK_TEAMS", 0);
 
     const std::array<float, nm * nq> basis = make_test_basis<float, nm, nq>();
     std::vector<float> JxW(nelmt * nq * nq * nq);
     std::vector<float> in(nelmt * nm * nm * nm);
     fill_random_test_data(in, JxW);
-    // JxW transposed per element, (e, r, q, p), for the kernels that read it so
-    std::vector<float> JxW_t(JxW.size());
-    for (std::size_t e = 0; e < nelmt; ++e) {
-        for (int p = 0; p < nq; ++p) {
-            for (int q = 0; q < nq; ++q) {
-                for (int r = 0; r < nq; ++r) {
-                    JxW_t[((e * nq + r) * nq + q) * nq + p] = JxW[((e * nq + p) * nq + q) * nq + r];
-                }
-            }
-        }
+    // JxW transposed per element, only if a selected kernel reads it so
+    bool need_jxw_t = false;
+    for (const variant& v : variants) {
+        need_jxw_t = need_jxw_t || (v.jxw_transposed && selected(v.name));
     }
+    const std::vector<float> JxW_t = need_jxw_t ? transpose_jxw(JxW, nelmt, nq) : std::vector<float>();
     std::vector<float> ref(in.size());
     std::vector<float> out(in.size());
     const double bytes = sizeof(float) * (2.0 * in.size() + JxW.size());
 
     std::printf("BK1 offload: p = %d, nq = %d, nelmt = %zu, ntests = %d, team rounding %d\n",
                 nq - 2, nq, nelmt, ntests, TEAM_ROUND);
+
+    // The arrays stay on the device across the variants: the inputs are
+    // uploaded once; each variant's output is zeroed on the device (so an
+    // entry a kernel misses shows in maxdiff) and copied back after its runs.
+    // The first kernel run (ref, unless BK_REF=0) is the reference of the others.
+    const float* d_basis = basis.data();
+    const float* d_jxw = JxW.data();
+    const float* d_jxw_t = JxW_t.data();
+    const float* d_in = in.data();
+    float* d_ref = ref.data();
+    float* d_out = out.data();
+    const std::size_t n_in = in.size();
+    const std::size_t n_jxw = JxW.size();
+    const std::size_t n_jxw_t = JxW_t.size();
     bool have_ref = false;
-    for (const variant& v : variants) {
-        const bool is_ref = std::strcmp(v.name, "ref") == 0;
-        if (is_ref && !with_ref) {
-            continue;
-        }
-        if (!is_ref && !selected(v.name, list)) {
-            continue;
-        }
-        std::vector<float>& dst = have_ref ? out : ref;
-        std::fill(dst.begin(), dst.end(), 0.0f);
-        const double t = time_sumfact<float, nq>(nelmt, ntests, basis.data(),
-                                                 v.jxw_transposed ? JxW_t.data() : JxW.data(),
-                                                 in.data(), dst.data(), v.kernel);
-        if (g_short_team != 0) {
-            std::printf("%-10s a team got fewer threads than its work items; result invalid\n", v.name);
-            return 1;
-        }
-        double diff = 0.0;
-        double big = 0.0;
-        if (have_ref) {
-            for (std::size_t i = 0; i < ref.size(); ++i) {
-                diff = std::max(diff, double(std::fabs(out[i] - ref[i])));
-                big = std::max(big, double(std::fabs(ref[i])));
+    bool invalid = false;   // no early return: the target data block must end normally
+    double big = 0.0;
+    #pragma omp target data map(to: d_basis[:nm*nq], d_jxw[:n_jxw], d_jxw_t[:n_jxw_t], d_in[:n_in]) \
+        map(alloc: d_ref[:n_in], d_out[:n_in])
+    {
+        for (const variant& v : variants) {
+            const bool is_ref = std::strcmp(v.name, "ref") == 0;
+            if (is_ref && !with_ref) {
+                continue;
             }
+            if (!is_ref && !selected(v.name)) {
+                continue;
+            }
+            float* dst = have_ref ? d_out : d_ref;
+            #pragma omp target teams distribute parallel for map(alloc: dst[:n_in])
+            for (std::size_t i = 0; i < n_in; ++i) {
+                dst[i] = 0.0f;
+            }
+            const float* jxw = v.jxw_transposed ? d_jxw_t : d_jxw;
+            const double t = time_min(ntests, [&] { v.kernel(nelmt, d_basis, jxw, d_in, dst); });
+            #pragma omp target update from(dst[:n_in])
+            if (g_short_team != 0) {
+                std::printf("%-10s a team got fewer threads than its work items; result invalid\n", v.name);
+                invalid = true;
+                break;
+            }
+            double diff = 0.0;
+            if (have_ref) {
+                for (std::size_t i = 0; i < n_in; ++i) {
+                    diff = std::max(diff, double(std::fabs(out[i] - ref[i])));
+                }
+            } else {
+                for (const float r : ref) {
+                    big = std::max(big, double(std::fabs(r)));
+                }
+            }
+            std::printf("%-10s GDoF/s = %8.3f  GB/s = %7.1f  time = %8.3f ms  maxdiff = %.2e%s\n",
+                        v.name, 1e-9 * n_in / t, 1e-9 * bytes / t, 1e3 * t,
+                        have_ref ? diff / big : 0.0, have_ref ? "" : " (reference)");
+            have_ref = true;
         }
-        std::printf("%-10s GDoF/s = %8.3f  GB/s = %7.1f  time = %8.3f ms  maxdiff = %.2e%s\n",
-                    v.name, 1e-9 * in.size() / t, 1e-9 * bytes / t, 1e3 * t,
-                    have_ref ? diff / big : 0.0, have_ref ? "" : " (reference)");
-        have_ref = true;
     }
-    return 0;
+    return invalid ? 1 : 0;
 }
