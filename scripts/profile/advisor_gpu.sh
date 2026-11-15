@@ -4,7 +4,7 @@
 # the interactive roofline as HTML.  Needs /proc/sys/dev/i915/perf_stream_paranoid = 0.
 #
 # usage:  scripts/profile/advisor_gpu.sh <name> [args...]
-#         e.g. BK_KERNEL="pt6f_b1 sf6c_b1x2" advisor_gpu.sh bk5_offload_7 29155 3
+#         e.g. BK_KERNEL="pt6f_b1 sf6c_b1x2" advisor_gpu.sh bk5_offload_6 29155 3
 # The project directory is $BUILD_DIR/adv_<name>[_$ADV_TAG]; the reports are
 # <project>.csv (survey, GPU kernels) and <project>.html (roofline).
 . "$(dirname "$0")/../common.sh"

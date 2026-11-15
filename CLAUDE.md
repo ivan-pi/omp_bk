@@ -28,10 +28,10 @@ they must agree bit for bit, as every output is summed in index order.
 - CMake, with presets. `cmake --preset host && cmake --build build/host`
   builds BK1, BK3, BK5, BK1_ff, BK1_amx (software-emulated AMX off Apple
   Silicon) and the roofline micro-benchmarks (`accel_gemm` is macOS only).
-  The Intel GPU binaries (one order each: `BK1_4`, `bk1_offload_6`,
-  `bk5_sycl_7`, `bk_tinytc`, ...) are built with `scripts/build.sh <target>...`
-  into `build/a770` (memory-capped, one compile at a time), never while a
-  GPU run is going on.
+  The Intel GPU binaries (one order each, named by p: `BK1_4`,
+  `bk1_offload_4`, `bk5_sycl_6`, `bk_tinytc`, ...) are built with
+  `scripts/build.sh <target>...` into `build/a770` (memory-capped, one
+  compile at a time), never while a GPU run is going on.
 - `BK1_ff` compares double, float and float-float on the same data and ends
   with an `ok`/`FAIL` check of the float-float result (exit status 1 on
   failure). Run it for p = 1..8, with and without `BK_RANDOM=1`, after any

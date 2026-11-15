@@ -55,9 +55,9 @@ cmake --preset host -B build/ff8 -DCMAKE_CXX_FLAGS=-DFF_PLANE_BATCH=8
 ## Run
 
 ```
-build/host/BK1 <p> [nelmt] [ntests]      # BK1/BK3: p is the polynomial order, nq = p + 2
+build/host/BK1 <p> [nelmt] [ntests]      # p: polynomial order; BK1, BK3: nq = p + 2
 build/host/BK3 <p> [nelmt] [ntests]
-build/host/BK5 <nq> [nelmt] [ntests]     # BK5: first argument is nq directly
+build/host/BK5 <p> [nelmt] [ntests]      # BK5: nq = p + 1
 ```
 
 - `nelmt`  — number of elements (default 524288).
@@ -133,9 +133,10 @@ icpx's fast default. `scripts/build.sh` sets up the oneAPI environment
 configures `build/a770` and builds the named targets one after another.
 
 - **One order per binary,** so the device compiler sees one kernel set at a
-  time: the `openmp/` drivers are built with `-DBK_ORDER=<order>`, the other
-  programs with `-DNQ=<nq>`. No GPU target is in `all`; `all_<prog>` builds
-  every order of a program.
+  time, named by the polynomial order p (`BK5_3`, `bk1_offload_4`): the
+  `openmp/` drivers are built with `-DBK_ORDER=<p>`, the other programs with
+  `-DNQ=<nq>`. No GPU target is in `all`; `all_<prog>` builds every order of
+  a program.
 - **Memory cap:** every compile, link and run goes through a systemd user
   scope capped at `MEM_MAX` (8G) that prints its peak memory
   (`scripts/capped` is the preset's compiler launcher), and GPU compiles
@@ -143,11 +144,11 @@ configures `build/a770` and builds the named targets one after another.
   default 524288 elements needs ~7.5 GB at p = 6 and ~11 GB at p = 7.
 
 ```sh
-scripts/build.sh BK1_4                     # -> build/a770/BK1_4 (BK1, BK3, BK1_ff: p; BK5: nq)
+scripts/build.sh BK1_4                     # -> build/a770/BK1_4 (p = 4)
 scripts/run.sh BK1_4 4 524288 10           # OMP_TARGET_OFFLOAD=MANDATORY on level_zero:0
 PROFILE=1 scripts/run.sh BK1_4 4           # plus the per-kernel device times
 scripts/build.sh BK1_ff_4 && scripts/run.sh BK1_ff_4 4 524288 3
-scripts/build.sh bk1_offload_6 bk5_sycl_7  # kernel variants: OpenMP offload and SYCL, by nq
+scripts/build.sh bk1_offload_4 bk5_sycl_6  # kernel variants: OpenMP offload and SYCL
 scripts/build.sh bk_tinytc                 # tinytc driver (tinytc from /opt/tinytc/latest)
 scripts/study/sweep.sh gpu_results.csv     # BK1, BK3, BK5 at ORDERS="2 4 6", plus STREAM
 ```

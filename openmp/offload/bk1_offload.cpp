@@ -3,8 +3,8 @@
 // per build (-DNQ=n, nq = p + 2), all kernel variants in one binary, each
 // timed with the drivers' harness and checked against SumFactorization.
 //
-//   scripts/build.sh bk1_offload_6         (-> build/a770/bk1_offload_6)
-//   scripts/run.sh bk1_offload_6 [nelmt] [ntests]
+//   scripts/build.sh bk1_offload_<p>       (-> build/a770/bk1_offload_<p>)
+//   scripts/run.sh bk1_offload_<p> [nelmt] [ntests]
 //   BK_KERNEL="teams teams1p" ...             run a subset (default: all)
 //   BK_REF=0 ...                              skip the (slow) reference kernel;
 //                                             the first variant is the reference

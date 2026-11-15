@@ -4,8 +4,8 @@
 // original one-element-per-thread kernel and a one-work-item-per-point
 // kernel through shared memory.  One order per build (-DNQ=n, nq = p + 1).
 //
-//   scripts/build.sh bk5_offload_<nq>          (-> build/a770/bk5_offload_<nq>)
-//   scripts/run.sh bk5_offload_<nq> [nelmt] [ntests]
+//   scripts/build.sh bk5_offload_<p>           (-> build/a770/bk5_offload_<p>)
+//   scripts/run.sh bk5_offload_<p> [nelmt] [ntests]
 //   BK_KERNEL="pt6i_b1 pt9i_b1" ...               run a subset (default: all)
 //
 // Variant names <kernel><F><layout>[_b<batch>]:

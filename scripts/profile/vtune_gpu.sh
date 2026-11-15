@@ -2,7 +2,7 @@
 # vtune_gpu.sh -- VTune gpu-hotspots on a binary of $BUILD_DIR, one row of GPU
 # metrics per kernel.  Needs /proc/sys/dev/i915/perf_stream_paranoid = 0.
 #
-# usage:  scripts/profile/vtune_gpu.sh <name> [args...]     e.g. BK_KERNEL=planeV1 vtune_gpu.sh bk1_offload_6
+# usage:  scripts/profile/vtune_gpu.sh <name> [args...]     e.g. BK_KERNEL=planeV1 vtune_gpu.sh bk1_offload_4
 # env:    VT_MODE=overview|global-memory-accesses|compute-extended|full-compute
 #         VT_FILTER=regex   kernels to print (default: all)
 # The result directory is $BUILD_DIR/vt_<name>_<mode>.

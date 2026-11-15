@@ -11,7 +11,7 @@
 // TT_LAYOUT=orig: as blk with the unmodified bk5.ir.
 //
 //   scripts/build.sh bk_tinytc              (-> build/a770/bk_tinytc)
-//   build/a770/bk_tinytc <1|5> <nq> [nelmt] [ntests]
+//   build/a770/bk_tinytc <1|5> <p> [nelmt] [ntests]     (BK1: nq = p + 2, BK5: nq = p + 1)
 //   env: TT_LAYOUT (ec or blk), TT_IR_DIR (default: tinytc/ir of the source tree),
 //        TT_QPAD (row stride of the basis, default: the next power of two >= nq),
 //        TT_FEATURES (tinytc core feature flags, e.g. 0 for none),
@@ -154,11 +154,12 @@ T* to_device(sycl::queue& q, const std::vector<T>& h)
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <1|5> <nq> [nelmt] [ntests]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <1|5> <p> [nelmt] [ntests]\n", argv[0]);
         return 2;
     }
     const int bk = std::atoi(argv[1]);
-    const int nq = std::atoi(argv[2]);
+    const int p = std::atoi(argv[2]);
+    const int nq = p + ((bk == 1) ? 2 : 1);
     const int B = bk::env_int("TT_B", 16);
     std::size_t nelmt = (argc > 3) ? std::size_t(std::atoll(argv[3])) : std::size_t(1) << 17;
     nelmt = std::max<std::size_t>(B, nelmt / B * B);
@@ -187,7 +188,7 @@ int main(int argc, char** argv)
                   sycl::property_list{sycl::property::queue::in_order{}, sycl::property::queue::enable_profiling{}}};
     const int npts = (bk == 1) ? nm * nm * nm : nq * nq * nq;   // in/out values per element
     std::printf("BK%d tinytc (%s): p = %d, nq = %d, Q_pad = %d, B = %d, wgs = %d, nelmt = %zu (%zu DoFs), ntests = %d\n",
-                bk, layout.c_str(), (bk == 1) ? nq - 2 : nq - 1, nq, pad, B, wgs, nelmt, nelmt * npts, ntests);
+                bk, layout.c_str(), p, nq, pad, B, wgs, nelmt, nelmt * npts, ntests);
 
     // our data and reference
     std::vector<float> in(nelmt * npts);
@@ -198,8 +199,8 @@ int main(int argc, char** argv)
     if (bk == 1) {
         const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);
         for (int i = 0; i < nm; ++i) {
-            for (int p = 0; p < nq; ++p) {
-                basis_t[p * pad + i] = basis[i * nq + p];   // basis0(a = p, i)
+            for (int a = 0; a < nq; ++a) {
+                basis_t[a * pad + i] = basis[i * nq + a];   // basis0(a, i)
             }
         }
         bk::reference_bk1(nq, nelmt, basis, geo, in, ref);

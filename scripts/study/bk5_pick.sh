@@ -1,25 +1,26 @@
 #!/bin/bash
 # bk5_pick.sh -- the fastest BK5 variant per API, order and tensor storage at
-# a fixed size: every variant of build/a770/bk5_offload_<nq> (OpenMP: pt, sf, cu;
-# not ref, tid, fill) and build/a770/bk5_sycl_<nq> (SYCL: sf, not _sg16), REPS
+# a fixed size: every variant of build/a770/bk5_offload_<p> (OpenMP: pt, sf, cu;
+# not ref, tid, fill) and build/a770/bk5_sycl_<p> (SYCL: sf, not _sg16), REPS
 # runs each, median host GDoF/s.  Prints the KERNELS list for bk5_sweep.sh.
 #
 # usage:  scripts/study/bk5_pick.sh [out.csv]
-# env:    NQS="2 3 4 5 6 7 8 9" DOFS=5e7 REPS=3 NTESTS=10
+# env:    ORDERS="1 2 3 4 5 6 7 8" (p, nq = p + 1) DOFS=5e7 REPS=3 NTESTS=10
 # CSV:    api,nq,variant,rep,gdofs     (api = <omp|sycl><6|9>)
 . "$(dirname "$0")/../common.sh"
 OUT=${1:-bk5_pick.csv}
-NQS=${NQS:-"2 3 4 5 6 7 8 9"}
+ORDERS=${ORDERS:-"1 2 3 4 5 6 7 8"}
 DOFS=${DOFS:-5e7}
 REPS=${REPS:-3}
 NTESTS=${NTESTS:-10}
 echo "api,nq,variant,rep,gdofs" > "$OUT"
-for nq in $NQS; do
+for p in $ORDERS; do
+    nq=$((p + 1))
     ne=$(python3 -c "print(max(1, round($DOFS / $nq ** 3)))")
     for lang in omp sycl; do
-        bin=bk5_offload_$nq
+        bin=bk5_offload_$p
         if [ "$lang" = sycl ]; then
-            bin=bk5_sycl_$nq
+            bin=bk5_sycl_$p
         fi
         for rep in $(seq 1 "$REPS"); do
             "$SCRIPTS/run.sh" "$bin" "$ne" "$NTESTS" 2>&1 |
@@ -44,6 +45,6 @@ for (api, nq, v), g in runs.items():
         best[(api, nq)] = (v, m)
 for (api, nq), (v, m) in sorted(best.items(), key=lambda x: (x[0][0][-1], x[0][0], x[0][1])):
     print(f"{api:6s} p={nq - 1} {v:16s} {m:7.3f} GDoF/s")
-print("KERNELS=\"" + " ".join(f"{api[:-1]}:{nq}:{v}" for (api, nq), (v, m) in
+print("KERNELS=\"" + " ".join(f"{api[:-1]}:{nq - 1}:{v}" for (api, nq), (v, m) in
                               sorted(best.items(), key=lambda x: (x[0][0][-1], x[0][0], x[0][1]))) + "\"")
 PY

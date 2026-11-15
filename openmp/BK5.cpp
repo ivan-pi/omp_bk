@@ -145,12 +145,12 @@ void run_test(const std::size_t nelmt, const int ntests)
     std::cout << "norm = " << norm2(out.data(), out.size()) << "\n";
 }
 
-// <nq> [nelmt] [ntests]: nq = p + 1 = 2..8
+// <p> [nelmt] [ntests]: polynomial order p = 1..7, nq = p + 1
 int main(int argc, char** argv)
 {
-    const run_args a = parse_args(argc, argv, 4);
-    const bool ok = with_order<2, 8>("nq", a.order, [&](auto NQ) {
-        run_test<float, decltype(NQ)::value>(a.nelmt, a.ntests);
+    const run_args a = parse_args(argc, argv, 3);
+    const bool ok = with_order<1, 7>("polynomial order p", a.order, [&](auto P) {
+        run_test<float, decltype(P)::value + 1>(a.nelmt, a.ntests);
     });
     return ok ? 0 : 1;
 }

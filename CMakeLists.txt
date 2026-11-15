@@ -10,10 +10,11 @@
 #   Intel GPU (icpx, BK_GPU_DEVICE = an ocloc device such as acm-g10; preset "a770"):
 #     one binary per order, ahead-of-time compiled for BK_GPU_DEVICE, none of
 #     them in `all` (each takes minutes and gigabytes to build):
-#       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<nq>   openmp/ drivers, OpenMP offload (-DBK_ORDER)
-#       bk1_offload_<nq> bk5_offload_<nq>      openmp/offload/ kernel variants (-DNQ)
-#       bk1_sycl_<nq> bk5_sycl_<nq>            sycl/ (-DNQ; _jit: JIT-compiled, for
+#       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<p>    openmp/ drivers, OpenMP offload (-DBK_ORDER=p)
+#       bk1_offload_<p> bk5_offload_<p>        openmp/offload/ kernel variants (-DNQ=nq)
+#       bk1_sycl_<p> bk5_sycl_<p>              sycl/ (-DNQ=nq; _jit: JIT-compiled, for
 #                                              specialization constants)
+#     named by the polynomial order p (BK1: nq = p + 2, BK5: nq = p + 1),
 #       all_<prog>                             every order of <prog>
 #     and in `all`: stream_omp (OpenMP offload) and bk_tinytc (if tinytc is found).
 #
@@ -35,9 +36,8 @@ set(BK_GPU_DEVICE "" CACHE STRING "ocloc device for the Intel GPU targets (e.g. 
 set(BK_GPU_JOBS 1 CACHE STRING "GPU compiles and links run at the same time (Ninja job pool)")
 set(BK_EXTRA_FLAGS "" CACHE STRING "extra compile and link flags of the GPU targets")
 set(BK_ORDERS_P "1;2;3;4;5;6;7;8" CACHE STRING "orders p of BK1_<p>, BK3_<p>, BK1_ff_<p>")
-set(BK_ORDERS_BK5 "2;3;4;5;6;7;8" CACHE STRING "nq of BK5_<nq>")
-set(BK_ORDERS_BK1_GPU "3;4;5;6;7;8;9;10" CACHE STRING "nq of bk1_offload_<nq>, bk1_sycl_<nq>")
-set(BK_ORDERS_BK5_GPU "2;3;4;5;6;7;8;9" CACHE STRING "nq of bk5_offload_<nq>, bk5_sycl_<nq>")
+set(BK_ORDERS_BK5 "1;2;3;4;5;6;7" CACHE STRING "orders p of BK5_<p>")
+set(BK_ORDERS_GPU "1;2;3;4;5;6;7;8" CACHE STRING "orders p of bk1_offload_<p>, bk5_offload_<p>, bk1_sycl_<p>, bk5_sycl_<p>")
 set(BK_TINYTC_ROOT "/opt/tinytc/latest" CACHE PATH "tinytc install searched for bk_tinytc")
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
@@ -129,29 +129,30 @@ function(bk_gpu_target name api)
     set_target_properties(${name} PROPERTIES JOB_POOL_COMPILE bk_gpu JOB_POOL_LINK bk_gpu)
 endfunction()
 
-# <src> once per order, -D<define>=<order>: targets <prog>_<order>[<suffix>]
+# <src> once per order p, -D<define>=<p + offset>: targets <prog>_<p>[<suffix>]
 # and all_<prog>[<suffix>]
-function(bk_gpu_orders prog src api define suffix)
+function(bk_gpu_orders prog src api define offset suffix)
     add_custom_target(all_${prog}${suffix})
     foreach(order IN LISTS ARGN)
         set(name ${prog}_${order}${suffix})
+        math(EXPR value "${order} + ${offset}")
         add_executable(${name} EXCLUDE_FROM_ALL ${src})
-        target_compile_definitions(${name} PRIVATE ${define}=${order})
+        target_compile_definitions(${name} PRIVATE ${define}=${value})
         bk_gpu_target(${name} ${api})
         add_dependencies(all_${prog}${suffix} ${name})
     endforeach()
 endfunction()
 
-bk_gpu_orders(BK1 openmp/BK1.cpp omp BK_ORDER "" ${BK_ORDERS_P})
-bk_gpu_orders(BK3 openmp/BK3.cpp omp BK_ORDER "" ${BK_ORDERS_P})
-bk_gpu_orders(BK1_ff openmp/BK1_ff.cpp omp BK_ORDER "" ${BK_ORDERS_P})
-bk_gpu_orders(BK5 openmp/BK5.cpp omp BK_ORDER "" ${BK_ORDERS_BK5})
-bk_gpu_orders(bk1_offload openmp/offload/bk1_offload.cpp omp NQ "" ${BK_ORDERS_BK1_GPU})
-bk_gpu_orders(bk5_offload openmp/offload/bk5_offload.cpp omp NQ "" ${BK_ORDERS_BK5_GPU})
-bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl NQ "" ${BK_ORDERS_BK1_GPU})
-bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl NQ "" ${BK_ORDERS_BK5_GPU})
-bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl_jit NQ _jit ${BK_ORDERS_BK1_GPU})
-bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl_jit NQ _jit ${BK_ORDERS_BK5_GPU})
+bk_gpu_orders(BK1 openmp/BK1.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
+bk_gpu_orders(BK3 openmp/BK3.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
+bk_gpu_orders(BK1_ff openmp/BK1_ff.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
+bk_gpu_orders(BK5 openmp/BK5.cpp omp BK_ORDER 0 "" ${BK_ORDERS_BK5})
+bk_gpu_orders(bk1_offload openmp/offload/bk1_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk5_offload openmp/offload/bk5_offload.cpp omp NQ 1 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl NQ 1 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl_jit NQ 2 _jit ${BK_ORDERS_GPU})
+bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl_jit NQ 1 _jit ${BK_ORDERS_GPU})
 
 # The A770 has no fp64 hardware: BK1_ff (double reference, float-float
 # split/join) is compiled with IGC's FP64 emulation.

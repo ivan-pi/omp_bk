@@ -4,8 +4,8 @@
 // three local-memory arrays, for the symmetric half (G6) and the full (G9)
 // geometric tensor.
 //
-//   scripts/build.sh bk5_sycl_<nq>      (-> build/a770/bk5_sycl_<nq>)
-//   scripts/run.sh bk5_sycl_<nq> [nelmt] [ntests]
+//   scripts/build.sh bk5_sycl_<p>       (-> build/a770/bk5_sycl_<p>, nq = p + 1)
+//   scripts/run.sh bk5_sycl_<p> [nelmt] [ntests]
 //   BK_KERNEL="sf6c_b1x1 sf9c_b1x1" ...         run a subset (default: all)
 //
 // Variant names sf<F>c_b<batch>x<w>[_sg16]:

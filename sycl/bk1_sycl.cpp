@@ -4,9 +4,9 @@
 // through local memory, the basis read from global memory and JxW stored
 // transposed per element, JxW_t(e, r, q, p) = JxW(e, p, q, r).
 //
-//   scripts/build.sh bk1_sycl_<nq>      (-> build/a770/bk1_sycl_<nq>)
-//   scripts/build.sh bk1_sycl_<nq>_jit  (JIT, for spec)
-//   scripts/run.sh bk1_sycl_<nq> [nelmt] [ntests]
+//   scripts/build.sh bk1_sycl_<p>       (-> build/a770/bk1_sycl_<p>, nq = p + 2)
+//   scripts/build.sh bk1_sycl_<p>_jit   (JIT, for spec)
+//   scripts/run.sh bk1_sycl_<p> [nelmt] [ntests]
 //   BK_KERNEL="C_l_sg0_b1 spec" ...   run a subset (default: all)
 //
 // Variant names <C|D>_<g|l>_sg<N>_b<B>:
@@ -20,7 +20,7 @@
 //   elem_sg16/32: the same with that sub-group size required; elem_v4: in
 //   and out moved as float4 vectors where the block allows)
 // spec: C_l with nq from a specialization constant (register arrays sized
-// for MAXNQ, loop bounds known at JIT time); use the bk1_sycl_<nq>_jit build for the
+// for MAXNQ, loop bounds known at JIT time); use the bk1_sycl_<p>_jit build for the
 // constant to be folded (an AOT build emulates it as a run-time buffer).
 //
 // Data: pseudo-random in and JxW (bk::fill_random_test_data), basis
