@@ -4,6 +4,7 @@
 #
 # usage:  scripts/build.sh <target>...              -> $BUILD_DIR/<target>
 #   BK1_<p> BK3_<p> BK1_ff_<p> BK5_<nq>     openmp/ drivers, one order each
+#   bk1_offload_<nq> bk5_offload_<nq>       openmp/offload/ kernel variants
 #   stream_omp                              roofline/ bandwidth test
 #   all_<prog>                              every order of <prog>
 # e.g.    scripts/build.sh BK1_4 BK5_7 all_BK3

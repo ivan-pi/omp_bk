@@ -11,6 +11,7 @@
 #     one binary per order, ahead-of-time compiled for BK_GPU_DEVICE, none of
 #     them in `all` (each takes minutes and gigabytes to build):
 #       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<nq>   openmp/ drivers, OpenMP offload
+#       bk1_offload_<nq> bk5_offload_<nq>      openmp/offload/ kernel variants
 #       all_<prog>                             every order of <prog>
 #     and in `all`: stream_omp (OpenMP offload).
 #
@@ -34,6 +35,8 @@ set(BK_GPU_JOBS 1 CACHE STRING "GPU compiles and links run at the same time (Nin
 set(BK_EXTRA_FLAGS "" CACHE STRING "extra compile and link flags of the GPU targets")
 set(BK_ORDERS_P "1;2;3;4;5;6;7;8" CACHE STRING "orders p of BK1_<p>, BK3_<p>, BK1_ff_<p>")
 set(BK_ORDERS_BK5 "2;3;4;5;6;7;8" CACHE STRING "nq of BK5_<nq>")
+set(BK_ORDERS_BK1_GPU "3;4;5;6;7;8;9;10" CACHE STRING "nq of bk1_offload_<nq>, bk1_sycl_<nq>")
+set(BK_ORDERS_BK5_GPU "2;3;4;5;6;7;8;9" CACHE STRING "nq of bk5_offload_<nq>, bk5_sycl_<nq>")
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
     message(WARNING "CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} defines NDEBUG; the benchmark is meant to keep its asserts")
@@ -148,9 +151,23 @@ function(bk_gpu_driver prog)
     endforeach()
 endfunction()
 
+# <src> compiled once per nq (-DNQ=<nq>): <prog>_<nq>
+function(bk_gpu_nq prog src api)
+    add_custom_target(all_${prog})
+    foreach(nq IN LISTS ARGN)
+        set(name ${prog}_${nq})
+        add_executable(${name} EXCLUDE_FROM_ALL ${src})
+        target_compile_definitions(${name} PRIVATE NQ=${nq})
+        bk_gpu_target(${name} ${api})
+        add_dependencies(all_${prog} ${name})
+    endforeach()
+endfunction()
+
 bk_gpu_driver(BK1 ${BK_ORDERS_P})
 bk_gpu_driver(BK3 ${BK_ORDERS_P})
 bk_gpu_driver(BK1_ff ${BK_ORDERS_P})
 bk_gpu_driver(BK5 ${BK_ORDERS_BK5})
+bk_gpu_nq(bk1_offload openmp/offload/bk1_offload.cpp omp ${BK_ORDERS_BK1_GPU})
+bk_gpu_nq(bk5_offload openmp/offload/bk5_offload.cpp omp ${BK_ORDERS_BK5_GPU})
 add_executable(stream_omp roofline/stream_omp.cpp)
 bk_gpu_target(stream_omp omp)
