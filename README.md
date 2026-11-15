@@ -21,6 +21,7 @@ The tree is organized by approach; the file names say the kernel.
 | `openmp/` | The portable drivers `BK1.cpp`, `BK3.cpp`, `BK5.cpp`, `BK1_ff.cpp` (host or offload), `bk1_sumfact.h`, `float_float.h` |
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk5_sycl.cpp` |
+| `tinytc/` | `bk_tinytc.cpp` (driver for both kernels), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received), `repro_slm/` (bug reproducer) |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps |
@@ -149,6 +150,7 @@ scripts/run.sh BK1_4 4 524288 10           # OMP_TARGET_OFFLOAD=MANDATORY on lev
 PROFILE=1 scripts/run.sh BK1_4 4           # plus the per-kernel device times
 scripts/build.sh BK1_ff_4 && scripts/run.sh BK1_ff_4 4 524288 3
 scripts/build.sh bk1_offload_6 bk5_sycl_7  # kernel variants: OpenMP offload and SYCL, by nq
+scripts/build.sh bk_tinytc                 # tinytc driver (tinytc from /opt/tinytc/latest)
 scripts/study/sweep.sh gpu_results.csv     # BK1, BK3, BK5 at ORDERS="2 4 6", plus STREAM
 ```
 

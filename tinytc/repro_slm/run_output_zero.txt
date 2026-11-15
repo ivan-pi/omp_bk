@@ -1,0 +1,11 @@
+device: Intel(R) Arc(TM) A770 Graphics, driver 1.15.38646+6
+local memory per work-group (sycl::info::device::local_mem_size): 65536 bytes
+tinytc v0.5.0-0-ac6cbc7
+N = 0 floats (0 bytes of local memory): <memory>:6.12-40: Internal compiler error (Stack required but not allocated)
+attributes{subgroup_size=16,work_group_size=[16,1]}
+
+{
+
+    %buf = alloca : memref<f32x$N,local>
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tinytc error 5: Internal compiler error

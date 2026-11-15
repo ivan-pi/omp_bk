@@ -15,7 +15,7 @@
 #       bk1_sycl_<nq> bk5_sycl_<nq>            sycl/ (_jit: JIT-compiled, for
 #                                              specialization constants)
 #       all_<prog>                             every order of <prog>
-#     and in `all`: stream_omp (OpenMP offload).
+#     and in `all`: stream_omp (OpenMP offload) and bk_tinytc (if tinytc is found).
 #
 # The drivers in openmp/ instantiate every order in a switch; the GPU builds
 # compile a copy with only the requested `case` (cmake/keep_case.cmake), so
@@ -39,6 +39,7 @@ set(BK_ORDERS_P "1;2;3;4;5;6;7;8" CACHE STRING "orders p of BK1_<p>, BK3_<p>, BK
 set(BK_ORDERS_BK5 "2;3;4;5;6;7;8" CACHE STRING "nq of BK5_<nq>")
 set(BK_ORDERS_BK1_GPU "3;4;5;6;7;8;9;10" CACHE STRING "nq of bk1_offload_<nq>, bk1_sycl_<nq>")
 set(BK_ORDERS_BK5_GPU "2;3;4;5;6;7;8;9" CACHE STRING "nq of bk5_offload_<nq>, bk5_sycl_<nq>")
+set(BK_TINYTC_ROOT "/opt/tinytc/latest" CACHE PATH "tinytc install searched for bk_tinytc")
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
     message(WARNING "CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} defines NDEBUG; the benchmark is meant to keep its asserts")
@@ -190,3 +191,16 @@ endforeach()
 
 add_executable(stream_omp roofline/stream_omp.cpp)
 bk_gpu_target(stream_omp omp)
+
+# tinytc: the kernels (tinytc/ir/*.ir) are compiled at run time, so the
+# driver is plain SYCL host code.
+list(APPEND CMAKE_PREFIX_PATH ${BK_TINYTC_ROOT})
+find_package(tinytc_sycl CONFIG QUIET)
+if(tinytc_sycl_FOUND)
+    add_executable(bk_tinytc tinytc/bk_tinytc.cpp)
+    bk_gpu_target(bk_tinytc sycl_rt)
+    target_compile_definitions(bk_tinytc PRIVATE TT_IR_DIR="${CMAKE_SOURCE_DIR}/tinytc/ir")
+    target_link_libraries(bk_tinytc PRIVATE tinytc::tinytc_sycl)
+else()
+    message(STATUS "tinytc_sycl not found under BK_TINYTC_ROOT=${BK_TINYTC_ROOT}: no bk_tinytc")
+endif()

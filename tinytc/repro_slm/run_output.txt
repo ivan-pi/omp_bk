@@ -1,0 +1,7 @@
+device: Intel(R) Arc(TM) A770 Graphics, driver 1.15.38646+6
+local memory per work-group (sycl::info::device::local_mem_size): 65536 bytes
+tinytc v0.5.0-0-ac6cbc7
+N = 4096 floats (16384 bytes of local memory): ran, out[0] = 1 (ok)
+N = 16384 floats (65536 bytes of local memory): ran, out[0] = 1 (ok)
+N = 16385 floats (65540 bytes of local memory): Source name unavailable:0.0: 
+tinytc error 18: Error occured in compute runtime

@@ -1,0 +1,7 @@
+N = 16385 floats (65540 bytes of local memory): [2026-11-15 12:37:22.773] [thread-id: 2200500] [trace] zeDeviceGetProperties(hDevice, pDeviceProperties)
+[2026-11-15 12:37:22.773] [thread-id: 2200500] [trace] zeModuleCreate(hContext, hDevice, desc, phModule, phBuildLog)
+[2026-11-15 12:37:22.773] [thread-id: 2200500] [trace] ERROR (ZE_RESULT_ERROR_OUT_OF_DEVICE_MEMORY) in zeModuleCreate(hContext=0x387479d8, hDevice=0x38620178, desc={stype=0x7ffed99458c0, format=0x7ffed99458d0, inputSize=716, pInputModule=3, pBuildFlags=nullptr, pConstants=nullptr}, phModule=0x7ffed9945980, phBuildLog=0x7ffed99458a8)
+[2026-11-15 12:37:22.773] [thread-id: 2200500] [trace] zeModuleBuildLogGetString(hModuleBuildLog, pSize, pBuildLog)
+[2026-11-15 12:37:22.773] [thread-id: 2200500] [trace] zeModuleBuildLogGetString(hModuleBuildLog, pSize, pBuildLog)
+[2026-11-15 12:37:22.773] [thread-id: 2200500] [trace] zeModuleBuildLogDestroy(hModuleBuildLog)
+tinytc error 18: Error occured in compute runtime
