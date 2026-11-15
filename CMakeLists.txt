@@ -105,7 +105,9 @@ set_property(GLOBAL APPEND PROPERTY JOB_POOLS bk_gpu=${BK_GPU_JOBS})
 separate_arguments(bk_extra UNIX_COMMAND "${BK_EXTRA_FLAGS}")
 
 # api: omp (OpenMP offload, AOT), sycl (AOT), sycl_jit (SPIR-V, compiled at
-# run time), sycl_rt (plain SYCL host code, for run-time compiled kernels)
+# run time), sycl_rt (plain SYCL host code, for run-time compiled kernels).
+# The SYCL programs use host OpenMP for their references (-fiopenmp, no
+# offload targets).
 function(bk_gpu_target name api)
     target_include_directories(${name} PRIVATE ${BK_INCLUDE})
     if(api STREQUAL "omp")
@@ -114,15 +116,15 @@ function(bk_gpu_target name api)
         target_link_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64_gen
                             "SHELL:-Xopenmp-target-backend=spir64_gen \"-device ${BK_GPU_DEVICE}\"")
     elseif(api STREQUAL "sycl")
-        target_compile_options(${name} PRIVATE -fsycl -fsycl-targets=spir64_gen)
-        target_link_options(${name} PRIVATE -fsycl -fsycl-targets=spir64_gen
+        target_compile_options(${name} PRIVATE -fsycl -fsycl-targets=spir64_gen -fiopenmp)
+        target_link_options(${name} PRIVATE -fsycl -fsycl-targets=spir64_gen -fiopenmp
                             "SHELL:-Xsycl-target-backend=spir64_gen \"-device ${BK_GPU_DEVICE}\"")
     elseif(api STREQUAL "sycl_jit")
-        target_compile_options(${name} PRIVATE -fsycl -fsycl-targets=spir64)
-        target_link_options(${name} PRIVATE -fsycl -fsycl-targets=spir64)
+        target_compile_options(${name} PRIVATE -fsycl -fsycl-targets=spir64 -fiopenmp)
+        target_link_options(${name} PRIVATE -fsycl -fsycl-targets=spir64 -fiopenmp)
     else()
-        target_compile_options(${name} PRIVATE -fsycl)
-        target_link_options(${name} PRIVATE -fsycl)
+        target_compile_options(${name} PRIVATE -fsycl -fiopenmp)
+        target_link_options(${name} PRIVATE -fsycl -fiopenmp)
     endif()
     target_compile_options(${name} PRIVATE ${bk_extra})
     target_link_options(${name} PRIVATE ${bk_extra})

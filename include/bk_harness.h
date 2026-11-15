@@ -1,12 +1,12 @@
 // bk_harness.h -- host side of the GPU kernel harnesses (openmp/offload/,
-// sycl/, tinytc/): kernel selection, the double-precision references, the
-// BK1 and BK5 data layouts and the accuracy check.  Plain C++, no OpenMP or
-// SYCL.
+// sycl/, tinytc/): kernel selection, the double-precision references (host
+// OpenMP), the BK1 and BK5 data layouts and the accuracy check.  No SYCL.
 
 #ifndef BK_HARNESS_H
 #define BK_HARNESS_H
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <sstream>
@@ -73,15 +73,26 @@ inline std::vector<float> transpose_jxw(const std::vector<float>& JxW, const std
     return JxW_t;
 }
 
+// The references run one element per iteration of an OpenMP parallel for
+// (BK_PARALLEL=0: one thread), with the work arrays of an element on the
+// stack, at most ref_max_nq points per direction.  Each element is summed in
+// the same order whatever the thread count.
+constexpr int ref_max_nq = 12;
+
+inline bool ref_parallel() { return env_int("BK_PARALLEL", 1) != 0; }
+
 // BK1 in double: in(e, i, j, k), basis(i, p), JxW(e, p, q, r) -> out(e, i, j, k).
 inline void reference_bk1(const int nq, const std::size_t nelmt, const std::vector<float>& basis,
                           const std::vector<float>& JxW, const std::vector<float>& in, std::vector<double>& out)
 {
+    assert(nq <= ref_max_nq);
     const int nm = nq - 1;
-    std::vector<double> w0(nq * nq * nq);
-    std::vector<double> w1(nq * nq * nq);
-    std::vector<double> w2(nq * nq * nq);
+    [[maybe_unused]] const bool parallel = ref_parallel();
+    #pragma omp parallel for if(parallel)
     for (std::size_t e = 0; e < nelmt; ++e) {
+        double w0[ref_max_nq * ref_max_nq * ref_max_nq];
+        double w1[ref_max_nq * ref_max_nq * ref_max_nq];
+        double w2[ref_max_nq * ref_max_nq * ref_max_nq];
         const float* ei = in.data() + e * nm * nm * nm;
         const float* ej = JxW.data() + e * nq * nq * nq;
         // forward: w0(p,j,k), w1(p,q,k), w2(p,q,r) * JxW(p,q,r)
@@ -198,11 +209,14 @@ inline std::vector<float> make_bk5_G(const std::vector<float>& G6i, const std::s
 inline void reference_bk5(const int nq, const std::size_t nelmt, const std::vector<float>& D,
                           const std::vector<float>& G6i, const std::vector<float>& in, std::vector<double>& out)
 {
+    assert(nq <= ref_max_nq);
     const int nq3 = nq * nq * nq;
-    std::vector<double> rr(nq3);
-    std::vector<double> rs(nq3);
-    std::vector<double> rt(nq3);
+    [[maybe_unused]] const bool parallel = ref_parallel();
+    #pragma omp parallel for if(parallel)
     for (std::size_t e = 0; e < nelmt; ++e) {
+        double rr[ref_max_nq * ref_max_nq * ref_max_nq];
+        double rs[ref_max_nq * ref_max_nq * ref_max_nq];
+        double rt[ref_max_nq * ref_max_nq * ref_max_nq];
         const float* ei = in.data() + e * nq3;
         const float* eG = G6i.data() + e * 6 * nq3;
         for (int i = 0; i < nq; ++i) {

@@ -142,6 +142,9 @@ configures `build/a770` and builds the named targets one after another.
   (`scripts/capped` is the preset's compiler launcher), and GPU compiles
   never run two at a time. The host data grow as nelmt * nq^3: BK3 at the
   default 524288 elements needs ~7.5 GB at p = 6 and ~11 GB at p = 7.
+- **Checks:** the kernel-variant harnesses compare every result with a
+  double-precision reference computed on the host, one element per OpenMP
+  thread (`BK_PARALLEL=0`: one thread).
 
 ```sh
 scripts/build.sh BK1_4                     # -> build/a770/BK1_4 (p = 4)
