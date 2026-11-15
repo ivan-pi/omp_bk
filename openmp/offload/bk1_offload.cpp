@@ -75,7 +75,6 @@ const variant variants[] = {
     {"gsR128",  &GridStrideRaw<float, NQ, plane_batch(NQ, 128), gs_block(NQ, plane_batch(NQ, 128))>},
     {"gsW1",    &GridStrideWS<float, NQ, 1, gs_block(NQ, 1)>},
     {"gsW128",  &GridStrideWS<float, NQ, plane_batch(NQ, 128), gs_block(NQ, plane_batch(NQ, 128))>},
-    {"gsW_b1",  &GridStrideWS<float, NQ, 1, gs_block(NQ, 1)>},
     {"gsW_b2",  &GridStrideWS<float, NQ, cap_batch(NQ, 2), gs_block(NQ, cap_batch(NQ, 2))>},
     {"gsW_b3",  &GridStrideWS<float, NQ, cap_batch(NQ, 3), gs_block(NQ, cap_batch(NQ, 3))>},
     {"gsW_b4",  &GridStrideWS<float, NQ, cap_batch(NQ, 4), gs_block(NQ, cap_batch(NQ, 4))>},
