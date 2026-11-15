@@ -32,16 +32,15 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <limits>
-#include <sstream>
 #include <string>
 #include <vector>
 
 #include "bk_common.h"
+#include "bk_harness.h"
+#include "bk_sycl.h"
 #include "bk1_gpu_steps.h"
 
 #include <sycl/ext/oneapi/experimental/group_load_store.hpp>
@@ -58,7 +57,7 @@ namespace {
 using bk1gpu::gs_steps;
 namespace syclex = sycl::ext::oneapi::experimental;
 
-constexpr int round16(const int n) { return ((n + 15) / 16) * 16; }
+constexpr int round16(const int n) { return bk::round_up(n, 16); }
 
 // ---------------------------------------------------------------------------
 // the seven-step kernel, compile-time nq
@@ -831,103 +830,6 @@ const variant variants[] = {
     {"inl_b64", &launch_spec<bk1gpu::cap_batch(NQ, 64), NQ>},
 };
 
-bool selected(const char* name, const std::string& list)
-{
-    if (list.empty()) {
-        return true;
-    }
-    std::istringstream ss(list);
-    std::string w;
-    while (ss >> w) {
-        if (w == name) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// double-precision reference in the canonical JxW(e, p, q, r) layout
-void reference(const int nq, const std::size_t nelmt, const std::vector<float>& basis,
-               const std::vector<float>& JxW, const std::vector<float>& in, std::vector<double>& out)
-{
-    const int nm = nq - 1;
-    std::vector<double> w0(nq * nq * nq);
-    std::vector<double> w1(nq * nq * nq);
-    std::vector<double> w2(nq * nq * nq);
-    for (std::size_t e = 0; e < nelmt; ++e) {
-        const float* ei = in.data() + e * nm * nm * nm;
-        const float* ej = JxW.data() + e * nq * nq * nq;
-        // forward: w0(p,j,k), w1(p,q,k), w2(p,q,r) * JxW(p,q,r)
-        for (int p = 0; p < nq; ++p) {
-            for (int j = 0; j < nm; ++j) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int i = 0; i < nm; ++i) {
-                        s += double(ei[(i * nm + j) * nm + k]) * basis[i * nq + p];
-                    }
-                    w0[(p * nm + j) * nm + k] = s;
-                }
-            }
-        }
-        for (int p = 0; p < nq; ++p) {
-            for (int q = 0; q < nq; ++q) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int j = 0; j < nm; ++j) {
-                        s += w0[(p * nm + j) * nm + k] * basis[j * nq + q];
-                    }
-                    w1[(p * nq + q) * nm + k] = s;
-                }
-            }
-        }
-        for (int p = 0; p < nq; ++p) {
-            for (int q = 0; q < nq; ++q) {
-                for (int r = 0; r < nq; ++r) {
-                    double s = 0;
-                    for (int k = 0; k < nm; ++k) {
-                        s += w1[(p * nq + q) * nm + k] * basis[k * nq + r];
-                    }
-                    w2[(p * nq + q) * nq + r] = s * ej[(p * nq + q) * nq + r];
-                }
-            }
-        }
-        // backward: w1(p,q,k), w0(p,j,k), out(i,j,k)
-        for (int p = 0; p < nq; ++p) {
-            for (int q = 0; q < nq; ++q) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int r = 0; r < nq; ++r) {
-                        s += w2[(p * nq + q) * nq + r] * basis[k * nq + r];
-                    }
-                    w1[(p * nq + q) * nm + k] = s;
-                }
-            }
-        }
-        for (int p = 0; p < nq; ++p) {
-            for (int j = 0; j < nm; ++j) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int q = 0; q < nq; ++q) {
-                        s += w1[(p * nq + q) * nm + k] * basis[j * nq + q];
-                    }
-                    w0[(p * nm + j) * nm + k] = s;
-                }
-            }
-        }
-        for (int i = 0; i < nm; ++i) {
-            for (int j = 0; j < nm; ++j) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int p = 0; p < nq; ++p) {
-                        s += w0[(p * nm + j) * nm + k] * basis[i * nq + p];
-                    }
-                    out[e * nm * nm * nm + (i * nm + j) * nm + k] = s;
-                }
-            }
-        }
-    }
-}
-
 } // namespace
 
 int main(int argc, char** argv)
@@ -936,7 +838,6 @@ int main(int argc, char** argv)
     constexpr int nm = nq - 1;
     const std::size_t nelmt = (argc > 1) ? std::size_t(std::atoll(argv[1])) : std::size_t(1) << 19;
     const int ntests = (argc > 2) ? std::atoi(argv[2]) : 20;
-    const std::string list = bk::get_env("BK_KERNEL").value_or("");
 
     // BK_PROFILE=0: no event profiling (no device times, less launch
     // overhead); BK_INORDER=1: an in-order queue
@@ -954,31 +855,14 @@ int main(int argc, char** argv)
     std::printf("BK1 SYCL: p = %d, nq = %d, nelmt = %zu, ntests = %d, device %s\n", nq - 2, nq, nelmt,
                 ntests, q.get_device().get_info<sycl::info::device::name>().c_str());
 
-    std::vector<float> basis(nm * nq);
-    for (int i = 0; i < nm; ++i) {
-        for (int p = 0; p < nq; ++p) {
-            basis[i * nq + p] = std::cos(float(i * nq + p));
-        }
-    }
+    const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);
     std::vector<float> JxW(nelmt * nq * nq * nq);
     std::vector<float> in(nelmt * nm * nm * nm);
     bk::fill_random_test_data(in, JxW);
-    std::vector<float> JxW_t(JxW.size());
-    for (std::size_t e = 0; e < nelmt; ++e) {
-        for (int p = 0; p < nq; ++p) {
-            for (int qq = 0; qq < nq; ++qq) {
-                for (int r = 0; r < nq; ++r) {
-                    JxW_t[((e * nq + r) * nq + qq) * nq + p] = JxW[((e * nq + p) * nq + qq) * nq + r];
-                }
-            }
-        }
-    }
+    const std::vector<float> JxW_t = bk::transpose_jxw(JxW, nelmt, nq);
     std::vector<double> ref(in.size());
-    reference(nq, nelmt, basis, JxW, in, ref);
-    double big = 0.0;
-    for (const double v : ref) {
-        big = std::max(big, std::fabs(v));
-    }
+    bk::reference_bk1(nq, nelmt, basis, JxW, in, ref);
+    const double big = bk::max_abs(ref);
 
     device_data d{sycl::malloc_device<float>(basis.size(), q), sycl::malloc_device<float>(JxW_t.size(), q),
                   sycl::malloc_device<float>(in.size(), q), sycl::malloc_device<float>(in.size(), q),
@@ -991,34 +875,16 @@ int main(int argc, char** argv)
     const double bytes = sizeof(float) * (2.0 * in.size() + JxW.size());
     std::vector<float> out(in.size());
     for (const variant& v : variants) {
-        if (!selected(v.name, list)) {
+        if (!bk::selected(v.name)) {
             continue;
         }
         q.memset(d.out, 0, out.size() * sizeof(float)).wait();
-        v.fn(q, d).wait_and_throw();   // warm-up (and JIT compilation)
-        double host_best = std::numeric_limits<double>::max();
-        double dev_best = std::numeric_limits<double>::max();
-        for (int t = 0; t < ntests; ++t) {
-            const auto t0 = std::chrono::steady_clock::now();
-            sycl::event ev = v.fn(q, d);
-            ev.wait_and_throw();
-            const auto t1 = std::chrono::steady_clock::now();
-            host_best = std::min(host_best, std::chrono::duration<double>(t1 - t0).count());
-            if (profile) {
-                const double ns = double(ev.get_profiling_info<sycl::info::event_profiling::command_end>() -
-                                         ev.get_profiling_info<sycl::info::event_profiling::command_start>());
-                dev_best = std::min(dev_best, 1e-9 * ns);
-            }
-        }
+        const bk::launch_times t = bk::time_launches(ntests, [&] { return v.fn(q, d); }, profile);
         q.copy(d.out, out.data(), out.size()).wait();
-        double diff = 0.0;
-        for (std::size_t i = 0; i < out.size(); ++i) {
-            diff = std::max(diff, std::fabs(double(out[i]) - ref[i]));
-        }
+        const double relerr = bk::rel_maxdiff(out, ref, big);
         std::printf("%-14s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %.1e%s\n",
-                    v.name, 1e-9 * in.size() / host_best, 1e-9 * bytes / host_best,
-                    1e-9 * in.size() / dev_best, 1e-9 * bytes / dev_best, diff / big,
-                    (diff / big < 1e-5) ? "" : "  FAIL");
+                    v.name, 1e-9 * in.size() / t.host, 1e-9 * bytes / t.host,
+                    1e-9 * in.size() / t.device, 1e-9 * bytes / t.device, relerr, bk::fail_mark(relerr));
     }
     sycl::free(d.basis, q);
     sycl::free(d.JxW_t, q);

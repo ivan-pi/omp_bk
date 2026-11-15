@@ -187,7 +187,7 @@ void GridStrideInline(
     }
 }
 
-// gsP: gsI with the SLM boxes laid out by slm_layout (common.h): padded
+// gsP: gsI with the SLM boxes laid out by slm_layout (bk1_gpu.h): padded
 // strides against bank conflicts (pad = true) or the dense layout (pad =
 // false, the same code as gsI), and a team of `block` work-items (may exceed
 // batch * nq * nq, e.g. a power of two for the guide's occupancy rule).

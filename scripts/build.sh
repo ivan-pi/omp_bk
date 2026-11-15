@@ -37,10 +37,14 @@ fi
 oneapi_env
 mkdir -p "$BUILD_DIR/logs"
 cd "$REPO"
-if ! cmake --preset a770 -B "$BUILD_DIR" -DBK_GPU_DEVICE="$GPU_DEVICE" \
-        -DBK_EXTRA_FLAGS="${EXTRA_FLAGS:-}" > "$BUILD_DIR/logs/configure.log" 2>&1; then
-    cat "$BUILD_DIR/logs/configure.log" >&2
-    exit 1
+# configure when the tree is new or its device or flags differ
+cached() { sed -n "s/^$1:[A-Z]*=//p" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; }
+if [ "$(cached BK_GPU_DEVICE)" != "$GPU_DEVICE" ] || [ "$(cached BK_EXTRA_FLAGS)" != "${EXTRA_FLAGS:-}" ]; then
+    if ! cmake --preset a770 -B "$BUILD_DIR" -DBK_GPU_DEVICE="$GPU_DEVICE" \
+            -DBK_EXTRA_FLAGS="${EXTRA_FLAGS:-}" > "$BUILD_DIR/logs/configure.log" 2>&1; then
+        cat "$BUILD_DIR/logs/configure.log" >&2
+        exit 1
+    fi
 fi
 
 status=0

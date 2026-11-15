@@ -3,9 +3,6 @@
 #include <array>
 #include <vector>
 #include <cstdlib>
-#include <chrono>
-#include <limits>
-#include <algorithm>
 #include <cstddef>
 
 #include "bk_common.h"
@@ -33,13 +30,9 @@ void SumFactorization(
     #pragma omp teams loop
     for (std::size_t e = 0; e < nelmt; ++e) {
 
-        // D(i, n) == dbasis[i * nq + n].
-        // Constructed inside the target region on purpose: out here the view
-        // would capture the *host* pointer (firstprivate structs get no
-        // pointer translation), and OpenMP forbids statements between
-        // `target` and `teams`, so per-iteration construction is the one
-        // correct spot. It costs nothing -- it is a pointer copy the
-        // compiler hoists.
+        // D(i, n) == dbasis[i * nq + n], built inside the target region: a
+        // view built outside would hold the host pointer (structs get no
+        // pointer translation).
         const ndview<const T, nq, nq> D{dbasis};
 
         using nq_cview = ndview<const T, nq, nq, nq>;
@@ -135,69 +128,29 @@ void run_test(const std::size_t nelmt, const int ntests)
     const T* d_in     = in.data();
     T*       d_out    = out.data();
 
-    // minimum wall time over ntests repetitions
-    using std::chrono::high_resolution_clock;
-    using std::chrono::duration;
-
-    double elapsed = std::numeric_limits<double>::max();
-
+    // minimum wall time over ntests repetitions, the arrays kept on the device
+    double elapsed = 0.0;
     #pragma omp target data \
         map(to: d_dbasis[:size_dbasis]) \
         map(to: d_G[:size_G], d_in[:size_inout]) \
         map(tofrom: d_out[:size_inout])
-    for (int t = 0; t < ntests; ++t) {
-        auto start = high_resolution_clock::now();
-
-        SumFactorization<T, nq>(nelmt, d_dbasis, d_G, d_in, d_out);
-
-        auto stop = high_resolution_clock::now();
-        duration<double> rep_time = stop - start;
-        elapsed = std::min(elapsed, rep_time.count());
+    {
+        elapsed = time_min(ntests, [&] {
+            SumFactorization<T, nq>(nelmt, d_dbasis, d_G, d_in, d_out);
+        });
     }
 
-    // Performance in GDoF/s
-    const auto dof_rate = [&](double seconds) {
-        return 1.0e-9 * size_inout / seconds;
-    };
-    // Effective bandwidth in GB/s: read in + write out + read G
-    const auto byte_rate = [&](double seconds) {
-        return 1.0e-9 * sizeof(T) * (2 * size_inout + size_G) / seconds;
-    };
-
-    std::cout << "SumFactorization -> nelmt = " << nelmt
-              << " GDoF/s = " << dof_rate(elapsed)
-              << " GB/s = "   << byte_rate(elapsed) << "\n";
-
+    // bytes: read in + write out + read G
+    print_rates(nelmt, size_inout, sizeof(T) * (2 * size_inout + size_G), elapsed);
     std::cout << "norm = " << norm2(out.data(), out.size()) << "\n";
 }
 
-// Default element count. Note: the historical literal was `2 << 18`, which
-// is 2^19 = 524288 -- NOT 2^18. The same value is kept here, spelled
-// unambiguously.
-constexpr std::size_t default_nelmt = std::size_t(1) << 19;   // = 524288
-
+// <nq> [nelmt] [ntests]: nq = p + 1 = 2..8
 int main(int argc, char** argv)
 {
-    const int nq = (argc > 1) ? std::atoi(argv[1]) : 4;
-    const std::size_t nelmt =
-        (argc > 2) ? std::size_t(std::atoll(argv[2])) : default_nelmt;
-    const int ntests = (argc > 3) ? std::atoi(argv[3]) : 5;
-
-    // Runtime nq -> compile-time nq: one kernel instantiation per supported
-    // order (each case label must pair with its own literal).
-    // Note: adding more cases can increase the compilation time.
-    switch (nq) {
-        case 2: run_test<float, 2>(nelmt, ntests); break;
-        case 3: run_test<float, 3>(nelmt, ntests); break;
-        case 4: run_test<float, 4>(nelmt, ntests); break;
-        case 5: run_test<float, 5>(nelmt, ntests); break;
-        case 6: run_test<float, 6>(nelmt, ntests); break;
-        case 7: run_test<float, 7>(nelmt, ntests); break;
-        case 8: run_test<float, 8>(nelmt, ntests); break;
-        default:
-            std::cerr << "unsupported nq = " << nq << " (supported: 2..8)\n";
-            return 1;
-    }
-
-    return 0;
+    const run_args a = parse_args(argc, argv, 4);
+    const bool ok = with_order<2, 8>("nq", a.order, [&](auto NQ) {
+        run_test<float, decltype(NQ)::value>(a.nelmt, a.ntests);
+    });
+    return ok ? 0 : 1;
 }

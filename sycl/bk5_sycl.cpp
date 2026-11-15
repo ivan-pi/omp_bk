@@ -38,16 +38,15 @@
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <limits>
-#include <sstream>
 #include <string>
 #include <vector>
 
 #include "bk_common.h"
+#include "bk_harness.h"
+#include "bk_sycl.h"
 
 #ifndef NQ
 #define NQ 7
@@ -55,7 +54,7 @@
 
 namespace {
 
-constexpr int round16(const int n) { return ((n + 15) / 16) * 16; }
+constexpr int round16(const int n) { return bk::round_up(n, 16); }
 
 // (e, a, b) of a flat index t over an (*, na, nb) box, b fastest
 struct idx3 {
@@ -341,91 +340,6 @@ const variant variants[] = {
     SF2(6, 1, 1), SF2(6, 8, 2), SF2(9, 1, 1), SF2(9, 4, 2),
 };
 
-bool selected(const char* name, const std::string& list)
-{
-    if (list.empty()) {
-        return true;
-    }
-    std::istringstream ss(list);
-    std::string w;
-    while (ss >> w) {
-        if (w == name) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// G in layout c, G(f, k, i, j) per element, from the symmetric factors
-// stored interleaved, G6i(i, j, s, k)
-std::vector<float> make_G(const std::vector<float>& G6i, const std::size_t nelmt, const int F)
-{
-    constexpr int nq = NQ;
-    constexpr int nq3 = nq * nq * nq;
-    const int sym[9] = {0, 1, 2, 1, 3, 4, 2, 4, 5};
-    std::vector<float> G(nelmt * F * nq3);
-    for (std::size_t e = 0; e < nelmt; ++e) {
-        for (int i = 0; i < nq; ++i) {
-            for (int j = 0; j < nq; ++j) {
-                for (int k = 0; k < nq; ++k) {
-                    for (int f = 0; f < F; ++f) {
-                        const int s = (F == 6) ? f : sym[f];
-                        G[e * F * nq3 + ((f * nq + k) * nq + i) * nq + j] =
-                            G6i[e * 6 * nq3 + ((i * nq + j) * 6 + s) * nq + k];
-                    }
-                }
-            }
-        }
-    }
-    return G;
-}
-
-void reference(const std::size_t nelmt, const std::vector<float>& D, const std::vector<float>& G6i,
-               const std::vector<float>& in, std::vector<double>& out)
-{
-    constexpr int nq = NQ;
-    constexpr int nq3 = nq * nq * nq;
-    std::vector<double> rr(nq3);
-    std::vector<double> rs(nq3);
-    std::vector<double> rt(nq3);
-    for (std::size_t e = 0; e < nelmt; ++e) {
-        const float* ei = in.data() + e * nq3;
-        const float* eG = G6i.data() + e * 6 * nq3;
-        for (int i = 0; i < nq; ++i) {
-            for (int j = 0; j < nq; ++j) {
-                for (int k = 0; k < nq; ++k) {
-                    double qr = 0;
-                    double qs = 0;
-                    double qt = 0;
-                    for (int n = 0; n < nq; ++n) {
-                        qr += double(ei[(n * nq + j) * nq + k]) * D[i * nq + n];
-                        qs += double(ei[(i * nq + n) * nq + k]) * D[j * nq + n];
-                        qt += double(ei[(i * nq + j) * nq + n]) * D[k * nq + n];
-                    }
-                    const auto g = [&](const int f) { return double(eG[((i * nq + j) * 6 + f) * nq + k]); };
-                    const int x = (i * nq + j) * nq + k;
-                    rr[x] = g(0) * qr + g(1) * qs + g(2) * qt;
-                    rs[x] = g(1) * qr + g(3) * qs + g(4) * qt;
-                    rt[x] = g(2) * qr + g(4) * qs + g(5) * qt;
-                }
-            }
-        }
-        for (int i = 0; i < nq; ++i) {
-            for (int j = 0; j < nq; ++j) {
-                for (int k = 0; k < nq; ++k) {
-                    double s = 0;
-                    for (int n = 0; n < nq; ++n) {
-                        s += rr[(n * nq + j) * nq + k] * D[n * nq + i];
-                        s += rs[(i * nq + n) * nq + k] * D[n * nq + j];
-                        s += rt[(i * nq + j) * nq + n] * D[n * nq + k];
-                    }
-                    out[e * nq3 + (i * nq + j) * nq + k] = s;
-                }
-            }
-        }
-    }
-}
-
 } // namespace
 
 int main(int argc, char** argv)
@@ -434,31 +348,22 @@ int main(int argc, char** argv)
     constexpr int nq3 = nq * nq * nq;
     const std::size_t nelmt = (argc > 1) ? std::size_t(std::atoll(argv[1])) : std::size_t(1) << 17;
     const int ntests = (argc > 2) ? std::atoi(argv[2]) : 10;
-    const std::string list = bk::get_env("BK_KERNEL").value_or("");
 
     sycl::queue q{sycl::gpu_selector_v, sycl::property_list{sycl::property::queue::enable_profiling{}}};
     std::printf("BK5 SYCL: p = %d, nq = %d, nelmt = %zu (%zu DoFs), ntests = %d, device %s\n", nq - 1, nq, nelmt,
                 nelmt * nq3, ntests, q.get_device().get_info<sycl::info::device::name>().c_str());
 
-    std::vector<float> D(nq * nq);
-    for (int i = 0; i < nq; ++i) {
-        for (int n = 0; n < nq; ++n) {
-            D[i * nq + n] = std::cos(float(i * nq + n));
-        }
-    }
+    const std::vector<float> D = bk::make_test_basis<float>(nq, nq);
     std::vector<float> in(nelmt * nq3);
     std::vector<float> G6i(nelmt * 6 * nq3);
     bk::fill_random_test_data(in, G6i);   // in in [-1, 1], G6i = 1.5 + [-1, 1]
     std::vector<double> ref(in.size());
-    reference(nelmt, D, G6i, in, ref);
-    double big = 0.0;
-    for (const double v : ref) {
-        big = std::max(big, std::fabs(v));
-    }
+    bk::reference_bk5(nq, nelmt, D, G6i, in, ref);
+    const double big = bk::max_abs(ref);
 
     // BK_ALIGN=n: device arrays from aligned_alloc_device with n-byte
     // alignment (default: malloc_device)
-    const std::size_t align = std::size_t(std::atoll(bk::get_env("BK_ALIGN").value_or("0").c_str()));
+    const std::size_t align = std::size_t(bk::env_int("BK_ALIGN", 0));
     const auto dev_alloc = [&](const std::size_t n) {
         return (align > 0) ? sycl::aligned_alloc_device<float>(align, n, q) : sycl::malloc_device<float>(n, q);
     };
@@ -466,7 +371,7 @@ int main(int argc, char** argv)
     // a G is built and copied only if a selected variant uses it
     bool need[2] = {false, false};
     for (const variant& v : variants) {
-        if (selected(v.name, list)) {
+        if (bk::selected(v.name)) {
             need[v.F == 6 ? 0 : 1] = true;
         }
     }
@@ -476,7 +381,7 @@ int main(int argc, char** argv)
     q.copy(in.data(), d.in, in.size());
     for (int g = 0; g < 2; ++g) {
         if (need[g]) {
-            const std::vector<float> Gc = make_G(G6i, nelmt, g == 0 ? 6 : 9);
+            const std::vector<float> Gc = bk::make_bk5_G(G6i, nelmt, nq, g == 0 ? 6 : 9, 2);
             d.G[g] = dev_alloc(Gc.size());
             q.copy(Gc.data(), d.G[g], Gc.size()).wait_and_throw();
         }
@@ -486,32 +391,17 @@ int main(int argc, char** argv)
 
     std::vector<float> out(in.size());
     for (const variant& v : variants) {
-        if (!selected(v.name, list)) {
+        if (!bk::selected(v.name)) {
             continue;
         }
         q.memset(d.out, 0, out.size() * sizeof(float)).wait();
-        v.fn(q, d).wait_and_throw();   // warm-up
-        double host_best = std::numeric_limits<double>::max();
-        double dev_best = std::numeric_limits<double>::max();
-        for (int t = 0; t < ntests; ++t) {
-            const auto t0 = std::chrono::steady_clock::now();
-            sycl::event ev = v.fn(q, d);
-            ev.wait_and_throw();
-            const auto t1 = std::chrono::steady_clock::now();
-            host_best = std::min(host_best, std::chrono::duration<double>(t1 - t0).count());
-            const double ns = double(ev.get_profiling_info<sycl::info::event_profiling::command_end>() -
-                                     ev.get_profiling_info<sycl::info::event_profiling::command_start>());
-            dev_best = std::min(dev_best, 1e-9 * ns);
-        }
+        const bk::launch_times t = bk::time_launches(ntests, [&] { return v.fn(q, d); });
         q.copy(d.out, out.data(), out.size()).wait();
-        double diff = 0.0;
-        for (std::size_t x = 0; x < out.size(); ++x) {
-            diff = std::max(diff, std::fabs(double(out[x]) - ref[x]));
-        }
+        const double relerr = bk::rel_maxdiff(out, ref, big);
         const double bytes = sizeof(float) * double(nelmt) * nq3 * (2.0 + v.F);
         std::printf("%-15s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %.1e%s\n",
-                    v.name, 1e-9 * in.size() / host_best, 1e-9 * bytes / host_best, 1e-9 * in.size() / dev_best,
-                    1e-9 * bytes / dev_best, diff / big, (diff / big < 1e-5) ? "" : "  FAIL");
+                    v.name, 1e-9 * in.size() / t.host, 1e-9 * bytes / t.host, 1e-9 * in.size() / t.device,
+                    1e-9 * bytes / t.device, relerr, bk::fail_mark(relerr));
     }
     sycl::free(d.D, q);
     for (float* g : d.G) {

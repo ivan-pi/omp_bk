@@ -21,11 +21,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <sstream>
 #include <string>
 #include <vector>
 
 #include "bk_common.h"
+#include "bk_harness.h"
 #include "bk1_sumfact.h"
 #include "bk1_gpu.h"
 #include "bk1_offload/teams.h"
@@ -50,7 +50,7 @@ struct variant {
     bool jxw_transposed = false;   // kernel reads JxW stored as (e, r, q, p)
 };
 
-// Fixed batches go through cap_batch (common.h): every variant shares one
+// Fixed batches go through cap_batch (bk1_gpu.h): every variant shares one
 // device image, and one that does not fit the SLM or 1024 threads at a high
 // order keeps the whole image from loading.
 const variant variants[] = {
@@ -114,21 +114,6 @@ const variant variants[] = {
     {"planeX256", &SumFactorizationPlaneTid<float, NQ, plane_batch(NQ, 256), true>},
 };
 
-bool selected(const char* name, const std::string& list)
-{
-    if (list.empty()) {
-        return true;
-    }
-    std::istringstream ss(list);
-    std::string w;
-    while (ss >> w) {
-        if (w == name) {
-            return true;
-        }
-    }
-    return false;
-}
-
 } // namespace
 
 int main(int argc, char** argv)
@@ -137,38 +122,34 @@ int main(int argc, char** argv)
     constexpr int nm = nq - 1;
     const std::size_t nelmt = (argc > 1) ? std::size_t(std::atoll(argv[1])) : std::size_t(1) << 19;
     const int ntests = (argc > 2) ? std::atoi(argv[2]) : 10;
-    const std::string list = get_env("BK_KERNEL").value_or("");
     const bool with_ref = get_env("BK_REF").value_or("1") != "0";
-    g_grid = std::atoi(get_env("BK_TEAMS").value_or("0").c_str());
+    g_grid = env_int("BK_TEAMS", 0);
 
     const std::array<float, nm * nq> basis = make_test_basis<float, nm, nq>();
     std::vector<float> JxW(nelmt * nq * nq * nq);
     std::vector<float> in(nelmt * nm * nm * nm);
     fill_random_test_data(in, JxW);
-    // JxW transposed per element, (e, r, q, p), for the kernels that read it so
-    std::vector<float> JxW_t(JxW.size());
-    for (std::size_t e = 0; e < nelmt; ++e) {
-        for (int p = 0; p < nq; ++p) {
-            for (int q = 0; q < nq; ++q) {
-                for (int r = 0; r < nq; ++r) {
-                    JxW_t[((e * nq + r) * nq + q) * nq + p] = JxW[((e * nq + p) * nq + q) * nq + r];
-                }
-            }
-        }
+    // JxW transposed per element, only if a selected kernel reads it so
+    bool need_jxw_t = false;
+    for (const variant& v : variants) {
+        need_jxw_t = need_jxw_t || (v.jxw_transposed && selected(v.name));
     }
+    const std::vector<float> JxW_t = need_jxw_t ? transpose_jxw(JxW, nelmt, nq) : std::vector<float>();
     std::vector<float> ref(in.size());
     std::vector<float> out(in.size());
     const double bytes = sizeof(float) * (2.0 * in.size() + JxW.size());
 
     std::printf("BK1 offload: p = %d, nq = %d, nelmt = %zu, ntests = %d, team rounding %d\n",
                 nq - 2, nq, nelmt, ntests, TEAM_ROUND);
+    // the first kernel run (ref, unless BK_REF=0) is the reference of the others
     bool have_ref = false;
+    double big = 0.0;
     for (const variant& v : variants) {
         const bool is_ref = std::strcmp(v.name, "ref") == 0;
         if (is_ref && !with_ref) {
             continue;
         }
-        if (!is_ref && !selected(v.name, list)) {
+        if (!is_ref && !selected(v.name)) {
             continue;
         }
         std::vector<float>& dst = have_ref ? out : ref;
@@ -181,11 +162,13 @@ int main(int argc, char** argv)
             return 1;
         }
         double diff = 0.0;
-        double big = 0.0;
         if (have_ref) {
             for (std::size_t i = 0; i < ref.size(); ++i) {
                 diff = std::max(diff, double(std::fabs(out[i] - ref[i])));
-                big = std::max(big, double(std::fabs(ref[i])));
+            }
+        } else {
+            for (const float r : ref) {
+                big = std::max(big, double(std::fabs(r)));
             }
         }
         std::printf("%-10s GDoF/s = %8.3f  GB/s = %7.1f  time = %8.3f ms  maxdiff = %.2e%s\n",

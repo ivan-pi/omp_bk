@@ -27,6 +27,5 @@ if [ "${PROFILE:-0}" = 1 ]; then
     extra+=(LIBOMPTARGET_PLUGIN_PROFILE=T)
 fi
 
-args=("$@")
 oneapi_env
-capped env OMP_TARGET_OFFLOAD=MANDATORY "${extra[@]}" "$BUILD_DIR/$name" "${args[@]}"
+capped env OMP_TARGET_OFFLOAD=MANDATORY "${extra[@]}" "$BUILD_DIR/$name" "$@"
