@@ -5,9 +5,13 @@
 # usage:  scripts/build.sh <target>...              -> $BUILD_DIR/<target>
 #   BK1_<p> BK3_<p> BK1_ff_<p> BK5_<nq>     openmp/ drivers, one order each
 #   bk1_offload_<nq> bk5_offload_<nq>       openmp/offload/ kernel variants
+#   bk1_sycl_<nq> bk5_sycl_<nq>             sycl/ (bk1_sycl_<nq>_jit: built for
+#                                           JIT compilation, which the
+#                                           specialization-constant variant
+#                                           needs to fold nq)
 #   stream_omp                              roofline/ bandwidth test
 #   all_<prog>                              every order of <prog>
-# e.g.    scripts/build.sh BK1_4 BK5_7 all_BK3
+# e.g.    scripts/build.sh BK1_4 bk5_offload_7 all_bk1_sycl
 #
 # The first call configures $BUILD_DIR with the preset; later calls reuse it.
 # Each compile and link runs at low priority in a memory-capped scope

@@ -12,6 +12,8 @@
 #     them in `all` (each takes minutes and gigabytes to build):
 #       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<nq>   openmp/ drivers, OpenMP offload
 #       bk1_offload_<nq> bk5_offload_<nq>      openmp/offload/ kernel variants
+#       bk1_sycl_<nq> bk5_sycl_<nq>            sycl/ (_jit: JIT-compiled, for
+#                                              specialization constants)
 #       all_<prog>                             every order of <prog>
 #     and in `all`: stream_omp (OpenMP offload).
 #
@@ -169,5 +171,22 @@ bk_gpu_driver(BK1_ff ${BK_ORDERS_P})
 bk_gpu_driver(BK5 ${BK_ORDERS_BK5})
 bk_gpu_nq(bk1_offload openmp/offload/bk1_offload.cpp omp ${BK_ORDERS_BK1_GPU})
 bk_gpu_nq(bk5_offload openmp/offload/bk5_offload.cpp omp ${BK_ORDERS_BK5_GPU})
+bk_gpu_nq(bk1_sycl sycl/bk1_sycl.cpp sycl ${BK_ORDERS_BK1_GPU})
+bk_gpu_nq(bk5_sycl sycl/bk5_sycl.cpp sycl ${BK_ORDERS_BK5_GPU})
+
+# JIT builds of the SYCL kernels: bk1_sycl_<nq>_jit, bk5_sycl_<nq>_jit
+foreach(prog bk1_sycl bk5_sycl)
+    if(prog STREQUAL "bk1_sycl")
+        set(orders ${BK_ORDERS_BK1_GPU})
+    else()
+        set(orders ${BK_ORDERS_BK5_GPU})
+    endif()
+    foreach(nq IN LISTS orders)
+        add_executable(${prog}_${nq}_jit EXCLUDE_FROM_ALL sycl/${prog}.cpp)
+        target_compile_definitions(${prog}_${nq}_jit PRIVATE NQ=${nq})
+        bk_gpu_target(${prog}_${nq}_jit sycl_jit)
+    endforeach()
+endforeach()
+
 add_executable(stream_omp roofline/stream_omp.cpp)
 bk_gpu_target(stream_omp omp)
