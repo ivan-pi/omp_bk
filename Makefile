@@ -42,9 +42,15 @@ bw_test: amx/bench/bw_test.cpp amx/amx.h
 amx_pipe: amx/bench/amx_pipe.cpp amx/amx.h
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
+# STREAM-like bandwidth test for OpenMP offload (gpu/stream_omp.cpp); here a
+# host-fallback build, gpu/scripts/build_aot.sh stream_omp builds it for an
+# Intel GPU.
+stream_omp: gpu/stream_omp.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $<
+
 accel_gemm: amx/bench/accel_gemm.cpp
 	$(CXX) $(CXXFLAGS) -DACCELERATE_NEW_LAPACK -o $@ $< -framework Accelerate
 
 .PHONY: clean
 clean:
-	$(RM) BK1 BK3 BK5 BK1_ff BK1_amx bw_test amx_pipe accel_gemm *.o
+	$(RM) BK1 BK3 BK5 BK1_ff BK1_amx bw_test amx_pipe accel_gemm stream_omp *.o

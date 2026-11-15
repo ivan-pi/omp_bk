@@ -102,6 +102,61 @@ refuses `-ffast-math`, anything subtler shows up as `FAIL`, and the Makefile
 selects the native instruction set so `std::fma` is an instruction (the
 first output line says `fma = hardware`).
 
+## Intel GPUs (icpx, Arc A770)
+
+`gpu/scripts/` builds the drivers ahead of time for an Intel GPU with icpx
+(`-fiopenmp -fopenmp-targets=spir64_gen`, ocloc device `acm-g10` for the Arc
+A770/A750 by default, `GPU_DEVICE=...` for others; `ocloc compile --help`
+lists the names). Each binary holds one polynomial order: the script copies
+the driver with only that `case` of the order switch, so the device compiler
+sees one kernel set at a time. Every compile and run goes through a systemd
+user scope capped at `MEM_MAX` (8G) that prints its peak memory, so that a
+too-large problem fails on its own. The host data grow as nelmt * nq^3, and
+BK3 at the default 524288 elements needs ~7.5 GB at p = 6 and ~11 GB at
+p = 7. `common.sh` also sets up the oneAPI environment, including the `umf`
+library that the 2025+ Level Zero adapter needs (without it `sycl-ls` lists
+no devices).
+
+```sh
+gpu/scripts/build_aot.sh BK1 4                 # -> gpu/build/BK1_4
+gpu/scripts/run.sh BK1_4 4 524288 10           # OMP_TARGET_OFFLOAD=MANDATORY on level_zero:0
+PROFILE=1 gpu/scripts/run.sh BK1_4 4           # plus the per-kernel device times
+gpu/scripts/build_aot.sh BK1_ff 4 && gpu/scripts/run.sh BK1_ff_4 4 524288 3
+gpu/scripts/sweep.sh gpu_results.csv           # BK1, BK3, BK5 at ORDERS="2 4 6", plus STREAM
+```
+
+The A770 has no fp64 hardware. BK1_ff is built and run with the driver's
+FP64 emulation (`IGC_EnableDPEmulation=1`, plus
+`OverrideDefaultFP64Settings=1` at run time), which the double reference and
+the float-float split/join need.
+
+`gpu/stream_omp.cpp` is a STREAM-like bandwidth test on device-allocated
+float arrays: read, write, copy, scale, add and triad, plus `bk1p2`, which
+reproduces BK1's p = 2 traffic with one element per thread.
+
+The measurements below were taken on an Arc A770 (16 GB) with icpx 2026.1,
+compute runtime 26.22, 524288 elements, in float. Each value is the minimum
+over 10 runs (3 for BK1_ff at p = 4, 6). Separate runs differ by up to
+~20% (BK1 at p = 2 measured 12.7-16.0 GDoF/s); STREAM varies by under 1%.
+
+| STREAM | read | write | copy | scale | add | triad | bk1p2 |
+|--------|------|-------|------|-------|-----|-------|-------|
+| GB/s   | 354  | 430   | 458  | 457   | 444 | 438   | 118   |
+
+| GDoF/s (GB/s) | BK1          | BK3          | BK5 (nq = p+1) | BK1_ff float-float, best kernel |
+|---------------|--------------|--------------|----------------|---------------------------------|
+| p = 2         | 13.4 (235)   | 0.18 (11.7)  | 6.77 (217)     | 2.04 (ff-plane x8)              |
+| p = 4         | 0.099 (1.5)  | 0.040 (2.0)  | 0.34 (10.8)    | 1.36 (ff-teams)                 |
+| p = 6         | 0.081 (1.1)  | 0.035 (1.5)  | 0.31 (9.8)     | 1.17 (ff-teams)                 |
+
+At p = 2, BK1 and BK5 run at about half of STREAM copy. From p = 4, the
+one-element-per-thread kernels with a per-thread `2 * nq^3` work array fall
+by 20-135x. BK3 already falls at p = 2. The float-float `ff-teams` kernel,
+which keeps its work arrays in team-shared memory, then runs ~8x faster than
+the float BK1 kernel (likely register spills of the per-thread array, not
+confirmed). Emulated double runs at 0.05-0.09 GDoF/s. All BK1_ff checks pass
+on the A770 at p = 2, 4 and 6, with and without `BK_RANDOM=1`.
+
 ## Apple AMX version of BK1
 
 `amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX

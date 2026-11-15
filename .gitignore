@@ -7,4 +7,6 @@ BK1_amx
 bw_test
 amx_pipe
 accel_gemm
+stream_omp
+gpu/build/
 *.o
