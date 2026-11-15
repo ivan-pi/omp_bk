@@ -140,40 +140,62 @@ int main(int argc, char** argv)
 
     std::printf("BK1 offload: p = %d, nq = %d, nelmt = %zu, ntests = %d, team rounding %d\n",
                 nq - 2, nq, nelmt, ntests, TEAM_ROUND);
-    // the first kernel run (ref, unless BK_REF=0) is the reference of the others
+
+    // The arrays stay on the device across the variants: the inputs are
+    // uploaded once; each variant's output is zeroed on the device (so an
+    // entry a kernel misses shows in maxdiff) and copied back after its runs.
+    // The first kernel run (ref, unless BK_REF=0) is the reference of the others.
+    const float* d_basis = basis.data();
+    const float* d_jxw = JxW.data();
+    const float* d_jxw_t = JxW_t.data();
+    const float* d_in = in.data();
+    float* d_ref = ref.data();
+    float* d_out = out.data();
+    const std::size_t n_in = in.size();
+    const std::size_t n_jxw = JxW.size();
+    const std::size_t n_jxw_t = JxW_t.size();
     bool have_ref = false;
+    bool invalid = false;   // no early return: the target data block must end normally
     double big = 0.0;
-    for (const variant& v : variants) {
-        const bool is_ref = std::strcmp(v.name, "ref") == 0;
-        if (is_ref && !with_ref) {
-            continue;
-        }
-        if (!is_ref && !selected(v.name)) {
-            continue;
-        }
-        std::vector<float>& dst = have_ref ? out : ref;
-        std::fill(dst.begin(), dst.end(), 0.0f);
-        const double t = time_sumfact<float, nq>(nelmt, ntests, basis.data(),
-                                                 v.jxw_transposed ? JxW_t.data() : JxW.data(),
-                                                 in.data(), dst.data(), v.kernel);
-        if (g_short_team != 0) {
-            std::printf("%-10s a team got fewer threads than its work items; result invalid\n", v.name);
-            return 1;
-        }
-        double diff = 0.0;
-        if (have_ref) {
-            for (std::size_t i = 0; i < ref.size(); ++i) {
-                diff = std::max(diff, double(std::fabs(out[i] - ref[i])));
+    #pragma omp target data map(to: d_basis[:nm*nq], d_jxw[:n_jxw], d_jxw_t[:n_jxw_t], d_in[:n_in]) \
+        map(alloc: d_ref[:n_in], d_out[:n_in])
+    {
+        for (const variant& v : variants) {
+            const bool is_ref = std::strcmp(v.name, "ref") == 0;
+            if (is_ref && !with_ref) {
+                continue;
             }
-        } else {
-            for (const float r : ref) {
-                big = std::max(big, double(std::fabs(r)));
+            if (!is_ref && !selected(v.name)) {
+                continue;
             }
+            float* dst = have_ref ? d_out : d_ref;
+            #pragma omp target teams distribute parallel for map(alloc: dst[:n_in])
+            for (std::size_t i = 0; i < n_in; ++i) {
+                dst[i] = 0.0f;
+            }
+            const float* jxw = v.jxw_transposed ? d_jxw_t : d_jxw;
+            const double t = time_min(ntests, [&] { v.kernel(nelmt, d_basis, jxw, d_in, dst); });
+            #pragma omp target update from(dst[:n_in])
+            if (g_short_team != 0) {
+                std::printf("%-10s a team got fewer threads than its work items; result invalid\n", v.name);
+                invalid = true;
+                break;
+            }
+            double diff = 0.0;
+            if (have_ref) {
+                for (std::size_t i = 0; i < n_in; ++i) {
+                    diff = std::max(diff, double(std::fabs(out[i] - ref[i])));
+                }
+            } else {
+                for (const float r : ref) {
+                    big = std::max(big, double(std::fabs(r)));
+                }
+            }
+            std::printf("%-10s GDoF/s = %8.3f  GB/s = %7.1f  time = %8.3f ms  maxdiff = %.2e%s\n",
+                        v.name, 1e-9 * n_in / t, 1e-9 * bytes / t, 1e3 * t,
+                        have_ref ? diff / big : 0.0, have_ref ? "" : " (reference)");
+            have_ref = true;
         }
-        std::printf("%-10s GDoF/s = %8.3f  GB/s = %7.1f  time = %8.3f ms  maxdiff = %.2e%s\n",
-                    v.name, 1e-9 * in.size() / t, 1e-9 * bytes / t, 1e3 * t,
-                    have_ref ? diff / big : 0.0, have_ref ? "" : " (reference)");
-        have_ref = true;
     }
-    return 0;
+    return invalid ? 1 : 0;
 }
