@@ -23,7 +23,7 @@
 //        kernel), G in layout c: G(f, k, i, j); suffix _b<batch>x<w>: w
 //        work-items per column of the batch (1 or 2)
 //   cu   port of the CUDA grid-strided kernel (column (e, j, k) per thread
-//        walking i, D in SLM, G factor-major); BK_GRID=n teams stride over
+//        walking i, D in SLM, G factor-major); BK_TEAMS=n teams stride over
 //        the batches (default: one team per batch)
 //   _f<P>  pt with teams of exactly P work-items (512 or 1024) holding as many
 //        whole elements as fit (the oneAPI guide's occupancy rule)
@@ -604,7 +604,7 @@ constexpr int sf_block(const int nq, const int batch, const int width)
 // factor-major (coalesced over (j, k)); fluxes to SLM; the transposed pass
 // per column again.  The CUDA source pairs rqr with qt (Grr * qt + ... +
 // Grt * qr); here the fluxes are Grr * qr + Grs * qs + Grt * qt, as in
-// BK5.cpp.  Teams: BK_GRID (g_grid), 0 = one team per batch.
+// BK5.cpp.  Teams: BK_TEAMS (g_grid), 0 = one team per batch.
 // ---------------------------------------------------------------------------
 inline int g_grid = 0;
 
@@ -775,7 +775,7 @@ int main(int argc, char** argv)
     constexpr int nq3 = nq * nq * nq;
     const std::size_t nelmt = (argc > 1) ? std::size_t(std::atoll(argv[1])) : std::size_t(1) << 17;
     const int ntests = (argc > 2) ? std::atoi(argv[2]) : 10;
-    g_grid = bk::env_int("BK_GRID", 0);
+    g_grid = bk::env_int("BK_TEAMS", 0);
 
     const std::vector<float> D = bk::make_test_basis<float>(nq, nq);
     std::vector<float> in(nelmt * nq3);
