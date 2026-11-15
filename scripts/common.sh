@@ -1,16 +1,17 @@
-# common.sh -- sourced by the gpu/ scripts: oneAPI environment, paths and the
-# memory-capped scope every compile and run goes through.
+# common.sh -- sourced by the Intel GPU scripts (scripts/ and its study/,
+# profile/ subdirectories): oneAPI environment, paths and the memory-capped
+# scope every compile and run goes through.
 #
 # env:  ONEAPI_ROOT=/opt/intel/oneapi   oneAPI install
 #       ICPX_VERSION=latest             compiler version under $ONEAPI_ROOT/compiler
 #       GPU_DEVICE=acm-g10              ocloc AOT target (acm-g10 = Arc A770/A750, DG2)
 #       ONEAPI_DEVICE_SELECTOR=level_zero:0
 #       MEM_MAX=8G                      memory cap per compile or run (systemd scope)
-#       BUILD_DIR=<repo>/gpu/build      single-order sources and binaries
+#       BUILD_DIR=<repo>/build/a770     CMake build tree of the binaries (preset a770)
 
-GPU_SCRIPTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO=$(cd "$GPU_SCRIPTS/../.." && pwd)
-BUILD_DIR=${BUILD_DIR:-$REPO/gpu/build}
+SCRIPTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd "$SCRIPTS/.." && pwd)
+BUILD_DIR=$(realpath -m "${BUILD_DIR:-$REPO/build/a770}")
 ONEAPI_ROOT=${ONEAPI_ROOT:-/opt/intel/oneapi}
 ICPX_VERSION=${ICPX_VERSION:-latest}
 GPU_DEVICE=${GPU_DEVICE:-acm-g10}

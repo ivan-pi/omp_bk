@@ -2,14 +2,14 @@
 // with a NEON (GNU vector) kernel on the same elements-on-lanes layout as the
 // CPU baseline.
 //
-// Needs amx.h (instruction layer) next to this file and bk_common.h in the
-// parent directory.  From the repository root:  make BK1_amx
+// Needs amx.h (instruction layer) next to this file and bk_common.h from
+// include/.  From the repository root:  cmake --build build/host --target BK1_amx
 // Build by hand (Apple Silicon):
-//   clang++ -O2 -std=c++17 BK1_amx.cpp -o bk1_amx
-//   clang++ -O2 -std=c++17 -fopenmp BK1_amx.cpp -o bk1_amx      (libomp)
-//   clang++ -O2 -std=c++17 -DAMX_EMULATE BK1_amx.cpp ...        (emulated, for A/B checks)
+//   clang++ -O2 -std=c++17 -I../include BK1_amx.cpp -o bk1_amx
+//   clang++ -O2 -std=c++17 -fopenmp -I../include BK1_amx.cpp -o bk1_amx      (libomp)
+//   clang++ -O2 -std=c++17 -DAMX_EMULATE -I../include BK1_amx.cpp ...        (emulated, for A/B checks)
 // Build anywhere else (AMX emulated in software, for logic checks only):
-//   g++ -O2 -std=c++17 BK1_amx.cpp -o bk1_amx_emu
+//   g++ -O2 -std=c++17 -I../include BK1_amx.cpp -o bk1_amx_emu
 //
 // Run:  ./bk1_amx [p=2] [nelmt=524288] [ntests=5]
 //   BK_RANDOM=1  use pseudo-random in/JxW instead of the constant 3.0/1.0
@@ -58,7 +58,7 @@
 #include <cstddef>
 #include <new>
 
-#include "../bk_common.h"
+#include "bk_common.h"
 
 #ifdef _OPENMP
 #include <omp.h>

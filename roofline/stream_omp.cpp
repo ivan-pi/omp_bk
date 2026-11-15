@@ -9,8 +9,8 @@
 // scale (1R+1W), add (2R+1W), triad (2R+1W) and bk1p2 (BK1's traffic at
 // p = 2 with one element per thread: 27 values of in and 64 of JxW read,
 // 27 of out written per element, each thread on its own contiguous block).
-// The last line checks the read kernel's sum.  Build with `make stream_omp`
-// (host fallback) or gpu/scripts/build_aot.sh stream_omp (Intel GPU).
+// The last line checks the read kernel's sum.  Build with the host preset
+// (host fallback) or scripts/build.sh stream_omp (Intel GPU).
 
 #include <omp.h>
 

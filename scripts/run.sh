@@ -1,7 +1,7 @@
 #!/bin/bash
-# run.sh -- run a binary from build_aot.sh on the GPU.
+# run.sh -- run a binary of $BUILD_DIR (scripts/build.sh) on the GPU.
 #
-# usage:  gpu/scripts/run.sh <name> [args...]     e.g.  run.sh BK1_4 4 524288 10
+# usage:  scripts/run.sh <name> [args...]     e.g.  run.sh BK1_4 4 524288 10
 #                                                       run.sh stream_omp
 #
 # Offload is mandatory (no silent host fallback), the device is
@@ -15,7 +15,7 @@
 name=$1
 shift
 if [ ! -x "$BUILD_DIR/$name" ]; then
-    echo "no binary $BUILD_DIR/$name; build it with build_aot.sh" >&2
+    echo "no binary $BUILD_DIR/$name; build it with scripts/build.sh $name" >&2
     exit 2
 fi
 

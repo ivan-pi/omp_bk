@@ -1,0 +1,27 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {"major": 3, "minor": 21, "patch": 0},
+  "configurePresets": [
+    {
+      "name": "host",
+      "displayName": "CPU: BK1, BK3, BK5, BK1_ff, BK1_amx and the roofline benchmarks",
+      "binaryDir": "${sourceDir}/build/host"
+    },
+    {
+      "name": "a770",
+      "displayName": "Intel Arc A770 (icpx, ahead of time for acm-g10); run scripts/build.sh",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/a770",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "icpx",
+        "BK_GPU_DEVICE": "acm-g10",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "${sourceDir}/scripts/capped",
+        "CMAKE_CXX_LINKER_LAUNCHER": "${sourceDir}/scripts/capped"
+      }
+    }
+  ],
+  "buildPresets": [
+    {"name": "host", "configurePreset": "host"},
+    {"name": "a770", "configurePreset": "a770"}
+  ]
+}
