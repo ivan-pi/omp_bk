@@ -3,7 +3,7 @@
 // write), read-only (read, dot) and write-only (fill) tests, with the same OpenMP setup
 // and thread default as BK1_amx.cpp, so the numbers are directly comparable.
 //
-//   make bw_test       (or: clang++ -O3 -mcpu=native -std=c++17 -fopenmp amx/bench/bw_test.cpp -o bw_test)
+//   cmake --build build/host --target bw_test   (or: clang++ -O3 -mcpu=native -std=c++17 -fopenmp -Iamx roofline/bw_test.cpp -o bw_test)
 //   ./bw_test [floats_per_array=67108864] [ntests=5]  > bw.csv
 //
 // Output: CSV lines "test,threads,bytes,seconds,GB_per_s", best of ntests.
@@ -22,7 +22,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-#include "../amx.h"     // for the AMX peak test (real hardware only)
+#include "amx.h"     // for the AMX peak test (real hardware only)
 
 using clk = std::chrono::high_resolution_clock;
 

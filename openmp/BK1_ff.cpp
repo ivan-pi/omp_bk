@@ -30,7 +30,7 @@
 // double result.  Norms and errors are reduced in native double.  The last
 // line is the check: every float-float error must stay below the
 // tolerance, else it reads FAIL and the exit status is 1.
-// From the repository root:  make BK1_ff
+// From the repository root:  cmake --preset host && cmake --build build/host --target BK1_ff
 //
 // Run:  ./BK1_ff [p=2] [nelmt=524288] [ntests=5]
 //   BK_RANDOM=1  pseudo-random in/JxW (bk_common.h) instead of the constant

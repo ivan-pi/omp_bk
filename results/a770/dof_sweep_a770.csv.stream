@@ -1,0 +1,10 @@
+device 0 of 1, n = 268435456 floats (1.07 GB per array)
+read   bytes =  1.074e+09  time =     3.033 ms  GB/s =   354.03
+write  bytes =  1.074e+09  time =     2.337 ms  GB/s =   459.46
+copy   bytes =  2.147e+09  time =     4.683 ms  GB/s =   458.57
+scale  bytes =  2.147e+09  time =     4.702 ms  GB/s =   456.71
+add    bytes =  3.221e+09  time =     7.247 ms  GB/s =   444.49
+triad  bytes =  3.221e+09  time =     7.354 ms  GB/s =   438.02
+bk1p2  bytes =  1.980e+09  time =    16.762 ms  GB/s =   118.11
+check: sum(a) before = 2.684355e+08 (expect 2.684355e+08), sum(a) after = 4.026532e+09 (nonzero)
+peak=28MB

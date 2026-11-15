@@ -4,7 +4,7 @@
 # norm printed by the plain BK1 executable on constant data.  Exit status is
 # non-zero on any failure.
 #
-# usage: make BK1 BK1_amx && amx/scripts/validate.sh [nelmt=1234] [tol=1e-5]
+# usage: cmake --build build/host --target BK1 BK1_amx && amx/scripts/validate.sh [nelmt=1234] [tol=1e-5]
 #
 # The random-data check is the one with discriminating power (an index bug
 # fails it; constant data cannot detect transpositions).  The constant-data

@@ -1,7 +1,8 @@
 # omp_bk
 
-OpenMP `target`-offload implementations of the CEED "bake-off" kernels
-(sum-factorized spectral-element operators):
+Implementations of the CEED "bake-off" kernels (sum-factorized
+spectral-element operators) in OpenMP `target` offload, SYCL and the Intel
+Tiny Tensor Compiler (tinytc), plus an Apple AMX version of BK1:
 
 | Program | Operator                                   |
 |---------|--------------------------------------------|
@@ -10,9 +11,26 @@ OpenMP `target`-offload implementations of the CEED "bake-off" kernels
 | `BK5`   | Collocated Laplacian at quadrature points  |
 | `BK1_ff`| Mass matrix in float-float arithmetic (see below) |
 
+## Layout
+
+The tree is organized by approach; the file names say the kernel.
+
+| Directory | Contents |
+|-----------|----------|
+| `include/` | Shared by every approach: `bk_common.h` (options, timing, test data), `bk1_gpu.h` and `bk1_gpu_steps.h` (BK1 GPU helpers used by OpenMP offload and SYCL) |
+| `openmp/` | The portable drivers `BK1.cpp`, `BK3.cpp`, `BK5.cpp`, `BK1_ff.cpp` (host or offload), `bk1_sumfact.h`, `float_float.h` |
+| `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`) and BK5 (`bk5_offload.cpp`) |
+| `sycl/` | `bk1_sycl.cpp`, `bk5_sycl.cpp` |
+| `tinytc/` | `bk_tinytc.cpp` (driver for both kernels), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received), `repro_slm/` (bug reproducer) |
+| `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
+| `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
+| `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
+| `results/<machine>/` | Measured CSVs, tables and plots (`a770/`: Intel Arc A770) |
+
 ## Requirements
 
-- A C++17 compiler with OpenMP support (e.g. GCC or Clang).
+- CMake 3.21 or later and a C++17 compiler with OpenMP support (e.g. GCC or
+  Clang).
 - To run the kernels on a GPU, an OpenMP-offload-capable toolchain
   (e.g. GCC built with `nvptx`/`amdgcn` offload, or Clang with the matching
   offload runtime). Without a GPU the `target` regions run as a host fallback.
@@ -20,23 +38,26 @@ OpenMP `target`-offload implementations of the CEED "bake-off" kernels
 ## Build
 
 ```sh
-make            # builds BK1, BK3, BK5, BK1_ff
-make clean      # removes the executables
+cmake --preset host               # configure build/host with the default compiler
+cmake --build build/host          # BK1, BK3, BK5, BK1_ff, BK1_amx, bw_test, amx_pipe, stream_omp
 ```
 
-The default flags live in `Makefile` (`CXX`, `CXXFLAGS`). Override them from
-the command line, e.g. to use Clang:
+The flags are `-Wall -pedantic -O3 -std=c++17` with the native instruction
+set and OpenMP; no build type is needed (a `Release` build would add
+`-DNDEBUG`, and the benchmark keeps its asserts). Another compiler or extra
+flags go in at configure time, e.g.:
 
 ```sh
-make CXX=clang++
+cmake --preset host -B build/clang -DCMAKE_CXX_COMPILER=clang++
+cmake --preset host -B build/ff8 -DCMAKE_CXX_FLAGS=-DFF_PLANE_BATCH=8
 ```
 
 ## Run
 
 ```
-./BK1 <p> [nelmt] [ntests]      # BK1/BK3: p is the polynomial order, nq = p + 2
-./BK3 <p> [nelmt] [ntests]
-./BK5 <nq> [nelmt] [ntests]     # BK5: first argument is nq directly
+build/host/BK1 <p> [nelmt] [ntests]      # BK1/BK3: p is the polynomial order, nq = p + 2
+build/host/BK3 <p> [nelmt] [ntests]
+build/host/BK5 <nq> [nelmt] [ntests]     # BK5: first argument is nq directly
 ```
 
 - `nelmt`  — number of elements (default 524288).
@@ -48,7 +69,7 @@ solution norm (useful as a quick correctness check).
 ## Float-float version of BK1
 
 `BK1_ff` runs the BK1 sum factorization in float-float arithmetic. The
-kernel `SumFactorizationFF` in `BK1_ff.cpp` has the interface of
+kernel `SumFactorizationFF` in `openmp/BK1_ff.cpp` has the interface of
 `SumFactorization` in double: the caller passes IEEE doubles for the basis,
 the weights and the input and gets doubles back. Inside the kernel every
 value is split into a pair of floats (hi + lo, ~48 significant bits, float's
@@ -79,7 +100,7 @@ and the basis read as a warp broadcast. The plane kernel runs twice, with
 one element per team and with a batch of elements per team (`ff-plane xN`),
 which fills the team at low order; the default batch fills about 128
 threads (`ff_plane_batch`: 14 at nq = 3, 8 at nq = 4, 1 from nq = 9) and
-`make BK1_ff CPPFLAGS=-DFF_PLANE_BATCH=n` forces one batch for every order.
+`-DCMAKE_CXX_FLAGS=-DFF_PLANE_BATCH=n` at configure time forces one batch for every order.
 All float-float kernels sum every output in the same index order and give
 the same result bit for bit. On the host the team kernels open parallel
 regions per team and are slow; they are meant for the GPU.
@@ -92,15 +113,82 @@ reduced in double. The last line is the check of the float-float results,
 status 1 on failure:
 
 ```sh
-./BK1_ff <p> [nelmt] [ntests]     # same arguments and constant data as BK1; the float row prints BK1's norm
-BK_RANDOM=1 ./BK1_ff 2            # pseudo-random data (the same as BK1_amx's)
-for p in 1 2 3 4 5 6 7 8; do ./BK1_ff $p 4096 1 | tail -1; done   # the check per order
+build/host/BK1_ff <p> [nelmt] [ntests]   # same arguments and constant data as BK1; the float row prints BK1's norm
+BK_RANDOM=1 build/host/BK1_ff 2          # pseudo-random data (the same as BK1_amx's)
+for p in 1 2 3 4 5 6 7 8; do build/host/BK1_ff $p 4096 1 | tail -1; done   # the check per order
 ```
 
 The error-free transformations need strict IEEE semantics: the header
-refuses `-ffast-math`, anything subtler shows up as `FAIL`, and the Makefile
+refuses `-ffast-math`, anything subtler shows up as `FAIL`, and the build
 selects the native instruction set so `std::fma` is an instruction (the
 first output line says `fma = hardware`).
+
+## Intel GPUs (icpx, Arc A770)
+
+The CMake preset `a770` builds for an Intel GPU with icpx, ahead of time
+(OpenMP: `-fiopenmp -fopenmp-targets=spir64_gen`; SYCL:
+`-fsycl -fsycl-targets=spir64_gen`; ocloc device `acm-g10` for the Arc
+A770/A750 by default, `GPU_DEVICE=...` for others; `ocloc compile --help`
+lists the names), with `-fp-model=precise` against icpx's fast default.
+`scripts/build.sh` sets up the oneAPI environment, configures `build/a770`
+and builds the named targets one after another. Each binary holds one
+polynomial order: for the `openmp/` drivers the build compiles a copy with
+only that `case` of the order switch (`cmake/keep_case.cmake`), the other
+programs take `-DNQ=<nq>`, so the device compiler sees one kernel set at a
+time. No GPU target is in `all`; `all_<prog>` builds every order of a
+program. Every compile, link and run goes through a systemd user scope
+capped at `MEM_MAX` (8G) that prints its peak memory (`scripts/capped` is
+the preset's compiler launcher), so that a too-large problem fails on its
+own, and GPU compiles never run two at a time. The host data grow as nelmt * nq^3, and
+BK3 at the default 524288 elements needs ~7.5 GB at p = 6 and ~11 GB at
+p = 7. `common.sh` also sets up the oneAPI environment, including the `umf`
+library that the 2025+ Level Zero adapter needs (without it `sycl-ls` lists
+no devices).
+
+```sh
+scripts/build.sh BK1_4                     # -> build/a770/BK1_4 (BK1, BK3, BK1_ff: p; BK5: nq)
+scripts/run.sh BK1_4 4 524288 10           # OMP_TARGET_OFFLOAD=MANDATORY on level_zero:0
+PROFILE=1 scripts/run.sh BK1_4 4           # plus the per-kernel device times
+scripts/build.sh BK1_ff_4 && scripts/run.sh BK1_ff_4 4 524288 3
+scripts/build.sh bk1_offload_6 bk5_sycl_7  # kernel variants: OpenMP offload and SYCL, by nq
+scripts/build.sh bk_tinytc                 # tinytc driver (tinytc from /opt/tinytc/latest)
+scripts/study/sweep.sh gpu_results.csv     # BK1, BK3, BK5 at ORDERS="2 4 6", plus STREAM
+```
+
+Builds with other flags get their own tree, which `run.sh` and the study
+scripts then use too: `BUILD_DIR=build/a770-grf EXTRA_FLAGS=... scripts/build.sh ...`.
+
+The A770 has no fp64 hardware. BK1_ff is built and run with the driver's
+FP64 emulation (`IGC_EnableDPEmulation=1`, plus
+`OverrideDefaultFP64Settings=1` at run time), which the double reference and
+the float-float split/join need.
+
+`roofline/stream_omp.cpp` is a STREAM-like bandwidth test on device-allocated
+float arrays: read, write, copy, scale, add and triad, plus `bk1p2`, which
+reproduces BK1's p = 2 traffic with one element per thread.
+
+The measurements below were taken on an Arc A770 (16 GB) with icpx 2026.1,
+compute runtime 26.22, 524288 elements, in float. Each value is the minimum
+over 10 runs (3 for BK1_ff at p = 4, 6). Separate runs differ by up to
+~20% (BK1 at p = 2 measured 12.7-16.0 GDoF/s); STREAM varies by under 1%.
+
+| STREAM | read | write | copy | scale | add | triad | bk1p2 |
+|--------|------|-------|------|-------|-----|-------|-------|
+| GB/s   | 354  | 430   | 458  | 457   | 444 | 438   | 118   |
+
+| GDoF/s (GB/s) | BK1          | BK3          | BK5 (nq = p+1) | BK1_ff float-float, best kernel |
+|---------------|--------------|--------------|----------------|---------------------------------|
+| p = 2         | 13.4 (235)   | 0.18 (11.7)  | 6.77 (217)     | 2.04 (ff-plane x8)              |
+| p = 4         | 0.099 (1.5)  | 0.040 (2.0)  | 0.34 (10.8)    | 1.36 (ff-teams)                 |
+| p = 6         | 0.081 (1.1)  | 0.035 (1.5)  | 0.31 (9.8)     | 1.17 (ff-teams)                 |
+
+At p = 2, BK1 and BK5 run at about half of STREAM copy. From p = 4, the
+one-element-per-thread kernels with a per-thread `2 * nq^3` work array fall
+by 20-135x. BK3 already falls at p = 2. The float-float `ff-teams` kernel,
+which keeps its work arrays in team-shared memory, then runs ~8x faster than
+the float BK1 kernel (likely register spills of the per-thread array, not
+confirmed). Emulated double runs at 0.05-0.09 GDoF/s. All BK1_ff checks pass
+on the A770 at p = 2, 4 and 6, with and without `BK_RANDOM=1`.
 
 ## Apple AMX version of BK1
 
@@ -112,22 +200,22 @@ elements of a batch; `BK_KERNEL=refv`: the reference with unit-stride inner
 loops). The header of `amx/BK1_amx.cpp` lists all environment variables.
 
 ```sh
-make BK1 BK1_amx bw_test amx_pipe     # accel_gemm needs macOS (Accelerate)
-./BK1_amx <p> [nelmt] [ntests]        # same arguments as BK1, p = 1..14
-BK_KERNEL=neon BK_LAYOUT=soa ./BK1_amx 4
+cmake --preset host && cmake --build build/host   # accel_gemm only on macOS (Accelerate)
+build/host/BK1_amx <p> [nelmt] [ntests]   # same arguments as BK1, p = 1..14
+BK_KERNEL=neon BK_LAYOUT=soa build/host/BK1_amx 4
 
-amx/scripts/validate.sh               # every kernel against the reference; exit 1 on failure
-amx/scripts/throughput.sh results.csv # sweep (all kernels from BK1_amx): kernel,p,target,nelmt,dofs,gdofs,gbs
+amx/scripts/validate.sh                   # every kernel against the reference; exit 1 on failure
+amx/scripts/throughput.sh results.csv     # sweep (all kernels from BK1_amx): kernel,p,target,nelmt,dofs,gdofs,gbs
 amx/scripts/high_order.sh results_high.csv   # the same for p = 9..14 (AMX binary only)
-OUT=tune.csv amx/scripts/tune.sh      # best layout/path/batch per order
-./bw_test    > bw.csv                 # bandwidth and FMA roofs: test,threads,bytes,seconds,GB_per_s
-./amx_pipe   > pipe.txt               # AMX load-to-use and store behaviour (one unit)
-./accel_gemm > gemm.csv               # Accelerate sgemm calibration (macOS)
+OUT=tune.csv amx/scripts/tune.sh          # best layout/path/batch per order
+build/host/bw_test    > bw.csv            # bandwidth and FMA roofs: test,threads,bytes,seconds,GB_per_s
+build/host/amx_pipe   > pipe.txt          # AMX load-to-use and store behaviour (one unit)
+build/host/accel_gemm > gemm.csv          # Accelerate sgemm calibration (macOS)
 
 amx/scripts/plot_throughput.py results.csv throughput.png   # per kernel and order, AMX/NEON speedup
 amx/scripts/plot_roofline.py results.csv bw.csv roofline.png # plateaus against the roofs
 ```
 
-The scripts find `BK1` and `BK1_amx` in the repository root and run from
+The scripts find `BK1` and `BK1_amx` in `build/host` and run from
 any directory; set `BK1_AMX=...` or `BK1=...` to use other builds. The
 plots need matplotlib.

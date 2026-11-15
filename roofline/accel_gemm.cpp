@@ -4,7 +4,7 @@
 // (2) the small shapes of one BK1 contraction, to show why a BLAS call per
 // tile is not a usable implementation (per-call overhead vs ~1 ns of work).
 //
-//   make accel_gemm    (macOS only: links the Accelerate framework)
+//   cmake --build build/host --target accel_gemm   (macOS only: links the Accelerate framework)
 //   ./accel_gemm
 //
 // Output CSV: shape,M,N,K,calls,seconds,GFLOP_per_s,ns_per_call

@@ -1,10 +1,7 @@
-# Build artifacts
-BK1
-BK3
-BK5
-BK1_ff
-BK1_amx
-bw_test
-amx_pipe
-accel_gemm
+# Build trees (CMake presets host, a770, and any BUILD_DIR=build/...)
+build/
+# the old script-built GPU binaries, from before the CMake build
+gpu/build/
 *.o
+tinytc/repro_slm/repro
+__pycache__/

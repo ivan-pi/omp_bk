@@ -1,8 +1,15 @@
 # omp_bk
 
-OpenMP implementations of the CEED bake-off kernels BK1, BK3 and BK5; `amx/`
-holds the Apple AMX version of BK1 with a software emulator (`amx/amx.h`).
-The BK1 kernel lives in `bk1_sumfact.h`, generic in the arithmetic type
+The CEED bake-off kernels BK1, BK3 and BK5, organized by approach:
+`openmp/` (drivers for host or offload; GPU kernel variants in
+`openmp/offload/`), `sycl/`, `tinytc/` (driver and `ir/` kernels), `amx/`
+(the Apple AMX version of BK1 with a software emulator, `amx/amx.h`),
+`roofline/` (bandwidth and peak micro-benchmarks), `include/` (headers
+shared across approaches), `scripts/` (Intel GPU build, run, `study/`,
+`plot/`, `profile/`) and `results/<machine>/`. File names carry the kernel
+(`bk1_*`, `bk5_*`).
+
+The BK1 kernel lives in `openmp/bk1_sumfact.h`, generic in the arithmetic type
 (float or double); `BK1.cpp` runs it in float. `BK1_ff.cpp` holds its own
 float-float kernels with the same interface in double: values are split into
 hi/lo float pairs inside the kernel, the work arrays are separate hi and lo
@@ -18,9 +25,13 @@ they must agree bit for bit, as every output is summed in index order.
 
 ## Build and check
 
-- `make` builds BK1, BK3, BK5 and BK1_ff; `make BK1_amx` builds the AMX kernel
-  (software-emulated AMX off Apple Silicon); `make bw_test amx_pipe` builds
-  the roofline micro-benchmarks in `amx/bench/` (`accel_gemm` is macOS only).
+- CMake, with presets. `cmake --preset host && cmake --build build/host`
+  builds BK1, BK3, BK5, BK1_ff, BK1_amx (software-emulated AMX off Apple
+  Silicon) and the roofline micro-benchmarks (`accel_gemm` is macOS only).
+  The Intel GPU binaries (one order each: `BK1_4`, `bk1_offload_6`,
+  `bk5_sycl_7`, `bk_tinytc`, ...) are built with `scripts/build.sh <target>...`
+  into `build/a770` (memory-capped, one compile at a time), never while a
+  GPU run is going on.
 - `BK1_ff` compares double, float and float-float on the same data and ends
   with an `ok`/`FAIL` check of the float-float result (exit status 1 on
   failure). Run it for p = 1..8, with and without `BK_RANDOM=1`, after any

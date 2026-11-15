@@ -1,7 +1,7 @@
 // amx_pipe.cpp -- how the AMX unit's throughput depends on the distance
 // between a load and the outer product that consumes it, and on stores.
 //
-//   make amx_pipe      (or: clang++ -O3 -mcpu=native -std=c++17 amx/bench/amx_pipe.cpp -o amx_pipe)
+//   cmake --build build/host --target amx_pipe   (or: clang++ -O3 -mcpu=native -std=c++17 -Iamx roofline/amx_pipe.cpp -o amx_pipe)
 //   ./amx_pipe
 //
 // Each test streams planes of 16 floats from an L1-resident buffer into X and
@@ -20,7 +20,7 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
-#include "../amx.h"
+#include "amx.h"
 
 using clk = std::chrono::high_resolution_clock;
 using namespace amx::op;
