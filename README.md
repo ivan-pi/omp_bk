@@ -25,6 +25,7 @@ The tree is organized by approach; the file names say the kernel.
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
+| `results/<machine>/` | Measured CSVs, tables and plots (`a770/`: Intel Arc A770) |
 
 ## Requirements
 

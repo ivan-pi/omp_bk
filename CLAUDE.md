@@ -1,10 +1,13 @@
 # omp_bk
 
 The CEED bake-off kernels BK1, BK3 and BK5, organized by approach:
-`openmp/` (drivers for host or offload), `amx/` (the Apple AMX version of
-BK1 with a software emulator, `amx/amx.h`), `roofline/` (bandwidth and peak
-micro-benchmarks), `include/` (headers shared across approaches) and
-`scripts/` (Intel GPU build, run, `study/`).
+`openmp/` (drivers for host or offload; GPU kernel variants in
+`openmp/offload/`), `sycl/`, `tinytc/` (driver and `ir/` kernels), `amx/`
+(the Apple AMX version of BK1 with a software emulator, `amx/amx.h`),
+`roofline/` (bandwidth and peak micro-benchmarks), `include/` (headers
+shared across approaches), `scripts/` (Intel GPU build, run, `study/`,
+`plot/`, `profile/`) and `results/<machine>/`. File names carry the kernel
+(`bk1_*`, `bk5_*`).
 
 The BK1 kernel lives in `openmp/bk1_sumfact.h`, generic in the arithmetic type
 (float or double); `BK1.cpp` runs it in float. `BK1_ff.cpp` holds its own
@@ -25,8 +28,8 @@ they must agree bit for bit, as every output is summed in index order.
 - CMake, with presets. `cmake --preset host && cmake --build build/host`
   builds BK1, BK3, BK5, BK1_ff, BK1_amx (software-emulated AMX off Apple
   Silicon) and the roofline micro-benchmarks (`accel_gemm` is macOS only).
-  The Intel GPU binaries (one order each: `BK1_4`, `BK5_7`,
-  ...) are built with `scripts/build.sh <target>...`
+  The Intel GPU binaries (one order each: `BK1_4`, `bk1_offload_6`,
+  `bk5_sycl_7`, `bk_tinytc`, ...) are built with `scripts/build.sh <target>...`
   into `build/a770` (memory-capped, one compile at a time), never while a
   GPU run is going on.
 - `BK1_ff` compares double, float and float-float on the same data and ends

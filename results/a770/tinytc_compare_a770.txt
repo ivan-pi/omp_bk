@@ -1,0 +1,25 @@
+GDoF/s at ~5.6e7 DoFs, host times, Arc A770, icpx 2026.1, float, tinytc v0.5.0
+ours: best variant per API (dof_sweep_a770.csv, bk5_sweep_a770.csv, G6); tinytc: median of 3,
+best work-group size per order (tinytc_survey_bk5fix_a770.csv); ec: our element-contiguous layout,
+blk: tinytc's blocked layout (16 elements, element innermost; BK5 with the barrier fix); -: does not
+fit the 64 KB of local memory per work-group (B = 16)
+
+BK1   p   OpenMP     SYCL   tinytc ec   tinytc blk
+       1    19.78    19.76       11.87        21.27
+       2    23.62    24.42       13.47        25.80
+       3    22.29    23.36       14.42        28.54
+       4    24.08    25.46       15.25        29.45
+       5    26.31    26.32       14.72        31.38
+       6    29.47    27.25       15.12        31.57
+       7    23.81    27.60           -            -
+       8    25.65    26.04           -            -
+
+BK5   p   OpenMP     SYCL   tinytc ec   tinytc blk
+       1    13.98    12.94        8.20        14.23
+       2    13.47    13.04        7.88        13.60
+       3    13.49    13.08        9.64        13.83
+       4    11.83    12.18        7.19        13.57
+       5    12.32    12.19        7.66        12.66
+       6    11.73    11.17        6.46        12.22
+       7    13.53    13.34        7.70        11.93
+       8    11.45    10.90           -            -
