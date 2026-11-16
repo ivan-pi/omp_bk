@@ -1,0 +1,50 @@
+BK1 in C for Metal (cm/bk1_cm_genx.cpp), Arc A770, 2021 CM SDK cmc -> SPIR-V -> ocloc dg2
+(NEO 26.40, -vc-codegen; -double-GRF from p = 4), OpenCL host, float, ~5.6e7 DoFs
+(nelmt = 5.6e7 / nm^3), best of 20 runs after a warm-up, best of two passes, all
+checks relerr <= 2.0e-7.
+
+copy_cm: CM block-copy yardstick in the same binary, device time, 460 GB/s.
+FP32 peak: 512 XVEs x 8 lanes x 2 flop x 2.4 GHz = 19661 GFLOP/s; flop/DoF is the
+algorithmic count of scripts/plot/plot_roofline.py (padding lanes and the work
+duplicated by the p = 8 thread pairs not counted).
+
+ p  kernel / best config          host GDoF/s  device GDoF/s  device GB/s  % copy_cm  GFLOP/s  % FP32 peak
+ 1  padded, EPT=8, wg 32              16.7          17.6          378         84        1060       5.4
+ 2  padded, EPT=1, wg 64              20.4          22.2          389         86        1510       7.7
+ 3  padded, EPT=2, wg 32              25.5          27.6          437         97        2160      11.0
+ 4  padded, EPT=1, wg 32              25.6          27.6          412         90        2460      12.5
+ 5  padded, EPT=1, wg 16              28.1          30.5          438         95        3060      15.6
+ 6  padded, EPT=1, wg 32              26.5          29.2          408         89        3270      16.6
+ 7  split 8+1, wg 16                  29.5          31.5          431         94        3890      19.8
+ 8  split 8+2, thread pairs, wg 8     28.1          29.3          395         90        3960      20.1
+
+Host GDoF/s against the best OpenMP/SYCL variant (README, tinytc_compare_a770.txt):
+ p    CM    OpenMP/SYCL best
+ 1  16.7        19.8
+ 2  20.4        24.4
+ 3  25.5        23.4
+ 4  25.6        25.5
+ 5  28.1        26.3
+ 6  26.5        29.5
+ 7  29.5        27.6
+ 8  28.1        26.0
+
+p = 1..6 (padded): the fast index padded to 4 or 8, every contraction a SIMD16 mad.
+EPT (elements per thread, next element prefetched): helps at p = 1 (12.9 -> 16.7 at
+EPT = 8) and p = 3 (+1-2%), hurts from p = 4 (registers; p = 6 spills at EPT >= 2).
+Scattered stores of 32 instead of 16 lanes (odd nm): no change.
+
+p = 7, 8 (split): indices of extent 9, 10 stored as 8 + tail blocks, exact size.
+  p = 7, steps: padded-to-nq regions 9.9 GDoF/s (compiler-split rows, 5900 movs, spills)
+    -> split blocks with a SIMD8 mad per row, tails by columns: 28.5
+  p = 8: one thread per element keeps ~2000 floats live and spills 4.6 KB: 7.5 GDoF/s;
+    a pair of threads per element (p split 4+1 per thread, partial out added through
+    SLM): 16.4; plus no runtime calls of the constexpr block-offset function (an
+    offset used outside a constexpr context was compiled as a subroutine call and
+    indirect addressing): 26.6-27.0; three handoff rounds through a 1 KB SLM slot
+    instead of one 2.9 KB slot: best at wg 4-8 (28.1), one round best at wg 16.
+
+Commands:
+  cm/build.sh; EPT=2 cm/build.sh 3; EPT=8 cm/build.sh 1
+  BK_EPT=<n> BK_WG="16 32 64" build/cm/bk1_cm <p> <nelmt> 20
+  BK_WG="4 8 16" build/cm/bk1_cm 8 76817 20

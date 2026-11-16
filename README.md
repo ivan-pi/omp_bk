@@ -22,6 +22,7 @@ The tree is organized by approach; the file names say the kernel.
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
 | `tinytc/` | `bk_tinytc.cpp` (driver for both kernels), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received), `repro_slm/` (bug reproducer) |
+| `cm/` | `bk1_cm_genx.cpp` (BK1 in C for Metal), `bk1_cm.cpp` (OpenCL host), `cm_ocl.hpp`, `build.sh` |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
@@ -225,6 +226,47 @@ which keeps its work arrays in team-shared memory, then runs ~8x faster than
 the float BK1 kernel (likely register spills of the per-thread array, not
 confirmed). Emulated double runs at 0.05-0.09 GDoF/s. All BK1_ff checks pass
 on the A770 at p = 2, 4 and 6, with and without `BK_RANDOM=1`.
+
+## C for Metal version of BK1
+
+`cm/bk1_cm_genx.cpp` is BK1 in Intel C for Metal (CM), the explicit-SIMD
+GPU language: a kernel describes one hardware thread, with vectors that live
+in registers and register-region operations instead of shared memory. Each
+thread runs a whole element (or `EPT` consecutive elements, the next one's
+loads issued before the current one is computed) in registers. Each of the
+six contractions sums over the slowest index of a register tensor and
+appends the new index as the fastest, so it is a small GEMM per element.
+
+- p = 1..6: every tensor is a `rows x P` register matrix with its fast index
+  padded to P = 4 or 8, and every instruction is a full SIMD16 `mad`.
+- p = 7, 8: padding 9 or 10 to 16 does not fit the register file, so an index
+  of extent 9 or 10 is stored as a main block of 8 and a tail of 1 or 2. Main
+  blocks take one SIMD8 `mad` per row, tails one SIMD16 `mad` per 16 rows of a
+  column. At p = 8 one element still does not fit 256 registers, so a pair of
+  threads shares it: each computes half of the quadrature index p and a
+  partial result, and one hands its partial to the other through shared local
+  memory.
+
+The basis is padded or permuted on the host; in, out and JxW use the layouts
+of the other drivers.
+
+```sh
+cm/build.sh                       # build/cm/bk1_cm_<p>.bin, p = 1..8 (cmc -> SPIR-V -> ocloc dg2), host build/cm/bk1_cm
+EPT=2 cm/build.sh 3               # 2 elements per thread -> bk1_cm_3_e2.bin
+build/cm/bk1_cm 4 448000 20       # p, nelmt, ntests: copy_cm yardstick, then bk1_cm at BK_WG="16 32 64"
+BK_EPT=2 build/cm/bk1_cm 3 875000 20
+```
+
+It needs the 2021 CM SDK (`/opt/intel/cm_sdk_20211028`, `CSDK_DIR=...`),
+`ocloc` and the OpenCL ICD. The driver checks against the double reference
+of `bk_harness.h`. On the A770 at ~5.6e7 DoFs
+(`results/a770/cm_bk1_a770.txt`) it reaches 83-97% of a CM copy kernel's
+bandwidth (device time) and 5-20% of the FP32 peak. In host GDoF/s:
+
+| p                  | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
+|--------------------|------|------|------|------|------|------|------|------|
+| CM                 | 16.7 | 20.4 | 25.5 | 25.6 | 28.1 | 26.5 | 29.5 | 28.1 |
+| best OpenMP/SYCL   | 19.8 | 24.4 | 23.4 | 25.5 | 26.3 | 29.5 | 27.6 | 26.0 |
 
 ## Apple AMX version of BK1
 
