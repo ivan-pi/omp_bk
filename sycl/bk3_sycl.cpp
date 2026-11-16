@@ -365,7 +365,10 @@ int main(int argc, char** argv)
             continue;
         }
         q.memset(d.out, 0, out.size() * sizeof(float)).wait();
-        const bk::launch_times t = bk::time_launches(ntests, [&] { return var.fn(q, d); });
+        bk::launch_times t{};
+        if (!bk::time_variant(var.name, ntests, [&] { return var.fn(q, d); }, t)) {
+            continue;
+        }
         q.copy(d.out, out.data(), out.size()).wait();
         const double relerr = bk::rel_maxdiff(out, ref, big);
         std::printf("%-12s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %.1e%s\n",

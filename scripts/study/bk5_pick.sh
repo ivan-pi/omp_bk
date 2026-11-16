@@ -1,8 +1,10 @@
 #!/bin/bash
 # bk5_pick.sh -- the fastest BK5 variant per API, order and tensor storage at
-# a fixed size: every variant of build/a770/bk5_offload_<p> (OpenMP: pt, sf, cu;
-# not ref, tid, fill) and build/a770/bk5_sycl_<p> (SYCL: sf, not _sg16), REPS
+# a fixed size: every variant of $BUILD_DIR/bk5_offload_<p> (OpenMP: pt, sf, cu;
+# not ref, tid, fill) and $BUILD_DIR/bk5_sycl_<p> (SYCL: sf, not _sg16), REPS
 # runs each, median host GDoF/s.  Prints the KERNELS list for bk5_sweep.sh.
+# Programs missing from the tree are skipped (BUILD_DIR, common.sh: e.g.
+# build/gpu-sycl).
 #
 # usage:  scripts/study/bk5_pick.sh [out.csv]
 # env:    ORDERS="1 2 3 4 5 6 7 8" (p, nq = p + 1) DOFS=5e7 REPS=3 NTESTS=10
@@ -21,6 +23,10 @@ for p in $ORDERS; do
         bin=bk5_offload_$p
         if [ "$lang" = sycl ]; then
             bin=bk5_sycl_$p
+        fi
+        if [ ! -x "$BUILD_DIR/$bin" ]; then
+            echo "skip $bin: not in $BUILD_DIR" >&2
+            continue
         fi
         for rep in $(seq 1 "$REPS"); do
             "$SCRIPTS/run.sh" "$bin" "$ne" "$NTESTS" 2>&1 |

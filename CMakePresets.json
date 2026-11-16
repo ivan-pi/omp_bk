@@ -8,13 +8,45 @@
       "binaryDir": "${sourceDir}/build/host"
     },
     {
-      "name": "a770",
-      "displayName": "Intel Arc A770 (icpx, ahead of time for acm-g10); run scripts/build.sh",
+      "name": "intel-gpu",
+      "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/a770",
       "cacheVariables": {
         "CMAKE_CXX_COMPILER": "icpx",
         "BK_GPU_DEVICE": "acm-g10",
+        "BK_ENABLE_OPENMP": "OFF",
+        "BK_ENABLE_SYCL": "OFF",
+        "BK_ENABLE_TINYTC": "OFF",
+        "BK_GPU_IN_ALL": "ON"
+      }
+    },
+    {
+      "name": "gpu-openmp",
+      "inherits": "intel-gpu",
+      "displayName": "Intel GPU, OpenMP offload (icpx, BK_GPU_DEVICE, default acm-g10)",
+      "binaryDir": "${sourceDir}/build/gpu-openmp",
+      "cacheVariables": {"BK_ENABLE_OPENMP": "ON"}
+    },
+    {
+      "name": "gpu-sycl",
+      "inherits": "intel-gpu",
+      "displayName": "Intel GPU, SYCL (icpx, BK_GPU_DEVICE, default acm-g10)",
+      "binaryDir": "${sourceDir}/build/gpu-sycl",
+      "cacheVariables": {"BK_ENABLE_SYCL": "ON"}
+    },
+    {
+      "name": "a770",
+      "inherits": "intel-gpu",
+      "displayName": "Intel Arc A770 workstation: both backends, tinytc, memory-capped compiles; run scripts/build.sh",
+      "binaryDir": "${sourceDir}/build/a770",
+      "cacheVariables": {
+        "BK_ENABLE_OPENMP": "ON",
+        "BK_ENABLE_SYCL": "ON",
+        "BK_ENABLE_TINYTC": "ON",
+        "TINYTC_ROOT": "/opt/tinytc/latest",
+        "BK_GPU_IN_ALL": "OFF",
+        "BK_GPU_JOBS": "1",
+        "BK_GPU_BASELINES": "ON",
         "CMAKE_CXX_COMPILER_LAUNCHER": "${sourceDir}/scripts/capped",
         "CMAKE_CXX_LINKER_LAUNCHER": "${sourceDir}/scripts/capped"
       }
@@ -22,6 +54,8 @@
   ],
   "buildPresets": [
     {"name": "host", "configurePreset": "host"},
+    {"name": "gpu-openmp", "configurePreset": "gpu-openmp"},
+    {"name": "gpu-sycl", "configurePreset": "gpu-sycl"},
     {"name": "a770", "configurePreset": "a770"}
   ]
 }

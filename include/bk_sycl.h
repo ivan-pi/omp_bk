@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <limits>
 
 namespace bk {
@@ -38,6 +39,22 @@ launch_times time_launches(const int ntests, F&& launch, const bool profile = tr
         }
     }
     return best;
+}
+
+// time_launches for one variant of a harness: false, with a "skipped" line,
+// when the device cannot run it (a work-group or shared local memory larger
+// than the device allows, e.g. 512 work-items on Xe-LP against 1024 on
+// Xe-HPG), so the other variants still run.
+template <typename F>
+bool time_variant(const char* name, const int ntests, F&& launch, launch_times& t, const bool profile = true)
+{
+    try {
+        t = time_launches(ntests, launch, profile);
+    } catch (const sycl::exception& e) {
+        std::printf("%-14s skipped: %s\n", name, e.what());
+        return false;
+    }
+    return true;
 }
 
 } // namespace bk

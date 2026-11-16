@@ -395,7 +395,10 @@ int main(int argc, char** argv)
             continue;
         }
         q.memset(d.out, 0, out.size() * sizeof(float)).wait();
-        const bk::launch_times t = bk::time_launches(ntests, [&] { return v.fn(q, d); });
+        bk::launch_times t{};
+        if (!bk::time_variant(v.name, ntests, [&] { return v.fn(q, d); }, t)) {
+            continue;
+        }
         q.copy(d.out, out.data(), out.size()).wait();
         const double relerr = bk::rel_maxdiff(out, ref, big);
         const double bytes = sizeof(float) * double(nelmt) * nq3 * (2.0 + v.F);

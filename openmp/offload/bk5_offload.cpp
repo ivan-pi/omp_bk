@@ -748,8 +748,12 @@ constexpr int fill_group(const int nq, const int P)
 
 // in the order they run
 const variant variants[] = {
+#ifndef BK_NO_BASELINES
+    // one element per thread: baselines, ~30x slower than the best variants
+    // on the A770 at p = 6 (the check is the host reference)
     {"ref6i", &bk5_ref<float, NQ, 6, true>, 6, true},
     {"ref9i", &bk5_ref<float, NQ, 9, true>, 9, true},
+#endif
     PT(6, i, true, 1), PT(6, i, true, 2), PT(6, i, true, 4), PT(6, i, true, 8), PT(6, i, true, 16),
     PT(9, i, true, 1), PT(9, i, true, 2), PT(9, i, true, 4), PT(9, i, true, 8), PT(9, i, true, 16),
     PT(6, f, false, 1), PT(6, f, false, 2), PT(6, f, false, 4), PT(6, f, false, 8), PT(6, f, false, 16),
