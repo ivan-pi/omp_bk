@@ -10,7 +10,7 @@ Roof: copy_cm 449-458 GB/s (device) = 14.0-14.3 GDoF/s.  All orders pass (relerr
  5   6  wg64                12.6        12.9           90            12.3
  6   7  wg64                12.4        12.7           89            11.7
  7   8  wg32                12.3        12.8           90            13.5
- 8   9  wg32 (spills 11KB)   4.1         4.2           30            11.5
+ 8   9  SLM, wg9             11.1        12.2           86            11.5
 
 Fraction of FP32 peak (19.7 TFLOP/s): below 2% at every order; the kernel is
 memory-bound and the % of copy is the meaningful figure.
@@ -31,6 +31,12 @@ What was measured on the way (p = 2..7 unless noted):
 - Rotating the plane order per element (e mod 8) lifted a memory-only probe
   at nq = 6 from 90% to 99% of copy, at nq = 8 only 91%; not implemented in
   the kernel (needs a rotated basis copy and per-plane stores).
+
+p = 8 (nq = 9): the register kernel spills ~11 KB at nq = 9 (4.1 GDoF/s, 30%).
+Replaced by the SYCL scheme in CM: a work-group of nine threads per element,
+thread i owning plane i, U and R shared through SLM, two barriers.  One
+element per group (SLM 8.4 KB) 11.1 host / 12.2 device GDoF/s; two and three
+elements per group 10.5 and 10.0 (fewer groups per Xe-core).
 
 Commands:
   cm/build.sh                                  # KERNELS="bk1 bk5"; bk5_cm_<p>.bin, host build/cm/bk5_cm

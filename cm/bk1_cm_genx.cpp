@@ -429,24 +429,6 @@ _GENX_ inline void pack_out(vector_ref<float, T_o::size> o, vector_ref<float, NI
     }
 }
 
-// SLM block copies of 32, 16, 8 or 4 floats: v[OFF, OFF + N) <-> byte
-// offset base + (OFF - V0) * 4 of the SLM buffer `slm` (the handle of
-// cm_slm_alloc: an offset added to the handle itself is ignored, every
-// thread then hits the buffer's start; it goes in the offset argument)
-template <bool WRITE, int V0, int OFF, int N, int TOT>
-_GENX_ inline void slm_blocks(uint slm, uint base, vector_ref<float, TOT> v)
-{
-    if constexpr (N > 0) {
-        constexpr int K = (N >= 32) ? 32 : (N >= 16) ? 16 : (N >= 8) ? 8 : 4;
-        if constexpr (WRITE) {
-            cm_slm_block_write(slm, base + (OFF - V0) * 4, v.template select<K, 1>(OFF));
-        } else {
-            cm_slm_block_read(slm, GENX_NONE, base + (OFF - V0) * 4, v.template select<K, 1>(OFF));
-        }
-        slm_blocks<WRITE, V0, OFF + K, N - K, TOT>(slm, base, v);
-    }
-}
-
 // PAIR: thread 1 hands its partial out to thread 0 in XR rounds of XC floats
 // through one slot of XC floats per pair (SLM, not threads, would otherwise
 // limit the threads per Xe-core); a barrier after each write and before the

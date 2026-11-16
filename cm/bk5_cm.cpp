@@ -6,7 +6,8 @@
 //
 // Loads <dir>/bk5_cm_<p>.bin, or bk5_cm_<p>_e<n>.bin with BK_EPT=n elements
 // per thread (dir: $BK_CM_DIR, default the executable's directory), runs the memory yardstick copy_cm and bk5_cm at each
-// work-group size of $BK_WG (threads per group, default "16 32 64"), and
+// work-group size of $BK_WG (threads per group, default "16 32 64"; at
+// p = 8 one element per group of nq = 9 threads, "9"), and
 // checks every result against the double-precision host reference
 // (bk_harness.h).  Data as in the SYCL driver: pseudo-random in and G,
 // D(i, n) = cos(i * nq + n), G interleaved by plane rows (layout 1 of
@@ -143,13 +144,20 @@ int main(int argc, char** argv)
 
     // BK5 at each work-group size
     cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer, cl::Buffer, int> bk5(prog, "bk5_cm");
-    std::istringstream wgs(bk::get_env("BK_WG").value_or("16 32 64"));
+    // p = 8: a work-group of nq threads per element
+    const bool slm = (nq == 9);
+    std::istringstream wgs(bk::get_env("BK_WG").value_or(slm ? "9" : "16 32 64"));
     std::vector<float> out(in.size());
     bool ok = true;
     for (int wg = 0; wgs >> wg;) {
         q.enqueueFillBuffer(d_out, 0.0f, 0, out.size() * sizeof(float));
         q.finish();
-        const cl::NDRange global(round_up_to((nelmt + ept - 1) / ept, wg));
+        if (slm && (wg != nq || ept != 1)) {
+            std::fprintf(stderr, "p = 8: the work-group size must be %d (BK_WG) and EPT 1\n", nq);
+            return 2;
+        }
+        const std::size_t nthreads = slm ? nelmt * nq : (nelmt + ept - 1) / ept;
+        const cl::NDRange global(round_up_to(nthreads, wg));
         const times t = time_launches(ntests, [&] {
             return bk5(cl::EnqueueArgs(q, global, cl::NDRange(wg)), d_d, d_g, d_in, d_out, int(nelmt));
         });

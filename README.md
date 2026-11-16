@@ -281,14 +281,16 @@ packed per element and written by aligned block writes. A build without
 arithmetic runs at the same speed: the kernel is limited by its memory access
 pattern, not by compute. Host GDoF/s at ~5.6e7 DoFs (`results/a770/cm_bk5_a770.txt`):
 
-| p              | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8   |
-|----------------|------|------|------|------|------|------|------|-----|
-| CM             | 12.3 | 11.0 | 12.9 | 12.1 | 12.6 | 12.4 | 12.3 | 4.1 |
-| % of copy_cm   | 93   | 83   | 96   | 88   | 90   | 89   | 90   | 30  |
+| p              | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
+|----------------|------|------|------|------|------|------|------|------|
+| CM             | 12.3 | 11.0 | 12.9 | 12.1 | 12.6 | 12.4 | 12.3 | 11.1 |
+| % of copy_cm   | 93   | 83   | 96   | 88   | 90   | 89   | 90   | 86   |
 | best OpenMP/SYCL | 14.0 | 13.5 | 13.5 | 12.2 | 12.3 | 11.7 | 13.5 | 11.5 |
 
-p = 1 and 2 use 8 and 2 elements per thread (`EPT`); p = 8 (nq = 9) does not
-fit the register file and spills.
+p = 1 and 2 use 8 and 2 elements per thread (`EPT`). At p = 8 (nq = 9) one
+element does not fit a thread's registers; as in the SYCL kernel, a
+work-group of nine threads shares it through shared local memory, each
+thread owning one plane, with two barriers per element.
 
 ```sh
 KERNELS=bk5 cm/build.sh               # build/cm/bk5_cm_<p>.bin, host build/cm/bk5_cm

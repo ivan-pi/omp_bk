@@ -38,10 +38,10 @@
 // padded from the host: Drow(n, k) = D(n, k), Dcol(n, k) = D(k, n), rows of P
 // floats, zero beyond nq.
 //
-// p = 8 (nq = 9, P = 16) is compiled but does not fit the register file and
-// spills (~8 KB): correct, but slow.
+// p = 8 (nq = 9, P = 16): one element does not fit a thread's registers; a
+// work-group of nine threads shares it through SLM instead (see NQ == 9).
 //
-// Kernels: bk5_cm (EPT elements per thread, -DEPT=n, default 1, strided by
+// Kernels: bk5_cm (p <= 7: EPT elements per thread, -DEPT=n, default 1, strided by
 // the work-group size so that neighbouring threads work on neighbouring
 // elements; the next element's first factors and in are loaded while the
 // current one finishes; SIMD1 dispatch, the NDRange counts threads) and
@@ -128,6 +128,7 @@ _GENX_ inline void load_in(SurfaceIndex in, const uint e, const int i, vector_re
     load_blocks<aligned, 0, NL, NP>(in, (e * nq3 + i * nq2) * 4, A.select<NP, 1>(i * S));
 }
 
+#if NQ <= 8
 // r back-contraction and store of element e: out_i = O_i + sum_n D(n, i) R_n.
 // As soon as plane i is computed, A_i is free and plane i of the next
 // element's in is loaded into it (NEXT).  Even nq: every plane is 16 B
@@ -287,3 +288,147 @@ extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
     }
 }
 
+#else  // NQ == 9: nine threads per element, U and R shared through SLM
+
+// One element does not fit a thread's registers at nq = 9, so, as in the
+// SYCL and OpenMP kernels, the nq threads of a work-group share
+// them through shared local memory: thread i of an element owns plane i.
+// One element per work-group (B = 1; 2 and 3 measured 5-10% slower), its SLM
+// 8.4 KB, so that a Xe-core holds as many groups as its threads allow.
+//   load    plane i of in -> U_i (SLM), the factors of plane i, rows i of
+//           Drow and Dcol                                          barrier
+//   steps   Q_i = sum_n D(i, n) U_n (U_n read from SLM); qs, qt, fluxes and
+//           the s, t back-contractions O_i on plane i in registers, as
+//           for p <= 7; R_i = rr -> SLM                            barrier
+//   out_i = O_i + sum_n D(n, i) R_n (R_n read from SLM), packed, stored
+// Every thread reaches both barriers, also past nelmt (the reads there
+// return 0 and nothing is stored).
+
+static_assert(EPT == 1, "nq = 9: one element per nq threads");
+constexpr int MAXB = 1;                  // elements per work-group
+constexpr int SPU = NP;                  // SLM plane strides (floats): U flat,
+constexpr int SPR = NR;                  // R padded
+constexpr int SLM_E = nq * (SPU + SPR) * 4;   // bytes per element
+static_assert(SPU % 4 == 0 && SPR % 4 == 0, "SLM planes 16 B aligned");
+
+// out_i: the padded rows of o packed at offset H of st, st(0) being the
+// 16 B aligned float at element offset base; block writes of the aligned
+// middle, scattered writes of the head and tail
+template <int H>
+_GENX_ inline void store_plane(SurfaceIndex out, const uint base, vector_ref<float, NR> o)
+{
+    constexpr int NS = round8(H + nq2);
+    constexpr int B0 = (H == 0) ? 0 : 4;
+    constexpr int B1 = (H + nq2) / 4 * 4;
+    vector<float, NS> st;
+#pragma unroll
+    for (int j = 0; j < nq; ++j) {
+        st.select<nq, 1>(H + j * nq) = o.select<nq, 1>(j * P);
+    }
+    store_scattered<H, B0 - H, NS>(out, base, st.select_all());
+    store_blocks<B0, B1 - B0, NS>(out, base * 4, st.select_all());
+    store_scattered<B1, H + nq2 - B1, NS>(out, base, st.select_all());
+}
+
+extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
+                                   SurfaceIndex G [[type("buffer_t")]],
+                                   SurfaceIndex in [[type("buffer_t")]],
+                                   SurfaceIndex out [[type("buffer_t")]],
+                                   int nelmt)
+{
+    cm_slm_init(MAXB * SLM_E);
+    const uint slm = cm_slm_alloc(MAXB * SLM_E);
+    const uint l = cm_local_id(0);
+    const uint b = l / nq;                        // element of the group
+    const int i = int(l % nq);                    // plane of this thread
+    const uint e = cm_group_id(0) * MAXB + b;
+    const uint su = b * SLM_E;                    // U of this element (bytes)
+    const uint sr = su + nq * SPU * 4;            // R of this element
+
+    // load: plane i of in (to SLM) and its factors, the basis, row i of
+    // Drow (D(i, n)) and of Dcol (D(n, i))
+    vector<float, NP> u = 0.0f;
+    load_blocks<aligned, 0, NL, NP>(in, (e * nq3 + i * nq2) * 4, u.select_all());
+    vector<float, NGR> g;
+    load_g(G, e, i, g.select_all());
+    vector<float, ND> d;
+    load_blocks<true, 0, ND, ND>(dpad, 0, d);
+    vector<float, P> di;
+    vector<float, P> dc;
+    read(dpad, i * P * 4, di);
+    read(dpad, (DCOL + i * P) * 4, dc);
+    slm_blocks<true, 0, 0, SPU, NP>(slm, su + i * SPU * 4, u.select_all());
+    cm_slm_fence(CM_GLOBAL_COHERENT_FENCE);
+    cm_barrier();
+
+    // r derivative: Q_i = sum_n D(i, n) U_n
+    vector<float, NP> qr;
+#pragma unroll
+    for (int n = 0; n < nq; ++n) {
+        vector<float, NP> un;
+        slm_blocks<false, 0, 0, SPU, NP>(slm, su + n * SPU * 4, un.select_all());
+        if (n == 0) {
+            qr = di(0) * un;
+        } else {
+            qr += di(n) * un;
+        }
+    }
+
+    // s and t derivatives, padded
+    vector<float, NR> qs;
+    vector<float, NR> qt;
+    rows<P, 1, nq, true, 0, 0, false>(u.select_all(), u.select_all(), d, qs.select_all());
+    rows<0, 0, 0, false, DCOL, nq, true>(u.select_all(), u.select_all(), d, qt.select_all());
+
+    // fluxes, row by row: (rr, rs, rt) = G (qr, qs, qt); rt -> qt
+    vector<float, NR> rr;
+    vector<float, NR> rs;
+#pragma unroll
+    for (int j = 0; j < nq; ++j) {
+        const int f = j * nq;
+        const int c = j * P;
+        const int gj = j * 6 * nq;
+        vector<float, P> q0 = qr.select<P, 1>(f);
+        vector_ref<float, P> q1 = qs.select<P, 1>(c);
+        vector_ref<float, P> q2 = qt.select<P, 1>(c);
+        rr.select<P, 1>(c) = g.select<P, 1>(gj) * q0 + g.select<P, 1>(gj + nq) * q1 + g.select<P, 1>(gj + 2 * nq) * q2;
+        rs.select<P, 1>(c) = g.select<P, 1>(gj + nq) * q0 + g.select<P, 1>(gj + 3 * nq) * q1 +
+                             g.select<P, 1>(gj + 4 * nq) * q2;
+        q2 = g.select<P, 1>(gj + 2 * nq) * q0 + g.select<P, 1>(gj + 4 * nq) * q1 + g.select<P, 1>(gj + 5 * nq) * q2;
+    }
+    slm_blocks<true, 0, 0, SPR, NR>(slm, sr + i * SPR * 4, rr.select_all());
+
+    // s and t back-contractions: O_i
+    vector<float, NR> o;
+    rows<1, P, P, true, 0, P, true>(rs.select_all(), qt.select_all(), d, o.select_all());
+    cm_slm_fence(CM_GLOBAL_COHERENT_FENCE);
+    cm_barrier();
+
+    // r back-contraction: out_i = O_i + sum_n D(n, i) R_n
+#pragma unroll
+    for (int n = 0; n < nq; ++n) {
+        vector<float, NR> rn;
+        slm_blocks<false, 0, 0, SPR, NR>(slm, sr + n * SPR * 4, rn.select_all());
+        o += dc(n) * rn;
+    }
+
+    // store plane i (four cases of its alignment)
+    if (e < uint(nelmt)) {
+        const uint base = e * nq3 + i * nq2;
+        switch (base % 4) {
+        case 0:
+            store_plane<0>(out, base, o.select_all());
+            break;
+        case 1:
+            store_plane<1>(out, base - 1, o.select_all());
+            break;
+        case 2:
+            store_plane<2>(out, base - 2, o.select_all());
+            break;
+        default:
+            store_plane<3>(out, base - 3, o.select_all());
+            break;
+        }
+    }
+}
+#endif
