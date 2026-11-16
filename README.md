@@ -22,6 +22,7 @@ The tree is organized by approach; the file names say the kernel.
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
 | `tinytc/` | `bk_tinytc.cpp` (driver for BK1, BK3 and BK5), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received, `bk3_blk.ir` and `bk3_ec.ir` in tinytc's blocked and our layout, `bk3_*_gs.ir` with S in global memory), `repro_slm/` (bug reproducer), `upstream_issues.md` (drafts) |
+| `cm/` | `bk1_cm_genx.cpp`, `bk5_cm_genx.cpp` (BK1 and BK5 in C for Metal), `bk1_cm.cpp`, `bk5_cm.cpp` (SYCL hosts), `cm_common.h`, `cm_sycl.hpp`, `Makefile`, `README.md` |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp`, `stream_sycl.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
@@ -245,7 +246,7 @@ first output line says `fma = hardware`).
 The CMake preset `a770` is the A770 workstation's tree: both backends in
 one tree, ahead of time for the ocloc device `acm-g10` (Arc A770/A750;
 `GPU_DEVICE=...` for others, `ocloc compile --help` lists the names), tinytc
-on, every compile memory-capped and one at a time, and no GPU program in
+on, compiles one at a time, and no GPU program in
 `all`. All GPU builds use
 `-fp-model=precise` against icpx's fast default. `scripts/build.sh` sets up
 the oneAPI environment (`common.sh`, including the `umf` library the Level
@@ -256,10 +257,9 @@ one after another.
   time, named by the polynomial order p (`BK5_3`, `bk1_offload_4`): the
   `openmp/` drivers are built with `-DBK_ORDER=<p>`, the other programs with
   `-DNQ=<nq>`. `all_<prog>` builds every order of a program.
-- **Memory cap:** every compile, link and run goes through a systemd user
-  scope capped at `MEM_MAX` (8G) that prints its peak memory
-  (`scripts/capped` is the preset's compiler launcher), and GPU compiles
-  never run two at a time. The host data grow as nelmt * nq^3: BK3 at the
+- **Memory cap:** every run (`scripts/run.sh`) goes through a systemd user
+  scope capped at `MEM_MAX` (8G) that prints its peak memory, and GPU
+  compiles never run two at a time. The host data grow as nelmt * nq^3: BK3 at the
   default 524288 elements needs ~7.5 GB at p = 6 and ~11 GB at p = 7.
 - **Checks:** the kernel-variant harnesses compare every result with a
   double-precision reference computed on the host, one element per OpenMP
@@ -404,6 +404,17 @@ which keeps its work arrays in team-shared memory, then runs ~8x faster than
 the float BK1 kernel (likely register spills of the per-thread array, not
 confirmed). Emulated double runs at 0.05-0.09 GDoF/s. All BK1_ff checks pass
 on the A770 at p = 2, 4 and 6, with and without `BK_RANDOM=1`.
+
+## C for Metal versions of BK1 and BK5
+
+`cm/` has BK1 and BK5 (G6) in Intel C for Metal, an explicit-SIMD language
+for Intel GPUs, with SYCL hosts. They are built by `make -C cm` (`cmc` from
+Intel's GPU packages, installed by `cm/install_toolchain.sh`), not by CMake.
+On the A770 they reach 86-97% (BK1) and 84-96% (BK5) of a CM copy kernel's
+bandwidth, ahead of the best OpenMP/SYCL variant at p = 3-5 and 7-8 (BK1) and
+at p = 4-6 and 8 (BK5).
+[`cm/README.md`](cm/README.md) explains C for Metal, where to get it, and how
+to build and run the kernels.
 
 ## Apple AMX version of BK1
 

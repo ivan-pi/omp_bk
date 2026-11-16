@@ -2,7 +2,8 @@
 
 The CEED bake-off kernels BK1, BK3 and BK5, organized by approach:
 `openmp/` (drivers for host or offload; GPU kernel variants in
-`openmp/offload/`), `sycl/`, `tinytc/` (driver and `ir/` kernels), `amx/`
+`openmp/offload/`), `sycl/`, `tinytc/` (driver and `ir/` kernels), `cm/` (BK1 and BK5 in C for Metal, built
+by `make -C cm`, not CMake; see `cm/README.md`), `amx/`
 (the Apple AMX version of BK1 with a software emulator, `amx/amx.h`),
 `roofline/` (bandwidth and peak micro-benchmarks), `include/` (headers
 shared across approaches), `scripts/` (Intel GPU build, run, `study/`,
@@ -30,8 +31,8 @@ they must agree bit for bit, as every output is summed in index order.
   Silicon) and the roofline micro-benchmarks (`accel_gemm` is macOS only).
   The Intel GPU binaries (one order each, named by p: `BK1_4`,
   `bk1_offload_4`, `bk5_sycl_6`, `bk_tinytc`, ...) are built with
-  `scripts/build.sh <target>...` into `build/a770` (memory-capped, one
-  compile at a time), never while a GPU run is going on. Backends are CMake
+  `scripts/build.sh <target>...` into `build/a770` (one compile at
+  a time), never while a GPU run is going on. Backends are CMake
   options: `BK_ENABLE_OPENMP`, `BK_ENABLE_SYCL` (both on, both from icpx)
   and `BK_ENABLE_TINYTC` (off by default, on in the `a770` preset); keep any
   new toolchain beyond icpx (e.g. C for Metal) behind its own default-off

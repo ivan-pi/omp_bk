@@ -10,7 +10,7 @@
 # env:    KOKKOS_DIR=<repo>/build/kokkos   sources, build trees, install
 #         KOKKOS_TAG=5.3.0                 kokkos/kokkos release
 #         CEED_COMMIT=457863403de6         dealii-X/benchmarks commit
-#         MEM_MAX (common.sh); compiles run one at a time, memory-capped
+#         compiles run one at a time
 set -e
 . "$(dirname "$0")/../common.sh"
 KOKKOS_DIR=$(realpath -m "${KOKKOS_DIR:-$REPO/build/kokkos}")
@@ -34,16 +34,13 @@ if [ ! -f kokkos-install/lib/cmake/Kokkos/KokkosConfig.cmake ]; then
     cmake -S kokkos-src -B kokkos-build -G Ninja -DCMAKE_CXX_COMPILER=icpx \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=20 \
         -DCMAKE_INSTALL_PREFIX="$KOKKOS_DIR/kokkos-install" \
-        -DKokkos_ENABLE_SYCL=ON -DKokkos_ENABLE_SERIAL=ON -DKokkos_ARCH_INTEL_DG2=ON \
-        -DCMAKE_CXX_COMPILER_LAUNCHER="$SCRIPTS/capped" > kokkos-configure.log
+        -DKokkos_ENABLE_SYCL=ON -DKokkos_ENABLE_SERIAL=ON -DKokkos_ARCH_INTEL_DG2=ON > kokkos-configure.log
     cmake --build kokkos-build -j 1
     cmake --install kokkos-build > /dev/null
 fi
 
 cmake -S benchmarks/CEED_BK -B ceed-build -G Ninja -DCMAKE_CXX_COMPILER=icpx \
-    -DCMAKE_BUILD_TYPE=Release -DKokkos_DIR="$KOKKOS_DIR/kokkos-install/lib/cmake/Kokkos" \
-    -DCMAKE_CXX_COMPILER_LAUNCHER="$SCRIPTS/capped" \
-    -DCMAKE_CXX_LINKER_LAUNCHER="$SCRIPTS/capped" > ceed-configure.log
+    -DCMAKE_BUILD_TYPE=Release -DKokkos_DIR="$KOKKOS_DIR/kokkos-install/lib/cmake/Kokkos" > ceed-configure.log
 cmake --build ceed-build -j 1 --target templated_kokkos_benchmark \
     templated_kokkos_benchmark_bk3 templated_kokkos_benchmark_bk5
 echo "KOKKOS_BK=$KOKKOS_DIR/ceed-build"

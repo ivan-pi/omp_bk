@@ -1,8 +1,0 @@
-#!/bin/bash
-# capped -- compiler and linker launcher of the CMake preset a770: runs one
-# compile or link at low priority in the memory-capped systemd scope of
-# common.sh (MEM_MAX, default 8G), which prints its peak memory on stderr.
-#
-#   capped <command> [args...]
-. "$(dirname "$0")/common.sh"
-capped nice -n 19 "$@"
