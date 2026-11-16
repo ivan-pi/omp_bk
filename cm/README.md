@@ -52,6 +52,24 @@ release and writes two wrappers that give only `cmc` and `ocloc-cm` the
 matched libraries. A system-wide install of the same packages works too; then
 set `CMC` and `OCLOC` (or `CM_TOOLS`) for the Makefile.
 
+**Toolchain versions.** The kernels are tested only with `intel-igc-cm`
+1.0.225.54093 and the `ocloc` of driver build 1146; the Makefile does not
+check which toolchain it is given.
+
+- Another `intel-igc-cm` needs the `ocloc` of its own driver release:
+  `install_toolchain.sh -b <build> -c <version>` installs such a pair (the
+  package lists on <https://dgpu-docs.intel.com> show which build goes with
+  which version). Untested here.
+- An `ocloc` from another release fails on the SPIR-V with
+  `spirv_read_verify: verify Module failed`; that error means a mismatched
+  pair, not a problem in the kernels.
+- The 2021 CM development package (`cmc` based on clang 8) is not what the
+  Makefile is set up for. It does not know DG2 and ignores `-march`, saying
+  only `warning: GEN not specified so cm_dp2() code may not be optimal`, and
+  it does not enforce the 4 KB vector limit of the current front end. With
+  the matched `ocloc` it still built BK5 at p = 3, and the result passed;
+  the other orders are untested with it.
+
 ## Building
 
 Requirements: `cmc` and its matched `ocloc` (`CM_TOOLS`, default
