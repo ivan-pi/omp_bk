@@ -22,7 +22,7 @@ The tree is organized by approach; the file names say the kernel.
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
 | `tinytc/` | `bk_tinytc.cpp` (driver for both kernels), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received), `repro_slm/` (bug reproducer) |
-| `cm/` | `bk1_cm_genx.cpp` (BK1 in C for Metal), `bk1_cm.cpp` (OpenCL host), `cm_ocl.hpp`, `build.sh` |
+| `cm/` | `bk1_cm_genx.cpp`, `bk5_cm_genx.cpp` (BK1 and BK5 in C for Metal), `bk1_cm.cpp`, `bk5_cm.cpp` (OpenCL hosts), `cm_common.h`, `cm_ocl.hpp`, `build.sh` |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
@@ -251,8 +251,8 @@ The basis is padded or permuted on the host; in, out and JxW use the layouts
 of the other drivers.
 
 ```sh
-cm/build.sh                       # build/cm/bk1_cm_<p>.bin, p = 1..8 (cmc -> SPIR-V -> ocloc dg2), host build/cm/bk1_cm
-EPT=2 cm/build.sh 3               # 2 elements per thread -> bk1_cm_3_e2.bin
+KERNELS=bk1 cm/build.sh           # build/cm/bk1_cm_<p>.bin, p = 1..8 (cmc -> SPIR-V -> ocloc dg2), host build/cm/bk1_cm
+EPT=2 KERNELS=bk1 cm/build.sh 3   # 2 elements per thread -> bk1_cm_3_e2.bin
 build/cm/bk1_cm 4 448000 20       # p, nelmt, ntests: copy_cm yardstick, then bk1_cm at BK_WG="16 32 64"
 BK_EPT=2 build/cm/bk1_cm 3 875000 20
 ```
@@ -268,6 +268,33 @@ bandwidth (device time) and 5-20% of the FP32 peak. In host GDoF/s:
 | CM                 | 16.7 | 20.4 | 25.5 | 25.6 | 28.1 | 26.5 | 29.5 | 28.1 |
 | best OpenMP/SYCL   | 19.8 | 24.4 | 23.4 | 25.5 | 26.3 | 29.5 | 27.6 | 26.0 |
 
+
+## C for Metal version of BK5
+
+`cm/bk5_cm_genx.cpp` is BK5 with the symmetric factors (G6) in CM, one
+element per hardware thread in registers. Each plane i of the element is held
+flat (memory order) for loads and the pointwise r steps, and the s and t
+derivatives, the fluxes and their back-contractions work on rows padded to
+P = 4 or 8, so that every register destination is aligned. G is read in
+layout 1 (`G(e, i, j, f, k)`), one contiguous run per plane, and the output is
+packed per element and written by aligned block writes. A build without
+arithmetic runs at the same speed: the kernel is limited by its memory access
+pattern, not by compute. Host GDoF/s at ~5.6e7 DoFs (`results/a770/cm_bk5_a770.txt`):
+
+| p              | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8   |
+|----------------|------|------|------|------|------|------|------|-----|
+| CM             | 12.3 | 11.0 | 12.9 | 12.1 | 12.6 | 12.4 | 12.3 | 4.1 |
+| % of copy_cm   | 93   | 83   | 96   | 88   | 90   | 89   | 90   | 30  |
+| best OpenMP/SYCL | 14.0 | 13.5 | 13.5 | 12.2 | 12.3 | 11.7 | 13.5 | 11.5 |
+
+p = 1 and 2 use 8 and 2 elements per thread (`EPT`); p = 8 (nq = 9) does not
+fit the register file and spills.
+
+```sh
+KERNELS=bk5 cm/build.sh               # build/cm/bk5_cm_<p>.bin, host build/cm/bk5_cm
+build/cm/bk5_cm 4 448000 20           # p, nelmt, ntests: copy_cm, then bk5_cm at BK_WG="16 32 64"
+EPT=8 KERNELS=bk5 cm/build.sh 1 && BK_EPT=8 build/cm/bk5_cm 1 7000000 20
+```
 ## Apple AMX version of BK1
 
 `amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX
