@@ -1,14 +1,18 @@
 #!/bin/bash
 # bk3_pick.sh -- the fastest BK3 variant per API and order at a fixed size:
-# every variant of build/a770/bk3_offload_<p> (OpenMP, not ref) and
-# build/a770/bk3_sycl_<p> (SYCL), REPS runs each, median host GDoF/s.
+# every variant of $BUILD_DIR/bk3_offload_<p> (OpenMP, not ref) and
+# $BUILD_DIR/bk3_sycl_<p> (SYCL), REPS runs each, median host GDoF/s.
+# Programs missing from the tree are skipped (a gpu-sycl tree: SYCL only).
 #
 # usage:  scripts/study/bk3_pick.sh [out.csv]
 # env:    ORDERS="1 2 3 4 5 6 7 8" (p, nq = p + 2) DOFS=2e7 REPS=3 NTESTS=10
 #         (G is 6 nq^3 floats per element: ~1.6 GB of host and device
 #         memory at p = 1 and 2e7 DoFs)
-#         COPY_GBS, READ9_GBS: the roofs (default: one run of stream_omp,
-#         copy and read9 = BK3's mix of ~90% reads)
+#         COPY_GBS, READ9_GBS: the roofs (default: one run of stream_omp, or
+#         stream_sycl in a SYCL tree; copy and read9 = BK3's mix of ~90%
+#         reads; without either program and these, no percentages)
+#         BUILD_DIR (common.sh): the tree, e.g. build/gpu-sycl
+#         BK_KERNEL="-name ...": variants to leave out (ref always is)
 # CSV:    api,p,variant,rep,gdofs,gbs,relerr     (api: omp or sycl)
 . "$(dirname "$0")/../common.sh"
 OUT=${1:-bk3_pick.csv}
@@ -24,17 +28,27 @@ for p in $ORDERS; do
         if [ "$bin" = bk3_sycl_$p ]; then
             api=sycl
         fi
+        if [ ! -x "$BUILD_DIR/$bin" ]; then
+            echo "skip $bin: not in $BUILD_DIR" >&2
+            continue
+        fi
         for rep in $(seq 1 "$REPS"); do
             # $NF: the relative error, or FAIL after it
-            BK_KERNEL=-ref "$SCRIPTS/run.sh" "$bin" "$ne" "$NTESTS" 2>&1 |
+            BK_KERNEL="-ref ${BK_KERNEL:-}" "$SCRIPTS/run.sh" "$bin" "$ne" "$NTESTS" 2>&1 |
                 awk -v api="$api" -v p="$p" -v rep="$rep" \
                     '$2 == "GDoF/s" { printf "%s,%s,%s,%s,%s,%s,%s\n", api, p, $1, rep, $4, $7, $NF }' >> "$OUT"
         done
     done
     echo "p=$p done" >&2
 done
-if [ -z "$COPY_GBS" ] || [ -z "$READ9_GBS" ]; then
-    stream=$("$SCRIPTS/run.sh" stream_omp 2>&1)
+stream_bin=
+for b in stream_omp stream_sycl; do
+    if [ -z "$stream_bin" ] && [ -x "$BUILD_DIR/$b" ]; then
+        stream_bin=$b
+    fi
+done
+if { [ -z "$COPY_GBS" ] || [ -z "$READ9_GBS" ]; } && [ -n "$stream_bin" ]; then
+    stream=$("$SCRIPTS/run.sh" "$stream_bin" 2>&1)
     COPY_GBS=${COPY_GBS:-$(echo "$stream" | awk '$1 == "copy" {print $NF}')}
     READ9_GBS=${READ9_GBS:-$(echo "$stream" | awk '$1 == "read9" {print $NF}')}
 fi
@@ -54,10 +68,15 @@ best = {}
 for k, g in gdofs.items():
     if k not in bad and ((k[0], k[1]) not in best or statistics.median(g) > best[(k[0], k[1])][1]):
         best[(k[0], k[1])] = (k[2], statistics.median(g), statistics.median(gbs[k]))
-copy, read9 = float(sys.argv[2]), float(sys.argv[3])
-print(f"roofs: STREAM copy {copy:.0f} GB/s, read9 (90% reads) {read9:.0f} GB/s")
+roofs = sys.argv[2] and sys.argv[3]
+if roofs:
+    copy, read9 = float(sys.argv[2]), float(sys.argv[3])
+    print(f"roofs: STREAM copy {copy:.0f} GB/s, read9 (90% reads) {read9:.0f} GB/s")
+else:
+    print("roofs: unknown (no stream_omp or stream_sycl in the tree; set COPY_GBS and READ9_GBS)")
 for (api, p), (v, g, b) in sorted(best.items()):
-    print(f"{api:5s} p={p} {v:12s} {g:6.2f} GDoF/s  {b:5.0f} GB/s  ({100 * b / copy:3.0f}% of copy, {100 * b / read9:3.0f}% of read9)")
+    pct = f"  ({100 * b / copy:3.0f}% of copy, {100 * b / read9:3.0f}% of read9)" if roofs else ""
+    print(f"{api:5s} p={p} {v:12s} {g:6.2f} GDoF/s  {b:5.0f} GB/s{pct}")
 if bad:
     print("FAIL:", sorted(bad))
 PY

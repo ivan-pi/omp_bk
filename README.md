@@ -23,7 +23,7 @@ The tree is organized by approach; the file names say the kernel.
 | `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
 | `tinytc/` | `bk_tinytc.cpp` (driver for both kernels), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received), `repro_slm/` (bug reproducer) |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
-| `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
+| `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp`, `stream_sycl.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
 | `results/<machine>/` | Measured CSVs, tables and plots (`a770/`: Intel Arc A770) |
 
@@ -49,6 +49,7 @@ One build tree per backend: the presets `host` (CPU, any compiler),
 | `BK_GPU_DEVICE` | `acm-g10` in the GPU presets | ocloc device of the GPU tree (`acm-g10` = Arc A770/A750), or `jit`; empty: host tree |
 | `BK_ORDERS_P`, `BK_ORDERS_BK5`, `BK_ORDERS_GPU` | `1;...;8` (BK5: `1;...;7`) | GPU: the orders p built, one binary each |
 | `BK_GPU_IN_ALL` | `ON` | GPU: per-order programs in `all` (off: build them by name) |
+| `BK_SYCL_BASELINES` | `OFF` (`a770`: `ON`) | GPU: the naive one-element-per-work-item variants of `bk1_sycl` (`elem*`), most of its device link time |
 | `BK_GPU_JOBS` | `0` (no limit) | GPU: compiles and links at once (Ninja), on top of `-j` |
 
 **Which `BK_GPU_DEVICE`?** The GPU programs are compiled ahead of time
@@ -96,7 +97,7 @@ cmake --build build/gpu-openmp                      # plus bk{1,3,5}_offload_<p>
 ```sh
 source /opt/intel/oneapi/setvars.sh
 cmake --preset gpu-sycl -DBK_GPU_DEVICE=acm-g10     # build/gpu-sycl
-cmake --build build/gpu-sycl                        # bk{1,3,5}_sycl_<p>, bk{1,5}_sycl_<p>_jit: 142 s
+cmake --build build/gpu-sycl                        # bk{1,3,5}_sycl_<p>, bk{1,5}_sycl_<p>_jit, stream_sycl: 50 s
 ```
 
 **A few orders, or tinytc**
@@ -129,6 +130,11 @@ from the A770 machine (16 threads, 32 GB, icpx 2026.1).
 >   caps them at n, e.g. on a machine with little memory per core (allow
 >   about 1 GB per job), or when the build shares the machine with GPU runs.
 >   It works with the Ninja generator only; with Makefiles use `make -j n`.
+> - **Naive baselines.** The five one-element-per-work-item variants of
+>   `bk1_sycl` (`elem*`) spill registers heavily at high order and took most
+>   of its device link (`bk1_sycl_6`: 65 s with them, 9 s without). They are
+>   off unless `BK_SYCL_BASELINES=ON`; the SYCL tree builds in 50 s instead
+>   of 142 s.
 > - **Build less:** fewer orders (`BK_ORDERS_*`), one backend per tree, or
 >   single targets (`--target bk1_sycl_4`, `all_bk5_sycl`, `drivers`).
 > - **Parallel device link** (not the default): split the device code per
@@ -136,7 +142,7 @@ from the A770 machine (16 threads, 32 GB, icpx 2026.1).
 >   ```sh
 >   -DBK_EXTRA_FLAGS="-fsycl-device-code-split=per_kernel -fsycl-max-parallel-link-jobs=8 -fopenmp-device-code-split=per_kernel -fopenmp-max-parallel-link-jobs=8"
 >   ```
->   This cut the build of `bk1_sycl_6` from 66 s to 29 s at 2.2 GB instead
+>   This cut the build of `bk1_sycl_6` (with the baselines) from 66 s to 29 s at 2.2 GB instead
 >   of 0.7 GB, with the same results; it pays off for a single program with
 >   many kernels, less so when Ninja already runs many jobs.
 
@@ -272,11 +278,45 @@ FP64 emulation (`IGC_EnableDPEmulation=1`, plus
 `OverrideDefaultFP64Settings=1` at run time), which the double reference and
 the float-float split/join need.
 
-`roofline/stream_omp.cpp` is a STREAM-like bandwidth test on device-allocated
+`roofline/stream_omp.cpp` (and `stream_sycl.cpp`, the same test in SYCL)
+is a STREAM-like bandwidth test on device-allocated
 float arrays: read, write, copy, scale, add and triad, plus `bk1p2`, which
 reproduces BK1's p = 2 traffic with one element per thread, and `read9`, 9
 reads per write as in BK3 (428 GB/s on the A770: read-heavy traffic does
 not reach the 459 GB/s of copy).
+
+### Finding the best kernels
+
+One script per BK runs every kernel variant of a build tree at a fixed
+size, `REPS` times, and prints the fastest variants per order and API
+(median GDoF/s); the raw runs go to the CSV. They run the binaries of
+`BUILD_DIR` (default `build/a770`) on `ONEAPI_DEVICE_SELECTOR` (default
+`level_zero:0`, `sycl-ls` lists the devices) and skip the programs a tree
+does not have, so they work on a `gpu-sycl` or `gpu-openmp` tree alike:
+
+```sh
+export BUILD_DIR=build/gpu-sycl ORDERS="2 4 6" DOFS=1e7 REPS=3
+scripts/study/bk1_pick.sh bk1.csv         # BK1: top 5 per order and API
+scripts/study/bk3_pick.sh bk3.csv         # BK3: best per order, against the bandwidth roofs
+scripts/study/bk5_pick.sh bk5.csv         # BK5: best per order and tensor storage, KERNELS for bk5_sweep.sh
+```
+
+The pick is by GDoF/s alone. `bk3_pick.sh` also prints each winner's GB/s
+as a fraction of two bandwidth roofs, measured with the tree's `stream_omp`
+or `stream_sycl` (or given as `COPY_GBS=... READ9_GBS=...`), to show how
+close to the memory bound it is.
+
+A variant the device cannot launch, such as a work-group above its limit
+(512 work-items on the UHD 750, 1024 on the A770), prints `skipped` and the
+rest still run. `BK_KERNEL="-name ..."` leaves variants out; the naive BK1
+baselines (`elem*`, built only with `BK_SYCL_BASELINES=ON`) can run long
+enough at high order to trip a small GPU's hang check and lose the device.
+One tree can serve several GPUs (`BK_GPU_DEVICE="acm-g10,rkl"`), e.g. on
+this machine the A770 and the UHD 750 of the Core i7-11700K:
+
+```sh
+ONEAPI_DEVICE_SELECTOR=level_zero:1 scripts/study/bk5_pick.sh bk5_uhd.csv
+```
 
 ### Results
 
