@@ -49,7 +49,7 @@ One build tree per backend: the presets `host` (CPU, any compiler),
 | `BK_GPU_DEVICE` | `acm-g10` in the GPU presets | ocloc device of the GPU tree (`acm-g10` = Arc A770/A750), or `jit`; empty: host tree |
 | `BK_ORDERS_P`, `BK_ORDERS_BK5`, `BK_ORDERS_GPU` | `1;...;8` (BK5: `1;...;7`) | GPU: the orders p built, one binary each |
 | `BK_GPU_IN_ALL` | `ON` | GPU: per-order programs in `all` (off: build them by name) |
-| `BK_GPU_BASELINES` | `OFF` (`a770`: `ON`) | GPU: the naive one-element-per-thread variants (`bk1_sycl` `elem*`, `bk3_offload` `ref`, `bk5_offload` `ref6i`, `ref9i`) |
+| `BK_GPU_BASELINES` | `OFF` (`a770`: `ON`) | GPU: the one-element-per-thread variants (`bk1_sycl` `elem*` from p = 3, `bk3_offload` `ref`, `bk5_offload` `ref6i`, `ref9i`) |
 | `BK_GPU_JOBS` | `0` (no limit) | GPU: compiles and links at once (Ninja), on top of `-j` |
 
 **Which `BK_GPU_DEVICE`?** The GPU programs are compiled ahead of time
@@ -130,14 +130,17 @@ from the A770 machine (16 threads, 32 GB, icpx 2026.1).
 >   caps them at n, e.g. on a machine with little memory per core (allow
 >   about 1 GB per job), or when the build shares the machine with GPU runs.
 >   It works with the Ninja generator only; with Makefiles use `make -j n`.
-> - **Naive baselines.** The one-element-per-thread variants are 30 to 170
->   times slower than the best kernels and only serve as comparison points;
->   they are off unless `BK_GPU_BASELINES=ON` (`-DBK_NO_BASELINES`). The five
->   `elem*` variants of `bk1_sycl` spill registers heavily at high order and
->   took most of its device link (`bk1_sycl_6`: 65 s with them, 9 s
->   without), so the SYCL tree builds in 50 s instead of 142 s; the `ref`
->   kernels of `bk3_offload` and `bk5_offload` cost 1 to 2 s each. Every
->   variant is still checked against the host reference.
+> - **Naive baselines.** One element per thread is the fastest BK1 kernel
+>   at p = 1 and close behind at p = 2, but from p = 3 on it is 4 to 100
+>   times slower than the batched kernels; for BK3 and BK5 it never wins
+>   (about 60% of the best at p = 1, 3% and less from p = 3). Those cases
+>   are off unless `BK_GPU_BASELINES=ON` (`-DBK_NO_BASELINES`): `bk1_sycl`'s
+>   five `elem*` variants from p = 3 (they stay at p = 1, 2), and the `ref`
+>   kernels of `bk3_offload` and `bk5_offload`. The `elem*` variants spill
+>   registers heavily at high order and took most of `bk1_sycl`'s device
+>   link (`bk1_sycl_6`: 65 s with them, 9 s without), so the SYCL tree
+>   builds in 50 s instead of 142 s; the `ref` kernels cost 1 to 2 s each.
+>   Every variant is still checked against the host reference.
 > - **Build less:** fewer orders (`BK_ORDERS_*`), one backend per tree, or
 >   single targets (`--target bk1_sycl_4`, `all_bk5_sycl`, `drivers`).
 > - **Parallel device link** (not the default): split the device code per
