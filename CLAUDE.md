@@ -2,7 +2,7 @@
 
 The CEED bake-off kernels BK1, BK3 and BK5, organized by approach:
 `openmp/` (drivers for host or offload; GPU kernel variants in
-`openmp/offload/`), `sycl/`, `tinytc/` (driver and `ir/` kernels), `cm/` (BK1 and BK5 in C for Metal, built
+`openmp/offload/`), `sycl/`, `tinytc/` (driver and `ir/` kernels; `tinytc/README.md`), `cm/` (BK1 and BK5 in C for Metal, built
 by `make -C cm`, not CMake; see `cm/README.md`), `amx/`
 (the Apple AMX version of BK1 with a software emulator, `amx/amx.h`),
 `roofline/` (bandwidth and peak micro-benchmarks), `include/` (headers

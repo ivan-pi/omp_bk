@@ -21,7 +21,7 @@ The tree is organized by approach; the file names say the kernel.
 | `openmp/` | The portable drivers `BK1.cpp`, `BK3.cpp`, `BK5.cpp`, `BK1_ff.cpp` (host or offload), `bk1_sumfact.h`, `bk3_sumfact.h`, `float_float.h` |
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
-| `tinytc/` | `bk_tinytc.cpp` (driver for BK1, BK3 and BK5), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received, `bk3_blk.ir` and `bk3_ec.ir` in tinytc's blocked and our layout, `bk3_*_gs.ir` with S in global memory), `repro_slm/` (bug reproducer), `upstream_issues.md` (drafts) |
+| `tinytc/` | BK1, BK3, BK5 in the experimental Tiny Tensor Compiler: driver, `ir/` kernels, results and notes in [`tinytc/README.md`](tinytc/README.md) |
 | `cm/` | `bk1_cm_genx.cpp`, `bk5_cm_genx.cpp` (BK1 and BK5 in C for Metal), `bk1_cm.cpp`, `bk5_cm.cpp` (SYCL hosts), `cm_common.h`, `cm_sycl.hpp`, `Makefile`, `README.md` |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp`, `stream_sycl.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
@@ -35,7 +35,7 @@ The tree is organized by approach; the file names say the kernel.
 - For the GPU builds: the Intel oneAPI DPC++/C++ compiler (icpx, which
   provides both OpenMP offload and SYCL), Ninja, and an Intel GPU with the
   Level Zero driver. Optional: the Tiny Tensor Compiler (tinytc) for
-  `bk_tinytc`.
+  `bk_tinytc`, built from source ([`tinytc/README.md`](tinytc/README.md)).
 
 ## Build
 
@@ -46,7 +46,7 @@ One build tree per backend: the presets `host` (CPU, any compiler),
 |---|---|---|
 | `BK_ENABLE_OPENMP` | `ON` (`gpu-openmp`) | host: OpenMP threads (off: serial); GPU: the OpenMP offload programs (`BK1_<p>`, `bk1_offload_<p>`, ...) |
 | `BK_ENABLE_SYCL` | `ON` (`gpu-sycl`) | GPU: the SYCL programs (`bk1_sycl_<p>`, ...) |
-| `BK_ENABLE_TINYTC` | `OFF` | GPU: `bk_tinytc`; needs SYCL and a tinytc install (`TINYTC_ROOT`) |
+| `BK_ENABLE_TINYTC` | `OFF` | GPU: `bk_tinytc`; needs SYCL and a tinytc install (`TINYTC_ROOT`, see [`tinytc/README.md`](tinytc/README.md)) |
 | `BK_GPU_DEVICE` | `acm-g10` in the GPU presets | ocloc device of the GPU tree (`acm-g10` = Arc A770/A750), or `jit`; empty: host tree |
 | `BK_ORDERS_P`, `BK_ORDERS_BK5`, `BK_ORDERS_GPU` | `1;...;8` (BK5: `1;...;7`) | GPU: the orders p built, one binary each |
 | `BK_GPU_IN_ALL` | `ON` | GPU: per-order programs in `all` (off: build them by name) |
@@ -101,12 +101,10 @@ cmake --preset gpu-sycl -DBK_GPU_DEVICE=acm-g10     # build/gpu-sycl
 cmake --build build/gpu-sycl                        # bk{1,3,5}_sycl_<p>, bk{1,5}_sycl_<p>_jit, stream_sycl: 50 s
 ```
 
-**A few orders, or tinytc**
+**A few orders**
 
 ```sh
 cmake --preset gpu-sycl -B build/sycl246 -DBK_ORDERS_GPU="2;4;6"
-export TINYTC_ROOT=<tinytc install>       # or -DTINYTC_ROOT=..., or the install on CMAKE_PREFIX_PATH
-cmake --preset gpu-sycl -DBK_ENABLE_TINYTC=ON && cmake --build build/gpu-sycl --target bk_tinytc
 ```
 
 Every GPU tree also has the targets `all_<prog>` (every order of a program,
@@ -272,7 +270,6 @@ PROFILE=1 scripts/run.sh BK1_4 4           # plus the per-kernel device times
 scripts/build.sh BK1_ff_4 && scripts/run.sh BK1_ff_4 4 524288 3
 scripts/build.sh bk1_offload_4 bk5_sycl_6  # kernel variants: OpenMP offload and SYCL
 scripts/build.sh bk3_offload_4 bk3_sycl_4  # BK3: port of the CUDA kernel (cu) and column sweeps (sf)
-scripts/build.sh bk_tinytc                 # tinytc driver (preset a770: TINYTC_ROOT=/opt/tinytc/latest)
 scripts/study/sweep.sh gpu_results.csv     # BK1, BK3, BK5 at ORDERS="2 4 6", plus STREAM
 ```
 
@@ -333,7 +330,7 @@ ONEAPI_DEVICE_SELECTOR=level_zero:1 scripts/study/bk5_pick.sh bk5_uhd.csv
 
 `results/a770/` holds the measurements of the kernel variants (OpenMP
 offload, SYCL, tinytc) with the scripts that produced them; the roofline
-(`roofline_a770.png`) and `tinytc_compare_a770.txt` summarize them. At
+(`roofline_a770.png`) summarizes them. At
 ~5.6e7 DoFs the best OpenMP or SYCL variant reaches, in GDoF/s:
 
 | p                | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
@@ -368,18 +365,9 @@ sizes, with Kokkos at its fastest element batch, ours are 1.30-2.16x faster
 on BK1 and BK3 and 1.10-2.10x on BK5 (`results/a770/kokkos_compare_a770.png`,
 `.txt`).
 
-BK3 in tinytc (`tinytc/ir/bk3_blk.ir`, `bk3_ec.ir`: BK1's interpolation
-around BK5's Laplacian, a work-group per block of 8-32 elements, the
-sub-group size 8 or 16 as `TT_SG`) keeps U, R and S of 3 B nq^3 floats in
-local memory up to p = 6 (B = 8). At p = 7 and 8 these exceed 64 KiB, and
-`bk3_blk_gs.ir`, `bk3_ec_gs.ir` keep S in global memory instead (a block of
-B nq^3 floats per work-group; `TT_SPILL`, on by default only there; about
-10% slower where it isn't needed, 8.0 vs 8.7 GDoF/s at p = 6). With the best
-configuration per order (`tinytc_survey_bk3_a770.csv`), in its blocked
-layout it matches or slightly beats our best kernel up to p = 6
-(1.00-1.09x) and reaches 0.92x and 0.88x at p = 7 and 8; in our
-element-contiguous layout it reaches 0.62-0.80x of it
-(`bk3_tinytc_compare_a770.png`, `.txt`; `scripts/study/bk3_tinytc_compare.sh`).
+In the Tiny Tensor Compiler, BK1, BK3 and BK5 in tinytc's blocked layout
+match or beat our best OpenMP or SYCL variants up to p = 6, and fall behind
+or run out of local memory at p = 7, 8 ([`tinytc/README.md`](tinytc/README.md)).
 
 The measurements below are of the portable drivers in `openmp/` (one
 element per thread), on an Arc A770 (16 GB) with icpx 2026.1, compute

@@ -255,7 +255,7 @@ if(BK_ENABLE_TINYTC)
     endif()
     # tinytc installs its own config packages (tinytc_sycl pulls in tinytc,
     # tinytc_ze and tinytc_cl).  The install is found from -DTINYTC_ROOT, else
-    # $TINYTC_ROOT (set by tinytc's setvars.sh), else CMAKE_PREFIX_PATH.
+    # $TINYTC_ROOT (e.g. from scripts/tinytc_env.sh), else CMAKE_PREFIX_PATH.
     if(NOT TINYTC_ROOT AND DEFINED ENV{TINYTC_ROOT})
         set(TINYTC_ROOT "$ENV{TINYTC_ROOT}")
     endif()
@@ -265,7 +265,7 @@ if(BK_ENABLE_TINYTC)
     find_package(tinytc_sycl CONFIG)
     if(NOT tinytc_sycl_FOUND)
         message(FATAL_ERROR "BK_ENABLE_TINYTC: tinytc_sycl not found (TINYTC_ROOT=${TINYTC_ROOT}); "
-                            "source <tinytc>/setvars.sh, pass -DTINYTC_ROOT=<tinytc install>, "
+                            "pass -DTINYTC_ROOT=<tinytc install>, set TINYTC_ROOT (scripts/tinytc_env.sh), "
                             "or set BK_ENABLE_TINYTC=OFF")
     endif()
     message(STATUS "tinytc: ${tinytc_sycl_DIR}")
