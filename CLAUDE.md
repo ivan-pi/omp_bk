@@ -9,6 +9,8 @@ by `make -C cm`, not CMake; see `cm/README.md`), `amx/`
 shared across approaches), `scripts/` (Intel GPU build, run, `study/`,
 `plot/`, `profile/`) and `results/<machine>/`. File names carry the kernel
 (`bk1_*`, `bk5_*`).
+For tinytc kernels and host code, use the `tinytc-programming` skill
+(`.claude/skills/`, tinytc 0.5, with notes from the BK3 work on the A770).
 
 The BK1 kernel lives in `openmp/bk1_sumfact.h`, generic in the arithmetic type
 (float or double); `BK1.cpp` runs it in float. `BK1_ff.cpp` holds its own
