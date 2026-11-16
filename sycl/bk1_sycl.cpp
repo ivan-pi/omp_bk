@@ -821,11 +821,16 @@ const variant variants[] = {
     {"inlFP_f256", &launch_opt<bk1gpu::cap_batch(NQ, bk1gpu::fill_batch(NQ, 256)), 256, true, false>},
     {"inlF_f512", &launch_opt<bk1gpu::cap_batch(NQ, bk1gpu::fill_batch(NQ, 512)), 512, false, false>},
     {"inlFP_f512", &launch_opt<bk1gpu::cap_batch(NQ, bk1gpu::fill_batch(NQ, 512)), 512, true, false>},
+#ifndef BK_NO_BASELINES
+    // one element per work-item: the naive baselines, 100x slower than the
+    // batched kernels on the A770 and long enough at high order to trip a
+    // small GPU's hang check (UHD 750, p = 6); -DBK_NO_BASELINES leaves them out
     {"elem", &launch_elem<0>},
     {"elem_wg128", &launch_elem<128>},
     {"elem_sg16", &launch_elem<128, 16>},
     {"elem_sg32", &launch_elem<128, 32>},
     {"elem_v4", &launch_elem<128, 0, true>},
+#endif
     {"inl_b32", &launch_spec<bk1gpu::cap_batch(NQ, 32), NQ>},
     {"inl_b64", &launch_spec<bk1gpu::cap_batch(NQ, 64), NQ>},
 };
@@ -879,7 +884,10 @@ int main(int argc, char** argv)
             continue;
         }
         q.memset(d.out, 0, out.size() * sizeof(float)).wait();
-        const bk::launch_times t = bk::time_launches(ntests, [&] { return v.fn(q, d); }, profile);
+        bk::launch_times t{};
+        if (!bk::time_variant(v.name, ntests, [&] { return v.fn(q, d); }, t, profile)) {
+            continue;
+        }
         q.copy(d.out, out.data(), out.size()).wait();
         const double relerr = bk::rel_maxdiff(out, ref, big);
         std::printf("%-14s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %.1e%s\n",

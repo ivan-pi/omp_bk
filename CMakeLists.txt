@@ -20,6 +20,7 @@
 #     BK_ENABLE_SYCL (ON):    SYCL
 #       bk{1,3,5}_sycl_<p>                     sycl/ (-DNQ=nq; bk1 and bk5 _jit: JIT-compiled,
 #                                              for specialization constants)
+#       stream_sycl                            roofline/ bandwidth test
 #     BK_ENABLE_TINYTC (OFF): bk_tinytc        tinytc/ (needs tinytc_sycl, TINYTC_ROOT,
 #                                              and BK_ENABLE_SYCL)
 #   named by the polynomial order p (BK1, BK3: nq = p + 2, BK5: nq = p + 1),
@@ -55,6 +56,7 @@ set(BK_ORDERS_GPU "1;2;3;4;5;6;7;8" CACHE STRING "orders p of the GPU variant pr
 option(BK_ENABLE_OPENMP "OpenMP: threads in the host tree, offload programs in the GPU tree" ON)
 option(BK_ENABLE_SYCL "SYCL programs (GPU tree)" ON)
 option(BK_ENABLE_TINYTC "bk_tinytc (GPU tree; needs tinytc and BK_ENABLE_SYCL)" OFF)
+option(BK_SYCL_BASELINES "SYCL: build the naive one-element-per-work-item variants of bk1_sycl (elem*), which take most of its device link; OFF: -DBK_NO_BASELINES" OFF)
 option(BK_GPU_IN_ALL "put the per-order GPU programs in `all` (each takes minutes to build)" ON)
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
@@ -167,6 +169,9 @@ function(bk_gpu_target name api)
         target_compile_options(${name} PRIVATE -fsycl -fiopenmp)
         target_link_options(${name} PRIVATE -fsycl -fiopenmp)
     endif()
+    if(NOT BK_SYCL_BASELINES AND api MATCHES "^sycl")
+        target_compile_definitions(${name} PRIVATE BK_NO_BASELINES)
+    endif()
     target_compile_options(${name} PRIVATE ${bk_extra})
     target_link_options(${name} PRIVATE ${bk_extra})
     if(BK_GPU_JOBS GREATER 0)
@@ -236,6 +241,10 @@ if(BK_ENABLE_SYCL)
     bk_gpu_orders(bk3_sycl sycl/bk3_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
     bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl_jit NQ 2 _jit ${BK_ORDERS_GPU})
     bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl_jit NQ 1 _jit ${BK_ORDERS_GPU})
+
+    add_executable(stream_sycl roofline/stream_sycl.cpp)
+    bk_gpu_target(stream_sycl sycl)
+    add_dependencies(all_sycl stream_sycl)
 endif()
 
 # tinytc: the kernels (tinytc/ir/*.ir) are compiled at run time, so the
