@@ -11,10 +11,10 @@
 #     one binary per order, ahead-of-time compiled for BK_GPU_DEVICE, none of
 #     them in `all` (each takes minutes and gigabytes to build):
 #       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<p>    openmp/ drivers, OpenMP offload (-DBK_ORDER=p)
-#       bk1_offload_<p> bk5_offload_<p>        openmp/offload/ kernel variants (-DNQ=nq)
-#       bk1_sycl_<p> bk5_sycl_<p>              sycl/ (-DNQ=nq; _jit: JIT-compiled, for
-#                                              specialization constants)
-#     named by the polynomial order p (BK1: nq = p + 2, BK5: nq = p + 1),
+#       bk{1,3,5}_offload_<p>                  openmp/offload/ kernel variants (-DNQ=nq)
+#       bk{1,3,5}_sycl_<p>                     sycl/ (-DNQ=nq; bk1 and bk5 _jit: JIT-compiled,
+#                                              for specialization constants)
+#     named by the polynomial order p (BK1, BK3: nq = p + 2, BK5: nq = p + 1),
 #       all_<prog>                             every order of <prog>
 #     and in `all`: stream_omp (OpenMP offload) and bk_tinytc (if tinytc is found).
 #
@@ -37,7 +37,7 @@ set(BK_GPU_JOBS 1 CACHE STRING "GPU compiles and links run at the same time (Nin
 set(BK_EXTRA_FLAGS "" CACHE STRING "extra compile and link flags of the GPU targets")
 set(BK_ORDERS_P "1;2;3;4;5;6;7;8" CACHE STRING "orders p of BK1_<p>, BK3_<p>, BK1_ff_<p>")
 set(BK_ORDERS_BK5 "1;2;3;4;5;6;7" CACHE STRING "orders p of BK5_<p>")
-set(BK_ORDERS_GPU "1;2;3;4;5;6;7;8" CACHE STRING "orders p of bk1_offload_<p>, bk5_offload_<p>, bk1_sycl_<p>, bk5_sycl_<p>")
+set(BK_ORDERS_GPU "1;2;3;4;5;6;7;8" CACHE STRING "orders p of the GPU variant programs (bk1_offload_<p>, bk3_sycl_<p>, ...)")
 set(BK_TINYTC_ROOT "/opt/tinytc/latest" CACHE PATH "tinytc install searched for bk_tinytc")
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
@@ -151,8 +151,10 @@ bk_gpu_orders(BK1_ff openmp/BK1_ff.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
 bk_gpu_orders(BK5 openmp/BK5.cpp omp BK_ORDER 0 "" ${BK_ORDERS_BK5})
 bk_gpu_orders(bk1_offload openmp/offload/bk1_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})
 bk_gpu_orders(bk5_offload openmp/offload/bk5_offload.cpp omp NQ 1 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk3_offload openmp/offload/bk3_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})
 bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
 bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl NQ 1 "" ${BK_ORDERS_GPU})
+bk_gpu_orders(bk3_sycl sycl/bk3_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
 bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl_jit NQ 2 _jit ${BK_ORDERS_GPU})
 bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl_jit NQ 1 _jit ${BK_ORDERS_GPU})
 

@@ -4,7 +4,8 @@
 #
 # usage:  scripts/build.sh <target>...              -> $BUILD_DIR/<target>
 #   BK1_<p> BK3_<p> BK1_ff_<p> BK5_<p>      openmp/ drivers, one order each
-#   bk1_offload_<p> bk5_offload_<p>         openmp/offload/ kernel variants
+#   bk1_offload_<p> bk3_offload_<p> bk5_offload_<p>   openmp/offload/ kernel variants
+#   bk3_sycl_<p>                            sycl/ BK3 kernel variants
 #   bk1_sycl_<p> bk5_sycl_<p>               sycl/ (bk1_sycl_<p>_jit: built for
 #                                           JIT compilation, which the
 #                                           specialization-constant variant

@@ -8,7 +8,9 @@
 // Kernels: read (sum reduction, 1 read), write (fill, 1 write), copy (1R+1W),
 // scale (1R+1W), add (2R+1W), triad (2R+1W) and bk1p2 (BK1's traffic at
 // p = 2 with one element per thread: 27 values of in and 64 of JxW read,
-// 27 of out written per element, each thread on its own contiguous block).
+// 27 of out written per element, each thread on its own contiguous block)
+// and read9 (BK3's mix, 9 reads per write: 90% of the bytes read, as in + G
+// against out; 256 consecutive work-items read one contiguous block).
 // The last line checks the read kernel's sum.  Build with the host preset
 // (host fallback) or scripts/build.sh stream_omp (Intel GPU).
 
@@ -96,6 +98,24 @@ void k_bk1p2(float* a, float* b, float* c, const std::size_t n, float*)
     }
 }
 
+// floats read9 writes: blocks of 256, nine reads each
+std::size_t read9_written(const std::size_t n) { return n / (9 * 256) * 256; }
+
+void k_read9(float* a, float*, float* c, const std::size_t n, float*)
+{
+    const std::size_t nw = read9_written(n);
+    #pragma omp target teams distribute parallel for is_device_ptr(a, c)
+    for (std::size_t i = 0; i < nw; ++i) {
+        const std::size_t blk = i / 256;
+        const std::size_t l = i % 256;
+        float s = 0.0f;
+        for (int j = 0; j < 9; ++j) {
+            s += a[(blk * 9 + j) * 256 + l];
+        }
+        c[i] = s;
+    }
+}
+
 double time_min(const int ntests, const kernel_fn f,
                 float* a, float* b, float* c, const std::size_t n, float* sum)
 {
@@ -156,6 +176,7 @@ int main(int argc, char** argv)
     report("add",   3 * fb * n, time_min(ntests, k_add,   a, b, c, n, &sum));
     report("triad", 3 * fb * n, time_min(ntests, k_triad, a, b, c, n, &sum));
     report("bk1p2", fb * ne * (27 + 64 + 27), time_min(ntests, k_bk1p2, a, b, c, n, &sum));
+    report("read9", fb * read9_written(n) * 10, time_min(ntests, k_read9, a, b, c, n, &sum));
 
     // after copy, scale, add and the triads: a = b + 3 c with b = 3 c, c = a + b
     k_read(a, b, c, n, &sum);

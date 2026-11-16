@@ -1,0 +1,23 @@
+BK3 on the Arc A770: best variant per API and order, median host GDoF/s of 3 runs at
+~2e7 DoFs (scripts/study/bk3_pick.sh; icpx 2026.1, float, G factor-major, every result
+checked against the double-precision reference).  GB/s counts in + out + G.  Roofs from
+stream_omp in the same run: copy and read9 (90% reads, BK3's mix).  Separate runs of
+the same binary differ by up to ~8%.
+
+roofs: STREAM copy 454 GB/s, read9 (90% reads) 426 GB/s
+omp   p=1 cu_b2          4.48 GDoF/s    398 GB/s  ( 88% of copy,  93% of read9)
+omp   p=2 sf_b1          6.08 GDoF/s    394 GB/s  ( 87% of copy,  93% of read9)
+omp   p=3 sf_b1r         6.84 GDoF/s    375 GB/s  ( 83% of copy,  88% of read9)
+omp   p=4 cu_b2r         7.60 GDoF/s    376 GB/s  ( 83% of copy,  88% of read9)
+omp   p=5 sf_b1r         7.36 GDoF/s    339 GB/s  ( 75% of copy,  80% of read9)
+omp   p=6 sf_b1r         8.90 GDoF/s    390 GB/s  ( 86% of copy,  91% of read9)
+omp   p=7 sf_b1r         7.24 GDoF/s    305 GB/s  ( 67% of copy,  72% of read9)
+omp   p=8 sf_b1          7.66 GDoF/s    314 GB/s  ( 69% of copy,  74% of read9)
+sycl  p=1 sf_b4c         4.03 GDoF/s    359 GB/s  ( 79% of copy,  84% of read9)
+sycl  p=2 sf_b4cr_sg8    6.30 GDoF/s    409 GB/s  ( 90% of copy,  96% of read9)
+sycl  p=3 sf_b1cpr_sg8   6.52 GDoF/s    358 GB/s  ( 79% of copy,  84% of read9)
+sycl  p=4 sf_b1cr_sg8    7.43 GDoF/s    367 GB/s  ( 81% of copy,  86% of read9)
+sycl  p=5 sf_b1cr_sg8    7.40 GDoF/s    341 GB/s  ( 75% of copy,  80% of read9)
+sycl  p=6 sf_b4cr_sg8    8.72 GDoF/s    382 GB/s  ( 84% of copy,  90% of read9)
+sycl  p=7 sf_b1cr_sg8    7.51 GDoF/s    317 GB/s  ( 70% of copy,  74% of read9)
+sycl  p=8 sf_b1cr_sg8    8.25 GDoF/s    338 GB/s  ( 74% of copy,  79% of read9)

@@ -1,6 +1,6 @@
 // bk_harness.h -- host side of the GPU kernel harnesses (openmp/offload/,
-// sycl/, tinytc/): kernel selection, the double-precision references (host
-// OpenMP), the BK1 and BK5 data layouts and the accuracy check.  No SYCL.
+// sycl/, tinytc/): kernel selection, the double-precision references of BK1,
+// BK3 and BK5 (host OpenMP), the data layouts and the accuracy check.  No SYCL.
 
 #ifndef BK_HARNESS_H
 #define BK_HARNESS_H
@@ -17,22 +17,48 @@
 
 namespace bk {
 
-// BK_KERNEL="a b c": run only the variants named (unset or empty: all).
+// BK_KERNEL="a b -c": run the variants named, all if none is named, never
+// those named with a leading "-" (unset or empty: all).
 inline bool selected(const char* name)
 {
     static const std::string list = get_env("BK_KERNEL").value_or("");
-    if (list.empty()) {
-        return true;
-    }
+    bool any = false;
+    bool named = false;
     std::istringstream ss(list);
     std::string w;
     while (ss >> w) {
-        if (w == name) {
-            return true;
+        if (w[0] == '-') {
+            if (w.compare(1, std::string::npos, name) == 0) {
+                return false;
+            }
+        } else {
+            any = true;
+            named = named || (w == name);
         }
     }
-    return false;
+    return !any || named;
 }
+
+// The first earlier entry of a variant table with the same kernel as entry
+// v (a batch clamped to an earlier one's) that is selected, else nullptr.
+template <typename V, std::size_t N>
+const V* same_kernel(const V (&table)[N], const std::size_t v)
+{
+    for (std::size_t u = 0; u < v; ++u) {
+        if (table[u].fn == table[v].fn && selected(table[u].name)) {
+            return &table[u];
+        }
+    }
+    return nullptr;
+}
+
+// The references and the check run one element (index) per iteration of an
+// OpenMP parallel for (BK_PARALLEL=0: one thread), with an element's work
+// arrays on the stack, at most ref_max_nq points per direction.  Each element
+// is summed in the same order whatever the thread count.
+constexpr int ref_max_nq = 12;
+
+inline bool ref_parallel() { return env_int("BK_PARALLEL", 1) != 0; }
 
 // Largest |out - ref| relative to the largest |ref|: float rounding gives
 // ~1e-7, an indexing error ~1.
@@ -48,6 +74,8 @@ inline double max_abs(const std::vector<double>& ref)
 inline double rel_maxdiff(const std::vector<float>& out, const std::vector<double>& ref, const double big)
 {
     double diff = 0.0;
+    [[maybe_unused]] const bool parallel = ref_parallel();
+    #pragma omp parallel for if(parallel) reduction(max: diff)
     for (std::size_t x = 0; x < out.size(); ++x) {
         diff = std::max(diff, std::fabs(double(out[x]) - ref[x]));
     }
@@ -73,96 +101,106 @@ inline std::vector<float> transpose_jxw(const std::vector<float>& JxW, const std
     return JxW_t;
 }
 
-// The references run one element per iteration of an OpenMP parallel for
-// (BK_PARALLEL=0: one thread), with the work arrays of an element on the
-// stack, at most ref_max_nq points per direction.  Each element is summed in
-// the same order whatever the thread count.
-constexpr int ref_max_nq = 12;
+// BK1 and BK3, one element in double: u(p,q,r) = sum in(i,j,k) B(i,p)
+// B(j,q) B(k,r) through a(p,j,k) and b(p,q,k)
+inline void ref_interp(const int nq, const std::vector<float>& basis, const float* in, double* a, double* b,
+                       double* u)
+{
+    const int nm = nq - 1;
+    for (int p = 0; p < nq; ++p) {
+        for (int j = 0; j < nm; ++j) {
+            for (int k = 0; k < nm; ++k) {
+                double s = 0;
+                for (int i = 0; i < nm; ++i) {
+                    s += double(in[(i * nm + j) * nm + k]) * basis[i * nq + p];
+                }
+                a[(p * nm + j) * nm + k] = s;
+            }
+        }
+    }
+    for (int p = 0; p < nq; ++p) {
+        for (int q = 0; q < nq; ++q) {
+            for (int k = 0; k < nm; ++k) {
+                double s = 0;
+                for (int j = 0; j < nm; ++j) {
+                    s += a[(p * nm + j) * nm + k] * basis[j * nq + q];
+                }
+                b[(p * nq + q) * nm + k] = s;
+            }
+        }
+    }
+    for (int p = 0; p < nq; ++p) {
+        for (int q = 0; q < nq; ++q) {
+            for (int r = 0; r < nq; ++r) {
+                double s = 0;
+                for (int k = 0; k < nm; ++k) {
+                    s += b[(p * nq + q) * nm + k] * basis[k * nq + r];
+                }
+                u[(p * nq + q) * nq + r] = s;
+            }
+        }
+    }
+}
 
-inline bool ref_parallel() { return env_int("BK_PARALLEL", 1) != 0; }
+// the transpose: out(i,j,k) = sum u(p,q,r) B(i,p) B(j,q) B(k,r)
+inline void ref_interp_back(const int nq, const std::vector<float>& basis, const double* u, double* a, double* b,
+                            double* out)
+{
+    const int nm = nq - 1;
+    for (int p = 0; p < nq; ++p) {
+        for (int q = 0; q < nq; ++q) {
+            for (int k = 0; k < nm; ++k) {
+                double s = 0;
+                for (int r = 0; r < nq; ++r) {
+                    s += u[(p * nq + q) * nq + r] * basis[k * nq + r];
+                }
+                b[(p * nq + q) * nm + k] = s;
+            }
+        }
+    }
+    for (int p = 0; p < nq; ++p) {
+        for (int j = 0; j < nm; ++j) {
+            for (int k = 0; k < nm; ++k) {
+                double s = 0;
+                for (int q = 0; q < nq; ++q) {
+                    s += b[(p * nq + q) * nm + k] * basis[j * nq + q];
+                }
+                a[(p * nm + j) * nm + k] = s;
+            }
+        }
+    }
+    for (int i = 0; i < nm; ++i) {
+        for (int j = 0; j < nm; ++j) {
+            for (int k = 0; k < nm; ++k) {
+                double s = 0;
+                for (int p = 0; p < nq; ++p) {
+                    s += a[(p * nm + j) * nm + k] * basis[i * nq + p];
+                }
+                out[(i * nm + j) * nm + k] = s;
+            }
+        }
+    }
+}
 
 // BK1 in double: in(e, i, j, k), basis(i, p), JxW(e, p, q, r) -> out(e, i, j, k).
 inline void reference_bk1(const int nq, const std::size_t nelmt, const std::vector<float>& basis,
                           const std::vector<float>& JxW, const std::vector<float>& in, std::vector<double>& out)
 {
     assert(nq <= ref_max_nq);
-    const int nm = nq - 1;
+    const int nm3 = (nq - 1) * (nq - 1) * (nq - 1);
+    const int nq3 = nq * nq * nq;
+    constexpr int box = ref_max_nq * ref_max_nq * ref_max_nq;
     [[maybe_unused]] const bool parallel = ref_parallel();
     #pragma omp parallel for if(parallel)
     for (std::size_t e = 0; e < nelmt; ++e) {
-        double w0[ref_max_nq * ref_max_nq * ref_max_nq];
-        double w1[ref_max_nq * ref_max_nq * ref_max_nq];
-        double w2[ref_max_nq * ref_max_nq * ref_max_nq];
-        const float* ei = in.data() + e * nm * nm * nm;
-        const float* ej = JxW.data() + e * nq * nq * nq;
-        // forward: w0(p,j,k), w1(p,q,k), w2(p,q,r) * JxW(p,q,r)
-        for (int p = 0; p < nq; ++p) {
-            for (int j = 0; j < nm; ++j) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int i = 0; i < nm; ++i) {
-                        s += double(ei[(i * nm + j) * nm + k]) * basis[i * nq + p];
-                    }
-                    w0[(p * nm + j) * nm + k] = s;
-                }
-            }
+        double a[box];
+        double b[box];
+        double u[box];
+        ref_interp(nq, basis, in.data() + e * nm3, a, b, u);
+        for (int x = 0; x < nq3; ++x) {
+            u[x] *= JxW[e * nq3 + x];
         }
-        for (int p = 0; p < nq; ++p) {
-            for (int q = 0; q < nq; ++q) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int j = 0; j < nm; ++j) {
-                        s += w0[(p * nm + j) * nm + k] * basis[j * nq + q];
-                    }
-                    w1[(p * nq + q) * nm + k] = s;
-                }
-            }
-        }
-        for (int p = 0; p < nq; ++p) {
-            for (int q = 0; q < nq; ++q) {
-                for (int r = 0; r < nq; ++r) {
-                    double s = 0;
-                    for (int k = 0; k < nm; ++k) {
-                        s += w1[(p * nq + q) * nm + k] * basis[k * nq + r];
-                    }
-                    w2[(p * nq + q) * nq + r] = s * ej[(p * nq + q) * nq + r];
-                }
-            }
-        }
-        // backward: w1(p,q,k), w0(p,j,k), out(i,j,k)
-        for (int p = 0; p < nq; ++p) {
-            for (int q = 0; q < nq; ++q) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int r = 0; r < nq; ++r) {
-                        s += w2[(p * nq + q) * nq + r] * basis[k * nq + r];
-                    }
-                    w1[(p * nq + q) * nm + k] = s;
-                }
-            }
-        }
-        for (int p = 0; p < nq; ++p) {
-            for (int j = 0; j < nm; ++j) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int q = 0; q < nq; ++q) {
-                        s += w1[(p * nq + q) * nm + k] * basis[j * nq + q];
-                    }
-                    w0[(p * nm + j) * nm + k] = s;
-                }
-            }
-        }
-        for (int i = 0; i < nm; ++i) {
-            for (int j = 0; j < nm; ++j) {
-                for (int k = 0; k < nm; ++k) {
-                    double s = 0;
-                    for (int p = 0; p < nq; ++p) {
-                        s += w0[(p * nm + j) * nm + k] * basis[i * nq + p];
-                    }
-                    out[e * nm * nm * nm + (i * nm + j) * nm + k] = s;
-                }
-            }
-        }
+        ref_interp_back(nq, basis, u, a, b, out.data() + e * nm3);
     }
 }
 
@@ -251,6 +289,67 @@ inline void reference_bk5(const int nq, const std::size_t nelmt, const std::vect
                 }
             }
         }
+    }
+}
+
+// BK3 in double: in(e, i, j, k), basis(i, p), D(n, p), G(e, f, p, q, r)
+// (six symmetric factors rr rs rt ss st tt, factor-major) -> out(e, i, j, k):
+// interpolate, derivatives with D(n, p), fluxes with G, transposed
+// derivatives with D(p, n), interpolate back (openmp/bk3_sumfact.h).
+inline void reference_bk3(const int nq, const std::size_t nelmt, const std::vector<float>& basis,
+                          const std::vector<float>& D, const std::vector<float>& G,
+                          const std::vector<float>& in, std::vector<double>& out)
+{
+    assert(nq <= ref_max_nq);
+    const int nm3 = (nq - 1) * (nq - 1) * (nq - 1);
+    const int nq3 = nq * nq * nq;
+    constexpr int box = ref_max_nq * ref_max_nq * ref_max_nq;
+    [[maybe_unused]] const bool parallel = ref_parallel();
+    #pragma omp parallel for if(parallel)
+    for (std::size_t e = 0; e < nelmt; ++e) {
+        double a[box];
+        double b[box];
+        double u[box];
+        double fr[box];
+        double fs[box];
+        double ft[box];
+        const float* eG = G.data() + e * 6 * nq3;
+        const auto Dm = [&](const int n, const int p) { return double(D[n * nq + p]); };
+        ref_interp(nq, basis, in.data() + e * nm3, a, b, u);
+        for (int p = 0; p < nq; ++p) {
+            for (int q = 0; q < nq; ++q) {
+                for (int r = 0; r < nq; ++r) {
+                    double qr = 0;
+                    double qs = 0;
+                    double qt = 0;
+                    for (int n = 0; n < nq; ++n) {
+                        qr += u[(n * nq + q) * nq + r] * Dm(n, p);
+                        qs += u[(p * nq + n) * nq + r] * Dm(n, q);
+                        qt += u[(p * nq + q) * nq + n] * Dm(n, r);
+                    }
+                    const int x = (p * nq + q) * nq + r;
+                    const auto g = [&](const int f) { return double(eG[f * nq3 + x]); };
+                    fr[x] = g(0) * qr + g(1) * qs + g(2) * qt;
+                    fs[x] = g(1) * qr + g(3) * qs + g(4) * qt;
+                    ft[x] = g(2) * qr + g(4) * qs + g(5) * qt;
+                }
+            }
+        }
+        // transposed derivatives -> u
+        for (int p = 0; p < nq; ++p) {
+            for (int q = 0; q < nq; ++q) {
+                for (int r = 0; r < nq; ++r) {
+                    double s = 0;
+                    for (int n = 0; n < nq; ++n) {
+                        s += fr[(n * nq + q) * nq + r] * Dm(p, n);
+                        s += fs[(p * nq + n) * nq + r] * Dm(q, n);
+                        s += ft[(p * nq + q) * nq + n] * Dm(r, n);
+                    }
+                    u[(p * nq + q) * nq + r] = s;
+                }
+            }
+        }
+        ref_interp_back(nq, basis, u, a, b, out.data() + e * nm3);
     }
 }
 
