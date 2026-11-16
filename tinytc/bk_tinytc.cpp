@@ -1,34 +1,37 @@
-// bk_tinytc.cpp -- BK1 and BK5 kernels written for the Intel Tiny Tensor
+// bk_tinytc.cpp -- BK1, BK3 and BK5 kernels written for the Intel Tiny Tensor
 // Compiler (tinytc), run on the data and checked against the
-// double-precision references of this repository's BK1 and BK5 harnesses
+// double-precision references of this repository's harness
 // (include/bk_harness.h).
 //
-// TT_LAYOUT=ec (default): tinytc/ir/bk1_ec.ir and bk5_ec.ir, the kernels
-// rewritten for our element-contiguous arrays, which they take unchanged.
+// TT_LAYOUT=ec (default): tinytc/ir/bk1_ec.ir, bk3_ec.ir and bk5_ec.ir, the
+// kernels for our element-contiguous arrays, which they take unchanged.
 // TT_LAYOUT=blk: the original kernels, tinytc/ir/bk1.ir and bk5_blk.ir
-// (bk5.ir with its global-memory race fixed), on our arrays converted to
-// their blocked layout (below) and the result converted back.
+// (bk5.ir with its global-memory race fixed), and bk3_blk.ir, on our arrays
+// converted to their blocked layout (below) and the result converted back.
 // TT_LAYOUT=orig: as blk with the unmodified bk5.ir.
 //
 //   scripts/build.sh bk_tinytc              (-> build/a770/bk_tinytc)
-//   build/a770/bk_tinytc <1|5> <p> [nelmt] [ntests]     (BK1: nq = p + 2, BK5: nq = p + 1)
+//   build/a770/bk_tinytc <1|3|5> <p> [nelmt] [ntests]   (BK1, BK3: nq = p + 2, BK5: nq = p + 1)
 //   env: TT_LAYOUT (ec or blk), TT_IR_DIR (default: tinytc/ir of the source tree),
 //        TT_QPAD (row stride of the basis, default: the next power of two >= nq),
 //        TT_FEATURES (tinytc core feature flags, e.g. 0 for none),
 //        TT_SPV (write the generated SPIR-V to this file),
 //        TT_B (elements per block, default 16), TT_WGS (work-group size,
-//        default: the table of the original driver)
+//        default: the table of the original driver), TT_SG (BK3: sub-group
+//        size = rows of a cooperative-matrix tile, 8 or 16 (default); TT_B
+//        a multiple of it)
 //
 // Conventions.  Ours: element-contiguous in/out (BK1 in(e,i,j,k) of nm^3
 // modes, BK5 in(e,i,j,k) of nq^3 points), BK1 JxW(e,p,q,r), BK5 G6
 // interleaved G(e,i,j,f,k), BK1 basis(i,p) = cos(i nq + p), BK5 D(i,n) =
-// cos(i nq + n).  tinytc's kernels take blocks of B elements with the
+// cos(i nq + n), BK3 as BK1 plus D(n,p) = cos(n nq + p) and G6 factor-major
+// G(e,f,p,q,r).  tinytc's kernels take blocks of B elements with the
 // element index innermost, in(blk,i,j,k,e) and G(blk,i,j,f,k,e), and the
 // basis as basis(a,i) / dbasis(i,n) at row stride Q_pad (the next power of
 // two >= nq).  The driver converts our arrays to that layout, runs the
 // kernel, converts out back and compares with the reference.  nelmt is
-// rounded down to a multiple of B.  DoFs: BK1 nelmt nm^3, BK5 nelmt nq^3;
-// GB/s counts in + out + JxW (BK1) or in + out + G6 (BK5).
+// rounded down to a multiple of B.  DoFs: BK1, BK3 nelmt nm^3, BK5 nelmt nq^3;
+// GB/s counts in + out + JxW (BK1) or in + out + G6 (BK3, BK5).
 
 #include <sycl/sycl.hpp>
 #include <tinytc/tinytc.hpp>
@@ -85,7 +88,7 @@ int default_wgs(const int nq)
 }
 
 sycl::kernel make_kernel(sycl::queue& q, const std::string& path, const char* name, const int nq, const int nq_pad,
-                         const int B, const int wgs)
+                         const int B, const int sg, const int wgs)
 {
     auto info = tinytc::create_core_info(q.get_device());
     // TT_FEATURES=n: the core feature flags requested (default: tinytc's choice)
@@ -101,7 +104,8 @@ sycl::kernel make_kernel(sycl::queue& q, const std::string& path, const char* na
     }
     const std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     std::ostringstream code;
-    code << "$Q = " << nq << "\n$Q_pad = " << nq_pad << "\n$B = " << B << "\n$wgs = " << wgs << "\n" << body;
+    code << "$Q = " << nq << "\n$Q_pad = " << nq_pad << "\n$B = " << B << "\n$M = " << sg << "\n$wgs = " << wgs
+         << "\n" << body;
     auto prog = tinytc::parse_string(code.str(), ctx.get());
     auto bin = tinytc::compile_to_spirv_and_assemble(prog.get(), info.get());
     std::fprintf(stderr, "tinytc: core features of the device %u, of the binary %u\n",
@@ -154,13 +158,14 @@ T* to_device(sycl::queue& q, const std::vector<T>& h)
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <1|5> <p> [nelmt] [ntests]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <1|3|5> <p> [nelmt] [ntests]\n", argv[0]);
         return 2;
     }
     const int bk = std::atoi(argv[1]);
     const int p = std::atoi(argv[2]);
-    const int nq = p + ((bk == 1) ? 2 : 1);
+    const int nq = p + ((bk == 5) ? 1 : 2);
     const int B = bk::env_int("TT_B", 16);
+    const int sg = bk::env_int("TT_SG", 16);
     std::size_t nelmt = (argc > 3) ? std::size_t(std::atoll(argv[3])) : std::size_t(1) << 17;
     nelmt = std::max<std::size_t>(B, nelmt / B * B);
     const int ntests = (argc > 4) ? std::atoi(argv[4]) : 20;
@@ -172,31 +177,59 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "TT_LAYOUT=%s: ec, blk or orig\n", layout.c_str());
         return 2;
     }
-    if (!blocked && B != 16) {
+    if (!blocked && B != 16 && bk != 3) {
         // the _ec kernels map a 16-row tile to one spatial pair of the block
         std::fprintf(stderr, "TT_LAYOUT=ec needs TT_B=16\n");
         return 2;
     }
     const int pad = bk::env_int("TT_QPAD", pad_pow2(nq));
     const int nm = nq - 1;
-    if (bk != 1 && bk != 5) {
-        std::fprintf(stderr, "BK%d: only 1 and 5\n", bk);
+    if (bk != 1 && bk != 3 && bk != 5) {
+        std::fprintf(stderr, "BK%d: only 1, 3 and 5\n", bk);
         return 2;
+    }
+    if (bk == 3) {
+        if (layout == "orig" || B % sg != 0) {
+            std::fprintf(stderr, "BK3: TT_LAYOUT ec or blk, TT_B a multiple of TT_SG\n");
+            return 2;
+        }
+        // U, R and S of B nq^3 floats each in the 64 KiB of local memory
+        if (3 * B * nq * nq * nq * int(sizeof(float)) > 65536) {
+            std::fprintf(stderr, "BK3 tinytc: 3 B nq^3 floats (B = %d, nq = %d) exceed 64 KiB of local memory\n", B, nq);
+            return 2;
+        }
     }
 
     sycl::queue q{sycl::gpu_selector_v,
                   sycl::property_list{sycl::property::queue::in_order{}, sycl::property::queue::enable_profiling{}}};
-    const int npts = (bk == 1) ? nm * nm * nm : nq * nq * nq;   // in/out values per element
-    std::printf("BK%d tinytc (%s): p = %d, nq = %d, Q_pad = %d, B = %d, wgs = %d, nelmt = %zu (%zu DoFs), ntests = %d\n",
-                bk, layout.c_str(), p, nq, pad, B, wgs, nelmt, nelmt * npts, ntests);
+    const int npts = (bk == 5) ? nq * nq * nq : nm * nm * nm;   // in/out values per element
+    const int ngeo = nq * nq * nq * ((bk == 1) ? 1 : 6);         // JxW or G6 per element
+    std::printf("BK%d tinytc (%s): p = %d, nq = %d, Q_pad = %d, B = %d, sg = %d, wgs = %d, nelmt = %zu (%zu DoFs), "
+                "ntests = %d\n",
+                bk, layout.c_str(), p, nq, pad, B, sg, wgs, nelmt, nelmt * npts, ntests);
 
     // our data and reference
     std::vector<float> in(nelmt * npts);
-    std::vector<float> geo(nelmt * nq * nq * nq * ((bk == 1) ? 1 : 6));   // JxW or G6 interleaved
+    std::vector<float> geo(nelmt * ngeo);   // JxW, G6 factor-major (BK3) or interleaved (BK5)
     bk::fill_random_test_data(in, geo);
     std::vector<double> ref(in.size());
     std::vector<float> basis_t(pad * pad, 0.0f);   // tinytc's padded basis
-    if (bk == 1) {
+    std::vector<float> dbasis_t(pad * pad, 0.0f);  // BK3: and derivative
+    if (bk == 3) {
+        const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);
+        const std::vector<float> D = bk::make_test_basis<float>(nq, nq);
+        for (int i = 0; i < nm; ++i) {
+            for (int a = 0; a < nq; ++a) {
+                basis_t[a * pad + i] = basis[i * nq + a];   // Bm(i, a) = B(i, a)
+            }
+        }
+        for (int n = 0; n < nq; ++n) {
+            for (int a = 0; a < nq; ++a) {
+                dbasis_t[a * pad + n] = D[n * nq + a];   // Dm(n, a) = D(n, a)
+            }
+        }
+        bk::reference_bk3(nq, nelmt, basis, D, geo, in, ref);
+    } else if (bk == 1) {
         const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);
         for (int i = 0; i < nm; ++i) {
             for (int a = 0; a < nq; ++a) {
@@ -216,25 +249,25 @@ int main(int argc, char** argv)
     const double big = bk::max_abs(ref);
 
     // blk: tinytc's layout, blocks of B elements, element innermost
-    const int ngeo = nq * nq * nq * ((bk == 1) ? 1 : 6);
     float* d_basis = to_device(q, basis_t);
+    float* d_dbasis = to_device(q, dbasis_t);
     float* d_geo = blocked ? to_device(q, to_blocks(geo, nelmt, ngeo, B)) : to_device(q, geo);
     float* d_in = blocked ? to_device(q, to_blocks(in, nelmt, npts, B)) : to_device(q, in);
     float* d_out = sycl::malloc_device<float>(in.size(), q);
     q.memset(d_out, 0, in.size() * sizeof(float)).wait();
     geo = std::vector<float>();
 
-    std::string ir = (bk == 1) ? "/bk1" : "/bk5";
+    std::string ir = "/bk" + std::to_string(bk);
     if (layout == "ec") {
         ir += "_ec.ir";
-    } else if (layout == "blk" && bk == 5) {
+    } else if (layout == "blk" && bk != 1) {
         ir += "_blk.ir";
     } else {
         ir += ".ir";
     }
     sycl::kernel k = [&]() {
         try {
-            return make_kernel(q, dir + ir, (bk == 1) ? "bk1" : "bk5", nq, pad, B, wgs);
+            return make_kernel(q, dir + ir, ("bk" + std::to_string(bk)).c_str(), nq, pad, B, sg, wgs);
         } catch (const tinytc::status& st) {
             std::fprintf(stderr, "tinytc error %d: %s\n", static_cast<int>(st), tinytc::to_string(st));
             std::exit(1);
@@ -244,7 +277,11 @@ int main(int argc, char** argv)
     const std::int64_t n64 = static_cast<std::int64_t>(nelmt / B);
     const auto launch = [&]() {
         return q.submit([&](sycl::handler& h) {
-            h.set_args(d_basis, d_basis, d_basis, d_geo, n64, d_in, n64, d_out, n64);
+            if (bk == 3) {
+                h.set_args(d_basis, d_dbasis, d_geo, n64, d_in, n64, d_out, n64);
+            } else {
+                h.set_args(d_basis, d_basis, d_basis, d_geo, n64, d_in, n64, d_out, n64);
+            }
             h.parallel_for(range, k);
         });
     };
@@ -261,6 +298,7 @@ int main(int argc, char** argv)
                 layout.c_str(), 1e-9 * dofs / t.host, 1e-9 * bytes / t.host, 1e-9 * dofs / t.device, 1e-9 * bytes / t.device,
                 relerr, bk::fail_mark(relerr));
     sycl::free(d_basis, q);
+    sycl::free(d_dbasis, q);
     sycl::free(d_geo, q);
     sycl::free(d_in, q);
     sycl::free(d_out, q);

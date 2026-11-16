@@ -1,0 +1,15 @@
+BK3 GDoF/s at 2e7 DoFs, Arc A770, icpx 2026.1, float, tinytc 0.5.0; median of 3 runs,
+fastest variant or configuration (scripts/study/bk3_tinytc_compare.sh, picks from
+tinytc_survey_bk3_a770.csv); blk: tinytc's blocked layout (blocks of 8-32 elements, element
+innermost), ec: our element-contiguous arrays; -: 3 B nq^3 floats exceed 64 KiB of SLM
+(STREAM copy 440 GB/s in this run)
+
+ p   OpenMP     SYCL  tinytc blk  tinytc ec  blk/ours  ec/ours  tinytc blk configuration
+ 1     4.33     3.86        4.55       3.48      1.05     0.80  blk_sg16_b32_w512
+ 2     5.68     5.95        6.00       4.75      1.01     0.80  blk_sg16_b16_w256
+ 3     6.44     6.14        6.99       4.66      1.08     0.72  blk_sg16_b16_w512
+ 4     7.28     6.82        7.30       5.35      1.00     0.74  blk_sg8_b8_w256
+ 5     6.80     6.91        7.54       5.03      1.09     0.73  blk_sg8_b8_w512
+ 6     8.15     8.17        8.37       5.60      1.02     0.69  blk_sg8_b8_w256
+ 7     6.77     6.92           -          -         -        -  -
+ 8     7.44     7.70           -          -         -        -  -
