@@ -88,24 +88,31 @@ scripts/study/bk3_tinytc_compare.sh picks.txt bk3.csv   # BK3: tinytc against ou
 ## Results on the Arc A770
 
 GDoF/s, icpx 2026.1, float, tinytc 0.5.0, best configuration per order
-(`results/a770/`). BK1 and BK5 at ~5.6e7 DoFs (`tinytc_compare_a770.txt`):
-in the blocked layout tinytc is ahead of our best OpenMP or SYCL variant
-up to p = 6 (BK1 1.06-1.22x, BK5 1.01-1.11x; BK5 at p = 7 0.88x), and in
-our element-contiguous layout at 0.51-0.71x. With B = 16 the work arrays
-no longer fit in local memory for BK1 at p = 7, 8 and BK5 at p = 8.
+(`results/a770/`). Two layouts are measured. `ec` runs on the arrays of the
+CEED BK benchmarks, as our OpenMP and SYCL kernels do. `blk` runs on
+tinytc's blocked layout (blocks of B elements, element index innermost),
+which is not the BK format: the driver converts the data before timing and
+back afterwards, and the conversion is not counted. The `blk` figures show
+what the kernels reach on that layout, not a like-for-like comparison.
+
+BK1 and BK5 at ~5.6e7 DoFs (`tinytc_compare_a770.txt`): `ec` reaches
+0.51-0.71x of our best OpenMP or SYCL variant; `blk` reaches 1.06-1.22x
+(BK1) and 1.01-1.11x (BK5) of it up to p = 6, and 0.88x for BK5 at p = 7.
+With B = 16 the work arrays no longer fit in local memory for BK1 at
+p = 7, 8 and BK5 at p = 8.
 
 BK3 at 2e7 DoFs, median of 3 runs (`bk3_tinytc_compare_a770.txt`):
 
 | p | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 |---|---|---|---|---|---|---|---|---|
 | ours (OpenMP or SYCL) | 4.33 | 5.95 | 6.44 | 7.28 | 6.91 | 8.17 | 7.27 | 8.08 |
-| tinytc, blocked | 4.55 | 6.00 | 6.99 | 7.30 | 7.54 | 8.37 | 6.68 | 7.10 |
-| tinytc, element-contiguous | 3.48 | 4.75 | 4.66 | 5.35 | 5.03 | 5.60 | 4.80 | 5.05 |
+| tinytc, BK arrays (`ec`) | 3.48 | 4.75 | 4.66 | 5.35 | 5.03 | 5.60 | 4.80 | 5.05 |
+| tinytc, blocked layout | 4.55 | 6.00 | 6.99 | 7.30 | 7.54 | 8.37 | 6.68 | 7.10 |
 
 At p = 7, 8 the BK3 kernels run with one array in global memory (`_gs`),
 which costs about 10% where it isn't needed (8.0 against 8.7 at p = 6).
-The layout matters more than any setting: on our arrays the same kernels
-reach 0.62-0.80x. Sub-group size 8 with B = 8 was fastest from p = 4.
+On the BK arrays (`ec`) the same kernels reach 0.62-0.80x of ours.
+Sub-group size 8 with B = 8 was fastest from p = 4.
 
 The chained kernel (`blk_ch`), against `blk` in the same session (median of
 3 alternating runs at 2e7 DoFs, configurations from a survey of an earlier

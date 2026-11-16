@@ -365,9 +365,9 @@ sizes, with Kokkos at its fastest element batch, ours are 1.30-2.16x faster
 on BK1 and BK3 and 1.10-2.10x on BK5 (`results/a770/kokkos_compare_a770.png`,
 `.txt`).
 
-In the Tiny Tensor Compiler, BK1, BK3 and BK5 in tinytc's blocked layout
-match or beat our best OpenMP or SYCL variants up to p = 6, and fall behind
-or run out of local memory at p = 7, 8 ([`tinytc/README.md`](tinytc/README.md)).
+BK1, BK3 and BK5 are also written in the experimental Tiny Tensor Compiler,
+both on the BK arrays and on tinytc's own blocked layout;
+[`tinytc/README.md`](tinytc/README.md) has their measurements.
 
 The measurements below are of the portable drivers in `openmp/` (one
 element per thread), on an Arc A770 (16 GB) with icpx 2026.1, compute
