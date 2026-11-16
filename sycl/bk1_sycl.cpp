@@ -821,10 +821,13 @@ const variant variants[] = {
     {"inlFP_f256", &launch_opt<bk1gpu::cap_batch(NQ, bk1gpu::fill_batch(NQ, 256)), 256, true, false>},
     {"inlF_f512", &launch_opt<bk1gpu::cap_batch(NQ, bk1gpu::fill_batch(NQ, 512)), 512, false, false>},
     {"inlFP_f512", &launch_opt<bk1gpu::cap_batch(NQ, bk1gpu::fill_batch(NQ, 512)), 512, true, false>},
-#ifndef BK_NO_BASELINES
-    // one element per work-item: the naive baselines, 100x slower than the
-    // batched kernels on the A770 and long enough at high order to trip a
-    // small GPU's hang check (UHD 750, p = 6); -DBK_NO_BASELINES leaves them out
+#if !defined(BK_NO_BASELINES) || NQ <= 4
+    // one element per work-item: the fastest kernels at p = 1 and close
+    // behind at p = 2 on the A770 (results/a770/variant_survey_a770.csv), but
+    // 4x to 100x slower than the batched kernels from p = 3, expensive to
+    // compile there (register spills) and long enough to trip a small GPU's
+    // hang check (UHD 750, p = 6): -DBK_NO_BASELINES leaves them out for
+    // nq > 4 only
     {"elem", &launch_elem<0>},
     {"elem_wg128", &launch_elem<128>},
     {"elem_sg16", &launch_elem<128, 16>},

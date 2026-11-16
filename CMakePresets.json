@@ -46,7 +46,7 @@
         "TINYTC_ROOT": "/opt/tinytc/latest",
         "BK_GPU_IN_ALL": "OFF",
         "BK_GPU_JOBS": "1",
-        "BK_SYCL_BASELINES": "ON",
+        "BK_GPU_BASELINES": "ON",
         "CMAKE_CXX_COMPILER_LAUNCHER": "${sourceDir}/scripts/capped",
         "CMAKE_CXX_LINKER_LAUNCHER": "${sourceDir}/scripts/capped"
       }
