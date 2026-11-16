@@ -17,34 +17,46 @@ close to the metal; it has nothing to do with Apple's Metal API.
   work-item. The programmer picks the SIMD width of each operation and which
   registers hold which data, much like AVX intrinsics on a CPU, while SYCL and
   OpenCL C leave both to the compiler.
-- **Toolchain:** the offline compiler `cmc` (clang based) turns a kernel into
-  SPIR-V with the vector-compute extension; `ocloc` with `-vc-codegen` then
-  compiles that to a device binary through IGC's vector-compute backend. A host
+- **Toolchain:** the offline compiler `cmc` (clang based, package
+  `intel-igc-cm`) turns a kernel into SPIR-V with the vector-compute
+  extension; `ocloc` with `-vc-codegen` then compiles that to a device binary
+  through IGC's vector-compute backend. A host
   program loads the binary through Level Zero, OpenCL or SYCL, with the SIMD1
   dispatch model: every range counts hardware threads.
 - **Status:** Intel's current form of the same model is SYCL ESIMD, inside
-  oneAPI. CM itself is still maintained, but its SDK releases are older.
+  oneAPI. CM itself is still maintained, and `cmc` ships with Intel's GPU
+  driver packages, not with oneAPI.
 
 ## Where to find it
 
 | What | Where |
 |---|---|
-| CM compiler sources and language specification | <https://github.com/intel/cm-compiler> (spec: `clang/compute_sdk/docs/cmlangspec/`) |
-| CM development package (SDK with `cmc`, headers, docs, examples) | Intel's [C for Metal Development Package](https://www.intel.com/content/www/us/en/content-details/738812/c-for-metal-development-package-development-reference.html); used here: the 2021-10-28 release, unpacked to `/opt/intel/cm_sdk_20211028` |
-| Newer `cmc` builds (`intel-igc-cm` package) | Intel's GPU package repository, <https://dgpu-docs.intel.com> |
-| `ocloc` and the GPU driver | <https://github.com/intel/compute-runtime>, or the distribution's `intel-ocloc` / `intel-opencl-icd` packages |
+| Compiler sources and language specification | <https://github.com/intel/cm-compiler> (spec: `clang/compute_sdk/docs/cmlangspec/`) |
+| `cmc`, prebuilt | package `intel-igc-cm` in Intel's GPU package repository (<https://repositories.intel.com/gpu/ubuntu>, release lists on <https://dgpu-docs.intel.com>); used here: 1.0.225.54093 (clang 11) |
+| `ocloc` and the GPU driver | <https://github.com/intel/compute-runtime>, or packages `intel-ocloc`, `intel-opencl-icd`, `libze-intel-gpu1` of the same repository |
 | Background | "C-for-Metal: High Performance SIMD Programming on Intel GPUs", CGO 2021, <https://arxiv.org/abs/2101.11049> |
 
-The 2021 `cmc` does not know DG2 (Arc) and has no LSC memory API. Its
-kernels therefore use the legacy memory messages, compiled for TGL
-(`-mcpu=TGLLP`), and `ocloc -ftranslate-legacy-memory-intrinsics` maps them to
-the A770's LSC messages.
+A `cmc` writes SPIR-V that only the IGC of its own driver release reads: the
+SPIR-V of `intel-igc-cm` 1.0.225 is rejected by newer IGCs ("verify Module
+failed"). The kernels are therefore compiled to device binaries by the `ocloc`
+of that release (driver build 1146: compute-runtime 25.18, IGC 2.11), and
+those binaries run on the system's newer driver. `install_toolchain.sh`
+installs this pair in user space, without touching the system driver:
+
+```sh
+cm/install_toolchain.sh            # -> ~/opt/intel-cm-1146/bin/{cmc,ocloc-cm} (about 100 MB of packages)
+```
+
+It unpacks `intel-igc-cm`, `libigc2`, `libigdfcl2` and `intel-ocloc` of that
+release and writes two wrappers that give only `cmc` and `ocloc-cm` the
+matched libraries. A system-wide install of the same packages works too; then
+set `CMC` and `OCLOC` (or `CM_TOOLS`) for the Makefile.
 
 ## Building
 
-Requirements: the CM SDK (`CSDK_DIR`, default `/opt/intel/cm_sdk_20211028`),
-`ocloc` on the `PATH`, and oneAPI (`ONEAPI_ROOT`, default `/opt/intel/oneapi`)
-for `icpx`. The oneAPI environment does not need to be sourced, for the build
+Requirements: `cmc` and its matched `ocloc` (`CM_TOOLS`, default
+`~/opt/intel-cm-1146/bin`, see above) and oneAPI (`ONEAPI_ROOT`, default
+`/opt/intel/oneapi`) for `icpx`. The oneAPI environment does not need to be sourced, for the build
 or to run the hosts.
 
 ```sh
@@ -54,8 +66,9 @@ make -C cm KEEP=1 -B bk1 ORDERS=7  # keep the Gen assembly in build/cm/dump_bk1_
 make -C cm check                   # run both hosts at every order (correctness)
 ```
 
-Each kernel is compiled once per order p, with `-DNQ=<nq>` (BK1: nq = p + 2,
-BK5: nq = p + 1), into `build/cm/<kernel>_cm_<p>.bin`, and the build prints
+Each kernel is compiled once per order p, with `-march=$(GPU_DEVICE)` (default
+`acm-g10`, the Arc A770/A750) and `-DNQ=<nq>` (BK1: nq = p + 2, BK5:
+nq = p + 1), into `build/cm/<kernel>_cm_<p>.bin`, and the build prints
 the register spill, if any, of each binary. From nq = 6 a kernel uses the
 large register file (`-double-GRF`: 256 registers per thread, half the threads
 per EU). `<kernel>_cm_<p>_e<n>.bin` runs n elements per thread, the next one's
@@ -122,11 +135,11 @@ OpenMP or SYCL variant of the main README. Details and the variants tried:
 
 | p | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 |---|---|---|---|---|---|---|---|---|
-| BK1, CM | 17.3 | 21.8 | 27.1 | 27.0 | 29.9 | 28.4 | 30.7 | 29.2 |
+| BK1, CM | 17.6 | 21.9 | 26.9 | 27.1 | 29.8 | 28.3 | 30.7 | 30.2 |
 | BK1, best OpenMP/SYCL | 19.8 | 24.4 | 23.4 | 25.5 | 26.3 | 29.5 | 27.6 | 26.0 |
-| BK5, CM | 12.8 | 11.5 | 13.4 | 12.3 | 12.9 | 12.6 | 12.7 | 12.2 |
-| BK5, % of copy_cm | 93 | 83 | 96 | 88 | 91 | 90 | 90 | 86 |
+| BK5, CM | 12.8 | 11.6 | 13.3 | 12.3 | 12.8 | 12.6 | 12.7 | 12.3 |
+| BK5, % of copy_cm | 93 | 84 | 96 | 88 | 91 | 89 | 90 | 87 |
 | BK5, best OpenMP/SYCL | 14.0 | 13.5 | 13.5 | 12.2 | 12.3 | 11.7 | 13.5 | 11.5 |
 
-BK1 reaches 85-98% of `copy_cm`'s bandwidth (device time) and 5-20% of the
+BK1 reaches 86-97% of `copy_cm`'s bandwidth (device time) and 5-21% of the
 FP32 peak; BK5 is memory-bound (below 2% of the FP32 peak).

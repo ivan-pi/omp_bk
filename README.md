@@ -408,10 +408,11 @@ on the A770 at p = 2, 4 and 6, with and without `BK_RANDOM=1`.
 ## C for Metal versions of BK1 and BK5
 
 `cm/` has BK1 and BK5 (G6) in Intel C for Metal, an explicit-SIMD language
-for Intel GPUs, with SYCL hosts. They are built by `make -C cm` (the 2021 CM
-SDK and `ocloc`), not by CMake. On the A770 they reach 85-98% (BK1) and
-83-96% (BK5) of a CM copy kernel's bandwidth, ahead of the best OpenMP/SYCL
-variant at p = 3-5 and 7-8 (BK1) and at p = 4-6 and 8 (BK5).
+for Intel GPUs, with SYCL hosts. They are built by `make -C cm` (`cmc` from
+Intel's GPU packages, installed by `cm/install_toolchain.sh`), not by CMake.
+On the A770 they reach 86-97% (BK1) and 84-96% (BK5) of a CM copy kernel's
+bandwidth, ahead of the best OpenMP/SYCL variant at p = 3-5 and 7-8 (BK1) and
+at p = 4-6 and 8 (BK5).
 [`cm/README.md`](cm/README.md) explains C for Metal, where to get it, and how
 to build and run the kernels.
 

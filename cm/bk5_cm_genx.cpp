@@ -144,13 +144,13 @@ _GENX_ inline void load_g(SurfaceIndex G, const uint e, const int i, vector_ref<
     load_blocks<aligned, 0, NGL, NGR>(G, (e * 6 * nq3 + i * NG) * 4, g);
 }
 
+#if NQ <= 8
 // plane i of in for element e into its slot of A
 _GENX_ inline void load_in(SurfaceIndex in, const uint e, const int i, vector_ref<float, nq * S> A)
 {
     load_blocks<aligned, 0, NL, NP>(in, (e * nq3 + i * nq2) * 4, A.select<NP, 1>(i * S));
 }
 
-#if NQ <= 8
 // r back-contraction and store of element e: out_i = O_i + sum_n D(n, i) R_n.
 // As soon as plane i is computed, A_i is free and plane i of the next
 // element's in is loaded into it (NEXT).  Even nq: every plane is 16 B

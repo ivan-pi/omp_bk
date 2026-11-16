@@ -5,8 +5,10 @@
 #   make -C cm bk5 ORDERS="3 4"   one kernel, some orders
 #   make -C cm check              run both hosts at every order (needs the GPU)
 #
-# Kernel <k>_cm_<p>[_e<n>].bin: cmc (2021 CM SDK) -> SPIR-V -> ocloc for
-# GPU_DEVICE with the vector-compute backend; nq = p + 2 (bk1), p + 1 (bk5).
+# Kernel <k>_cm_<p>[_e<n>].bin: cmc (intel-igc-cm) -> SPIR-V -> the ocloc of
+# the same driver release, for GPU_DEVICE with the vector-compute backend;
+# nq = p + 2 (bk1), p + 1 (bk5).  A cmc's SPIR-V is finalized only by the IGC
+# it was released with; the binary then runs on newer drivers too.
 # From nq = 6 a kernel uses the large register file (-double-GRF: 256 GRFs,
 # half the threads per EU) to hold its element without spills.  _e<n>: n
 # elements per thread (EPT), run with BK_EPT=n; EPT_BUILDS lists the ones
@@ -24,12 +26,16 @@
 #   EPT_BUILDS  kernel:p:ept extra binaries     bk1:1:8 bk1:3:2 bk5:1:8 bk5:2:2
 #   GPU_DEVICE  ocloc device                   acm-g10 (Arc A770/A750)
 #   GRF         128 or 256 for every order     by nq
-#   CMC_FLAGS   extra cmc options (e.g. -DSTORE_LANES=32 after editing)
+#   CMC_FLAGS   extra cmc options
 #   KEEP=1      keep the IGC dumps (Gen asm) in $(BUILD_DIR)/dump_<binary>/
-#   CSDK_DIR, ONEAPI_ROOT, BUILD_DIR            install and output paths
+#   CMC, OCLOC  the CM compiler and its matched ocloc   $(CM_TOOLS)/cmc, ocloc-cm
+#   CM_TOOLS    their directory (README.md: install)    ~/opt/intel-cm-1146/bin
+#   ONEAPI_ROOT, BUILD_DIR                      install and output paths
 # A change of GPU_DEVICE, GRF, CMC_FLAGS or KEEP needs `make -B`.
 
-CSDK_DIR    ?= /opt/intel/cm_sdk_20211028
+CM_TOOLS    ?= $(HOME)/opt/intel-cm-1146/bin
+CMC         ?= $(CM_TOOLS)/cmc
+OCLOC       ?= $(CM_TOOLS)/ocloc-cm
 ONEAPI_ROOT ?= /opt/intel/oneapi
 BUILD_DIR   ?= $(abspath $(CURDIR)/../build/cm)
 GPU_DEVICE  ?= acm-g10
@@ -41,8 +47,6 @@ KEEP        ?= 0
 
 .DEFAULT_GOAL := all
 
-CMC    := $(CSDK_DIR)/usr/bin/cmc
-OCLOC  := ocloc
 ICPX   := $(realpath $(ONEAPI_ROOT)/compiler/latest)/bin/icpx
 UMF    := $(realpath $(ONEAPI_ROOT)/umf/latest)
 RPATH  := $(dir $(ICPX))../lib$(if $(UMF),:$(UMF)/lib)
@@ -63,12 +67,12 @@ name = $(1)_cm_$(2)$(if $(filter-out 1,$(3)),_e$(3))
 # kernel $(1), order $(2), ept $(3) -> $(B)/<name>.bin
 define kernel_rule
 $(B)/$(call name,$(1),$(2),$(3)).bin: $(1)_cm_genx.cpp cm_common.h | $(B)
-	$(CMC) -emit-spirv -fcmocl -mcpu=TGLLP -m64 -DNQ=$(call nq,$(1),$(2)) -DEPT=$(3) $(CMC_FLAGS) \
-	    -o $(B)/$(call name,$(1),$(2),$(3)).spv -- $$<
+	$(CMC) -march=$(GPU_DEVICE) -emit-spirv -DNQ=$(call nq,$(1),$(2)) -DEPT=$(3) $(CMC_FLAGS) \
+	    -o $(B)/$(call name,$(1),$(2),$(3)).spv $$<
 	$(if $(filter 1,$(KEEP)),rm -rf $(B)/dump_$(call name,$(1),$(2),$(3)) && \
 	    IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$(B)/dump_$(call name,$(1),$(2),$(3))) \
 	$(OCLOC) compile -q -file $(B)/$(call name,$(1),$(2),$(3)).spv -spirv_input -device $(GPU_DEVICE) \
-	    -options "-vc-codegen -ftranslate-legacy-memory-intrinsics$(if $(call grf,$(call nq,$(1),$(2))), -double-GRF)" \
+	    -options "-vc-codegen$(if $(call grf,$(call nq,$(1),$(2))), -double-GRF)" \
 	    -output $(call name,$(1),$(2),$(3)) -output_no_suffix -out_dir $(B) \
 	    > $(B)/$(call name,$(1),$(2),$(3)).log 2>&1 || { cat $(B)/$(call name,$(1),$(2),$(3)).log; exit 1; }
 	@spill=$$$$(sed -n 's/.*Spill memory used = \([0-9]*\) bytes for kernel $(1)_cm.*/\1/p' \

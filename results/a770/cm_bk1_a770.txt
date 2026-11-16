@@ -1,8 +1,11 @@
-BK1 in C for Metal (cm/bk1_cm_genx.cpp), Arc A770, 2021 CM SDK cmc -> SPIR-V -> ocloc dg2
-(NEO 26.40, -vc-codegen; -double-GRF from p = 4), SYCL host (icpx 2026.1, Level Zero,
-binary loaded by interop), float, ~5.6e7 DoFs (nelmt = 5.6e7 / nm^3), best of 20 runs
-after a warm-up, best of two passes, all checks relerr <= 1.9e-7.  The OpenCL host
-used before gave the same device rates and 0.5-2 GDoF/s less host rate.
+BK1 in C for Metal (cm/bk1_cm_genx.cpp), Arc A770: cmc 1.0.225 (intel-igc-cm, clang 11,
+-march=acm-g10) -> SPIR-V -> ocloc 25.18 / IGC 2.11 (-vc-codegen; -double-GRF from
+p = 4), run on NEO 26.40; SYCL host (icpx 2026.1, Level Zero, binary loaded by
+interop), float, ~5.6e7 DoFs (nelmt = 5.6e7 / nm^3), best of 20 runs after a warm-up,
+best of two passes, all checks relerr <= 1.9e-7.
+Earlier toolchains: the 2021 CM SDK cmc (clang 8, -mcpu=TGLLP) with the system ocloc
+26.40 gave the same device rates within 1%, except p = 8 (29.7 vs 30.6 now); the
+OpenCL host used before gave 0.5-2 GDoF/s less host rate.
 
 copy_cm: CM block-copy bandwidth reference in the same binary, device time, 445-455 GB/s.
 FP32 peak: 512 XVEs x 8 lanes x 2 flop x 2.4 GHz = 19661 GFLOP/s; flop/DoF is the
@@ -10,25 +13,25 @@ algorithmic count of scripts/plot/plot_roofline.py (padding lanes and the work
 duplicated by the p = 8 thread pairs not counted).
 
  p  kernel / best config          host GDoF/s  device GDoF/s  device GB/s  % copy_cm  GFLOP/s  % FP32 peak
- 1  padded, EPT=8, wg 64              17.3          17.5          377         85        1060       5.4
- 2  padded, EPT=1, wg 64              21.8          22.2          387         87        1510       7.7
- 3  padded, EPT=2, wg 16              27.1          27.5          435         98        2150      10.9
- 4  padded, EPT=1, wg 16              27.0          27.4          408         91        2440      12.4
- 5  padded, EPT=1, wg 16              29.9          30.3          435         96        3040      15.5
- 6  padded, EPT=1, wg 32              28.4          29.0          405         90        3240      16.5
+ 1  padded, EPT=8, wg 64              17.6          17.9          384         86        1080       5.5
+ 2  padded, EPT=1, wg 64              21.9          22.3          390         87        1520       7.7
+ 3  padded, EPT=2, wg 32              26.9          27.4          434         97        2150      10.9
+ 4  padded, EPT=1, wg 16              27.1          27.4          409         91        2440      12.4
+ 5  padded, EPT=1, wg 16              29.8          30.2          433         96        3030      15.4
+ 6  padded, EPT=1, wg 16              28.3          28.7          401         89        3220      16.4
  7  split 8+1, wg 16                  30.7          31.2          427         95        3850      19.6
- 8  split 8+2, thread pairs, wg 4     29.2          29.6          399         89        4000      20.4
+ 8  split 8+2, thread pairs, wg 4     30.2          30.6          413         92        4140      21.1
 
 Host GDoF/s against the best OpenMP/SYCL variant (README, tinytc_compare_a770.txt):
  p    CM    OpenMP/SYCL best
- 1  17.3        19.8
- 2  21.8        24.4
- 3  27.1        23.4
- 4  27.0        25.5
- 5  29.9        26.3
- 6  28.4        29.5
+ 1  17.6        19.8
+ 2  21.9        24.4
+ 3  26.9        23.4
+ 4  27.1        25.5
+ 5  29.8        26.3
+ 6  28.3        29.5
  7  30.7        27.6
- 8  29.2        26.0
+ 8  30.2        26.0
 
 p = 1..6 (padded): the fast index padded to 4 or 8, every contraction a SIMD16 mad.
 EPT (elements per thread, next element prefetched): helps at p = 1 (12.9 -> 16.7 at
