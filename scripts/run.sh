@@ -10,6 +10,8 @@
 # (IGC_EnableDPEmulation=1, OverrideDefaultFP64Settings=1).  PROFILE=1 adds
 # the Level Zero plugin's per-kernel host and device times
 # (LIBOMPTARGET_PLUGIN_PROFILE=T).  The last line on stderr is the peak memory.
+# The run waits for the GPU to be free of other processes and is repeated
+# when one shows up during it (common.sh: gpu_wait_idle, gpu_others).
 
 . "$(dirname "$0")/common.sh"
 name=$1
@@ -28,4 +30,32 @@ if [ "${PROFILE:-0}" = 1 ]; then
 fi
 
 oneapi_env
-capped env OMP_TARGET_OFFLOAD=MANDATORY "${extra[@]}" "$BUILD_DIR/$name" "$@"
+# Other processes on the GPU (another session's benchmarks) skew the
+# timings: wait until the GPU is free, watch it during the run and repeat
+# the run if another process appeared (GPU_GUARD=0: neither).
+for attempt in 1 2 3 4 5; do
+    if [ "${GPU_GUARD:-1}" = 0 ]; then
+        capped env OMP_TARGET_OFFLOAD=MANDATORY "${extra[@]}" "$BUILD_DIR/$name" "$@"
+        exit
+    fi
+    gpu_wait_idle
+    out=$(mktemp)
+    capped env OMP_TARGET_OFFLOAD=MANDATORY "${extra[@]}" "$BUILD_DIR/$name" "$@" > "$out" 2>&1 &
+    run=$!
+    shared=""
+    while kill -0 "$run" 2> /dev/null; do
+        shared=${shared:-$(gpu_others $$)}
+        sleep 0.5
+    done
+    wait "$run"
+    rc=$?
+    if [ -z "$shared" ]; then
+        cat "$out"
+        rm -f "$out"
+        exit $rc
+    fi
+    rm -f "$out"
+    echo "run.sh: the GPU was shared with $(echo $shared) during the run; repeating it" >&2
+done
+echo "run.sh: the GPU stayed shared; giving up" >&2
+exit 1
