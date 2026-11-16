@@ -49,7 +49,7 @@ One build tree per backend: the presets `host` (CPU, any compiler),
 | `BK_GPU_DEVICE` | `acm-g10` in the GPU presets | ocloc device of the GPU tree (`acm-g10` = Arc A770/A750), or `jit`; empty: host tree |
 | `BK_ORDERS_P`, `BK_ORDERS_BK5`, `BK_ORDERS_GPU` | `1;...;8` (BK5: `1;...;7`) | GPU: the orders p built, one binary each |
 | `BK_GPU_IN_ALL` | `ON` | GPU: per-order programs in `all` (off: build them by name) |
-| `BK_SYCL_BASELINES` | `OFF` (`a770`: `ON`) | GPU: the naive one-element-per-work-item variants of `bk1_sycl` (`elem*`), most of its device link time |
+| `BK_GPU_BASELINES` | `OFF` (`a770`: `ON`) | GPU: the naive one-element-per-thread variants (`bk1_sycl` `elem*`, `bk3_offload` `ref`, `bk5_offload` `ref6i`, `ref9i`) |
 | `BK_GPU_JOBS` | `0` (no limit) | GPU: compiles and links at once (Ninja), on top of `-j` |
 
 **Which `BK_GPU_DEVICE`?** The GPU programs are compiled ahead of time
@@ -130,11 +130,14 @@ from the A770 machine (16 threads, 32 GB, icpx 2026.1).
 >   caps them at n, e.g. on a machine with little memory per core (allow
 >   about 1 GB per job), or when the build shares the machine with GPU runs.
 >   It works with the Ninja generator only; with Makefiles use `make -j n`.
-> - **Naive baselines.** The five one-element-per-work-item variants of
->   `bk1_sycl` (`elem*`) spill registers heavily at high order and took most
->   of its device link (`bk1_sycl_6`: 65 s with them, 9 s without). They are
->   off unless `BK_SYCL_BASELINES=ON`; the SYCL tree builds in 50 s instead
->   of 142 s.
+> - **Naive baselines.** The one-element-per-thread variants are 30 to 170
+>   times slower than the best kernels and only serve as comparison points;
+>   they are off unless `BK_GPU_BASELINES=ON` (`-DBK_NO_BASELINES`). The five
+>   `elem*` variants of `bk1_sycl` spill registers heavily at high order and
+>   took most of its device link (`bk1_sycl_6`: 65 s with them, 9 s
+>   without), so the SYCL tree builds in 50 s instead of 142 s; the `ref`
+>   kernels of `bk3_offload` and `bk5_offload` cost 1 to 2 s each. Every
+>   variant is still checked against the host reference.
 > - **Build less:** fewer orders (`BK_ORDERS_*`), one backend per tree, or
 >   single targets (`--target bk1_sycl_4`, `all_bk5_sycl`, `drivers`).
 > - **Parallel device link** (not the default): split the device code per
@@ -309,8 +312,8 @@ close to the memory bound it is.
 A variant the device cannot launch, such as a work-group above its limit
 (512 work-items on the UHD 750, 1024 on the A770), prints `skipped` and the
 rest still run. `BK_KERNEL="-name ..."` leaves variants out; the naive BK1
-baselines (`elem*`, built only with `BK_SYCL_BASELINES=ON`) can run long
-enough at high order to trip a small GPU's hang check and lose the device.
+baselines (built only with `BK_GPU_BASELINES=ON`) can run long enough at
+high order to trip a small GPU's hang check and lose the device.
 One tree can serve several GPUs (`BK_GPU_DEVICE="acm-g10,rkl"`), e.g. on
 this machine the A770 and the UHD 750 of the Core i7-11700K:
 

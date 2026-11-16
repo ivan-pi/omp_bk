@@ -234,7 +234,11 @@ struct variant {
 #define SF(B, R, SUFFIX) {"sf_b" #B SUFFIX, &bk3_sf<float, NQ, bk3gpu::sf_batch(NQ, B), R>}
 
 const variant variants[] = {
+#ifndef BK_NO_BASELINES
+    // the driver's one-element-per-thread kernel: a baseline, 30-170x slower
+    // than the best variants on the A770 (the check is the host reference)
     {"ref", &bk::SumFactorization<float, NQ>},
+#endif
     CU(1, false, ""), CU(2, false, ""), CU(4, false, ""), CU(1, true, "r"), CU(2, true, "r"),
     SF(1, false, ""), SF(2, false, ""), SF(4, false, ""), SF(1, true, "r"), SF(2, true, "r"),
 };
