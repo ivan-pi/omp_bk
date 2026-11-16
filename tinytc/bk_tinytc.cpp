@@ -19,7 +19,9 @@
 //        TT_B (elements per block, default 16), TT_WGS (work-group size,
 //        default: the table of the original driver), TT_SG (BK3: sub-group
 //        size = rows of a cooperative-matrix tile, 8 or 16 (default); TT_B
-//        a multiple of it)
+//        a multiple of it), TT_SPILL (BK3: 1 keeps S in global memory,
+//        bk3_*_gs.ir, so local memory holds 2 B nq^3 floats instead of 3;
+//        default: only where 3 B nq^3 floats exceed 64 KiB)
 //
 // Conventions.  Ours: element-contiguous in/out (BK1 in(e,i,j,k) of nm^3
 // modes, BK5 in(e,i,j,k) of nq^3 points), BK1 JxW(e,p,q,r), BK5 G6
@@ -188,14 +190,18 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "BK%d: only 1, 3 and 5\n", bk);
         return 2;
     }
+    const bool spill =
+        (bk == 3) && bk::env_int("TT_SPILL", 3 * B * nq * nq * nq * int(sizeof(float)) > 65536) != 0;
     if (bk == 3) {
         if (layout == "orig" || B % sg != 0) {
             std::fprintf(stderr, "BK3: TT_LAYOUT ec or blk, TT_B a multiple of TT_SG\n");
             return 2;
         }
-        // U, R and S of B nq^3 floats each in the 64 KiB of local memory
-        if (3 * B * nq * nq * nq * int(sizeof(float)) > 65536) {
-            std::fprintf(stderr, "BK3 tinytc: 3 B nq^3 floats (B = %d, nq = %d) exceed 64 KiB of local memory\n", B, nq);
+        // U and R (and S unless spilled) of B nq^3 floats each in the 64 KiB of local memory
+        const int arrays = spill ? 2 : 3;
+        if (arrays * B * nq * nq * nq * int(sizeof(float)) > 65536) {
+            std::fprintf(stderr, "BK3 tinytc: %d B nq^3 floats (B = %d, nq = %d) exceed 64 KiB of local memory\n",
+                         arrays, B, nq);
             return 2;
         }
     }
@@ -204,9 +210,10 @@ int main(int argc, char** argv)
                   sycl::property_list{sycl::property::queue::in_order{}, sycl::property::queue::enable_profiling{}}};
     const int npts = (bk == 5) ? nq * nq * nq : nm * nm * nm;   // in/out values per element
     const int ngeo = nq * nq * nq * ((bk == 1) ? 1 : 6);         // JxW or G6 per element
+    const std::string label = layout + (spill ? "_gs" : "");
     std::printf("BK%d tinytc (%s): p = %d, nq = %d, Q_pad = %d, B = %d, sg = %d, wgs = %d, nelmt = %zu (%zu DoFs), "
                 "ntests = %d\n",
-                bk, layout.c_str(), p, nq, pad, B, sg, wgs, nelmt, nelmt * npts, ntests);
+                bk, label.c_str(), p, nq, pad, B, sg, wgs, nelmt, nelmt * npts, ntests);
 
     // our data and reference
     std::vector<float> in(nelmt * npts);
@@ -254,17 +261,18 @@ int main(int argc, char** argv)
     float* d_geo = blocked ? to_device(q, to_blocks(geo, nelmt, ngeo, B)) : to_device(q, geo);
     float* d_in = blocked ? to_device(q, to_blocks(in, nelmt, npts, B)) : to_device(q, in);
     float* d_out = sycl::malloc_device<float>(in.size(), q);
+    // BK3 with TT_SPILL: S, B nq^3 floats per block
+    float* d_scratch = spill ? sycl::malloc_device<float>(nelmt * nq * nq * nq, q) : nullptr;
     q.memset(d_out, 0, in.size() * sizeof(float)).wait();
     geo = std::vector<float>();
 
     std::string ir = "/bk" + std::to_string(bk);
     if (layout == "ec") {
-        ir += "_ec.ir";
+        ir += "_ec";
     } else if (layout == "blk" && bk != 1) {
-        ir += "_blk.ir";
-    } else {
-        ir += ".ir";
+        ir += "_blk";
     }
+    ir += spill ? "_gs.ir" : ".ir";
     sycl::kernel k = [&]() {
         try {
             return make_kernel(q, dir + ir, ("bk" + std::to_string(bk)).c_str(), nq, pad, B, sg, wgs);
@@ -277,7 +285,9 @@ int main(int argc, char** argv)
     const std::int64_t n64 = static_cast<std::int64_t>(nelmt / B);
     const auto launch = [&]() {
         return q.submit([&](sycl::handler& h) {
-            if (bk == 3) {
+            if (spill) {
+                h.set_args(d_basis, d_dbasis, d_geo, n64, d_in, n64, d_out, n64, d_scratch, n64);
+            } else if (bk == 3) {
                 h.set_args(d_basis, d_dbasis, d_geo, n64, d_in, n64, d_out, n64);
             } else {
                 h.set_args(d_basis, d_basis, d_basis, d_geo, n64, d_in, n64, d_out, n64);
@@ -295,12 +305,15 @@ int main(int argc, char** argv)
     const double dofs = double(nelmt) * npts;
     const double bytes = sizeof(float) * double(nelmt) * (2.0 * npts + ngeo);
     std::printf("tt%d_%-10s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %.1e%s\n", bk,
-                layout.c_str(), 1e-9 * dofs / t.host, 1e-9 * bytes / t.host, 1e-9 * dofs / t.device, 1e-9 * bytes / t.device,
+                label.c_str(), 1e-9 * dofs / t.host, 1e-9 * bytes / t.host, 1e-9 * dofs / t.device, 1e-9 * bytes / t.device,
                 relerr, bk::fail_mark(relerr));
     sycl::free(d_basis, q);
     sycl::free(d_dbasis, q);
     sycl::free(d_geo, q);
     sycl::free(d_in, q);
     sycl::free(d_out, q);
+    if (d_scratch != nullptr) {
+        sycl::free(d_scratch, q);
+    }
     return 0;
 }

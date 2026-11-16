@@ -21,7 +21,7 @@ The tree is organized by approach; the file names say the kernel.
 | `openmp/` | The portable drivers `BK1.cpp`, `BK3.cpp`, `BK5.cpp`, `BK1_ff.cpp` (host or offload), `bk1_sumfact.h`, `bk3_sumfact.h`, `float_float.h` |
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
-| `tinytc/` | `bk_tinytc.cpp` (driver for BK1, BK3 and BK5), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received, `bk3_blk.ir` and `bk3_ec.ir` in tinytc's blocked and our layout), `repro_slm/` (bug reproducer) |
+| `tinytc/` | `bk_tinytc.cpp` (driver for BK1, BK3 and BK5), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received, `bk3_blk.ir` and `bk3_ec.ir` in tinytc's blocked and our layout, `bk3_*_gs.ir` with S in global memory), `repro_slm/` (bug reproducer), `upstream_issues.md` (drafts) |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
@@ -218,11 +218,15 @@ on BK1 and BK3 and 1.10-2.10x on BK5 (`results/a770/kokkos_compare_a770.png`,
 BK3 in tinytc (`tinytc/ir/bk3_blk.ir`, `bk3_ec.ir`: BK1's interpolation
 around BK5's Laplacian, a work-group per block of 8-32 elements, the
 sub-group size 8 or 16 as `TT_SG`) keeps U, R and S of 3 B nq^3 floats in
-local memory, so it runs up to p = 6 (B = 8). With the best configuration
-per order (`tinytc_survey_bk3_a770.csv`), in its blocked layout it matches
-or slightly beats our best kernel (1.00-1.09x), in our element-contiguous
-layout it reaches 0.69-0.80x of it (`bk3_tinytc_compare_a770.png`, `.txt`;
-`scripts/study/bk3_tinytc_compare.sh`).
+local memory up to p = 6 (B = 8). At p = 7 and 8 these exceed 64 KiB, and
+`bk3_blk_gs.ir`, `bk3_ec_gs.ir` keep S in global memory instead (a block of
+B nq^3 floats per work-group; `TT_SPILL`, on by default only there; about
+10% slower where it isn't needed, 8.0 vs 8.7 GDoF/s at p = 6). With the best
+configuration per order (`tinytc_survey_bk3_a770.csv`), in its blocked
+layout it matches or slightly beats our best kernel up to p = 6
+(1.00-1.09x) and reaches 0.92x and 0.88x at p = 7 and 8; in our
+element-contiguous layout it reaches 0.62-0.80x of it
+(`bk3_tinytc_compare_a770.png`, `.txt`; `scripts/study/bk3_tinytc_compare.sh`).
 
 The measurements below are of the portable drivers in `openmp/` (one
 element per thread), on an Arc A770 (16 GB) with icpx 2026.1, compute

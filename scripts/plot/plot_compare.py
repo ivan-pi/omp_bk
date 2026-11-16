@@ -111,7 +111,7 @@ def main():
             + ("labels: tinytc (blocked) over our faster kernel" if ref == "tinytc" else
                "labels: our faster kernel over " + ("the fastest Kokkos batch" if ref == "kokkos" else ref))
             + (f"; {subtitle}" if subtitle else ""))
-    fig.text(0.5, 0.005, textwrap.fill(note, int(22 * fig.get_figwidth())), ha="center", va="bottom",
+    fig.text(0.5, 0.005, textwrap.fill(note, int(16 * fig.get_figwidth())), ha="center", va="bottom",
              fontsize=7.5, color=TEXT2)
     fig.tight_layout(rect=(0, 0.09, 1, 1))
     fig.savefig(out, dpi=150, facecolor=SURFACE)

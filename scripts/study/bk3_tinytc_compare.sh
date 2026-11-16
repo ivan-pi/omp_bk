@@ -9,7 +9,8 @@
 # env:    ORDERS="1 ... 8" DOFS=2e7 REPS=3 NTESTS=10
 # CSV:    bk,p,impl,variant,rep,gdofs,check   (scripts/plot/plot_compare.py;
 #         impl: omp, sycl, tinytc (blocked layout) or tinytc_ec (ours);
-#         tinytc variant <layout>_sg<sg>_b<B>_w<wgs>)
+#         tinytc variant <layout>_sg<sg>_b<B>_w<wgs>, layout blk_gs or ec_gs
+#         where S spills to global memory)
 . "$(dirname "$0")/../common.sh"
 PICKS=$1
 OUT=${2:-bk3_tinytc_compare.csv}
@@ -21,7 +22,7 @@ tt=$(mktemp)
 {
     echo "bk,p,impl,variant,rep,gdofs,check"
     awk -F, 'NR > 1 { printf "3,%s,%s,%s,%s,%s,%s\n", $2, $1, $3, $4, $5, $7 }' "$ours"
-    awk -F, 'NR > 1 { printf "3,%s,%s,%s_sg%s_b%s_w%s,%s,%s,%s\n", $3, ($2 == "ec") ? "tinytc_ec" : "tinytc",
+    awk -F, 'NR > 1 { printf "3,%s,%s,%s_sg%s_b%s_w%s,%s,%s,%s\n", $3, ($2 ~ /^ec/) ? "tinytc_ec" : "tinytc",
                       $2, $15, $16, $5, $6, $9,
                       ($14 == "ok") ? $13 : "FAIL" }' "$tt"
 } > "$OUT"

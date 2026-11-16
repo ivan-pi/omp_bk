@@ -7,6 +7,7 @@
 #         tinytc_survey.sh; sg, B: BK3's sub-group and block sizes, default 16)
 # env:    DOFS=56234132 (the DoF-sweep point near 5.6e7) REPS=3 NTESTS=20
 # CSV:    bk,layout,p,nq,wgs,rep,nelmt,dofs,gdofs,gbs,gdofs_dev,gbs_dev,relerr,status,sg,B
+#         (layout as the driver reports it: BK3 blk_gs, ec_gs where S spills)
 . "$(dirname "$0")/../common.sh"
 PICKS=$1
 OUT=${2:-tinytc_final.csv}
@@ -27,11 +28,12 @@ while read -r bk layout p wgs sg B; do
         line=$(TT_LAYOUT=$layout TT_WGS=$wgs TT_SG=$sg TT_B=$B "$SCRIPTS/run.sh" bk_tinytc "$bk" "$p" "$ne" "$NTESTS" 2>&1 | grep -E "^tt$bk")
         vals=$(echo "$line" | sed -n 's/.*GDoF\/s = *\([^ ]*\) *GB\/s = *\([^ ]*\) *(device: GDoF\/s = *\([^ ]*\) *GB\/s = *\([^ )]*\)) *relerr = *\([^ ]*\).*/\1,\2,\3,\4,\5/p')
         st=ok
+        run_layout=$(echo "$line" | sed -n "s/^tt${bk}_\([a-z_]*\) .*/\1/p")
         if [ -z "$vals" ]; then
             vals="NaN,NaN,NaN,NaN,NaN"; st=error
         elif echo "$line" | grep -q FAIL; then
             st=FAIL
         fi
-        echo "$bk,$layout,$p,$nq,$wgs,$rep,$ne,$((ne * per)),$vals,$st,$sg,$B" | tee -a "$OUT"
+        echo "$bk,${run_layout:-$layout},$p,$nq,$wgs,$rep,$ne,$((ne * per)),$vals,$st,$sg,$B" | tee -a "$OUT"
     done
 done < "$PICKS"

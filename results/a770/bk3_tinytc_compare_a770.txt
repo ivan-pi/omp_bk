@@ -1,8 +1,9 @@
 BK3 GDoF/s at 2e7 DoFs, Arc A770, icpx 2026.1, float, tinytc 0.5.0; median of 3 runs,
 fastest variant or configuration (scripts/study/bk3_tinytc_compare.sh, picks from
 tinytc_survey_bk3_a770.csv); blk: tinytc's blocked layout (blocks of 8-32 elements, element
-innermost), ec: our element-contiguous arrays; -: 3 B nq^3 floats exceed 64 KiB of SLM
-(STREAM copy 440 GB/s in this run)
+innermost), ec: our element-contiguous arrays; _gs: S in global memory (bk3_*_gs.ir), as
+3 B nq^3 floats exceed 64 KiB of SLM at p = 7, 8 (STREAM copy 440 GB/s in this run;
+p = 7, 8 measured in a separate session at 451 GB/s)
 
  p   OpenMP     SYCL  tinytc blk  tinytc ec  blk/ours  ec/ours  tinytc blk configuration
  1     4.33     3.86        4.55       3.48      1.05     0.80  blk_sg16_b32_w512
@@ -11,5 +12,5 @@ innermost), ec: our element-contiguous arrays; -: 3 B nq^3 floats exceed 64 KiB 
  4     7.28     6.82        7.30       5.35      1.00     0.74  blk_sg8_b8_w256
  5     6.80     6.91        7.54       5.03      1.09     0.73  blk_sg8_b8_w512
  6     8.15     8.17        8.37       5.60      1.02     0.69  blk_sg8_b8_w256
- 7     6.77     6.92           -          -         -        -  -
- 8     7.44     7.70           -          -         -        -  -
+ 7     6.87     7.27        6.68       4.80      0.92     0.66  blk_gs_sg8_b8_w512
+ 8     7.44     8.08        7.10       5.05      0.88     0.62  blk_gs_sg8_b8_w512
