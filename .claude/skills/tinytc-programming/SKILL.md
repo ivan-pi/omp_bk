@@ -252,6 +252,9 @@ func @k(%A: memref<$T x $N x?>) attributes $attrs { ... }
 prepends `$T = f64\n$N = 64\n` to a template string before `parse_string` (see the flash_attention example).
 Note the spaces: write `memref<$T x $N x?>` so the lexer can split tokens. `$` definitions are lost when IR
 is printed and are not available through the builder API.
+Keep the host-supplied parameters as commented defaults at the top of the `.ir` file (`;$Q = 4`,
+`;$B = 16`); the host prepends the real values, and uncommenting them lets `tinytc-opt` check the
+file on its own. Derived values follow uncommented (`$P = !calc($Q 1 -)`).
 
 ### Example 1 — fused batched matrix chain (collective, verified with tinytc 0.5)
 ```
@@ -505,6 +508,50 @@ Scalar types passed to `set_*_args` must match the recipe's element type exactly
   `NEO_CACHE_PERSISTENT=0` for best performance/benchmarking.
 - Time with many repetitions after a warm-up launch; never include JIT in timings.
 
+### Tiny batched contractions (sum factorization)
+From the tinytc author's CEED BK1/BK5 kernels (dealii-X/benchmarks, branch `opencl`,
+`alternatives/src/bk1.ir`, `bk5.ir`) and the BK3 kernels built on them:
+- **Do not call collective `gemm` per element on tiny matrices.** The first version ran one element
+  per work-group with `gemm` on 3×4 matrices in `for` loops; the optimized one puts a block of B
+  elements in the row dimension and writes each step as a 1-D `foreach_tile` with tile shape
+  (sub-group size) and one `cooperative_matrix_mul_add` per tile. K and N fit whole in the tile, so
+  there is no K loop:
+  ```
+  %a = fuse %in_e[0,2] : memref<f32x$BP2 x$P>                ; rows = element x two spatial modes
+  foreach_tile (%i)=(%c0),(%cBP2) as (%t)<=(16) {
+      %z = constant 0.0 : coopmatrix<f32x16x$Q,matrix_acc>
+      %x = cooperative_matrix_load.cols_checked %a[%i,%c0] : coopmatrix<f32x16x$Q_pad,matrix_a>
+      %b = cooperative_matrix_load %basis[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q,matrix_b>
+      %y = cooperative_matrix_mul_add %x, %b, %z : coopmatrix<f32x16x$Q,matrix_acc>
+      cooperative_matrix_store %y, %res[%i,%c0]
+  }
+  ```
+  For a mode that is not adjacent to the block, make the loop run over (rows × that mode) and split
+  the tile index with `div`/`rem` into a row offset and a `subview` of the mode.
+- **Chain contractions in registers.** A `matrix_acc` result can be scaled pointwise by data loaded
+  directly as `matrix_acc` tiles of the same shape (lanes match), then `cast` to `matrix_a` and fed
+  to the next `cooperative_matrix_mul_add`:
+  ```
+  %acc = cooperative_matrix_mul_add %x, %b, %z : coopmatrix<f32x16x$Q_pad,matrix_acc>
+  %w   = cooperative_matrix_load.cols_checked %J[%i,%c0] : coopmatrix<f32x16x$Q_pad,matrix_acc>
+  %s   = mul %w, %acc : coopmatrix<f32x16x$Q_pad,matrix_acc>
+  %sa  = cast %s : coopmatrix<f32x16x$Q_pad,matrix_a>
+  %bt  = cooperative_matrix_load.t %basis[%c0,%c0] : coopmatrix<f32x$Q_pad x$P,matrix_b>
+  %o   = cooperative_matrix_mul_add %sa, %bt, %z2 : coopmatrix<f32x16x$P,matrix_acc>
+  ```
+  BK1 fuses the forward contraction of the last direction, the quadrature weights and the reverse
+  contraction this way (BK5 the same with its six G components); each fusion saves an SLM round trip
+  and a barrier. The tile must hold all `Q_pad` columns; store a narrower result with
+  `cooperative_matrix_store.cols_checked`.
+- **One basis array for both directions:** store it once, zero-padded to `Q_pad × Q_pad`, and read
+  the transpose for the reverse steps with `cooperative_matrix_load.t`.
+- **Accumulate the output in global memory:** the first reverse step stores `out`; later ones load it
+  as the `matrix_acc` operand (C += A·B) and store it back, so the output needs no SLM array.
+- **Barriers only where data flows:** producer loops that read only global input and write different
+  SLM arrays can run back to back; one `barrier.local` before the loop that consumes them is enough.
+- Their fixed `subgroup_size=16`, B = 16 and work-group size by Q are a starting point; on DG2 a
+  survey of sub-group size, B and work-group size found `subgroup_size=8`, B = 8 faster from p = 4.
+
 ---
 
 ## 8. Gotchas and doc errata (checked against v0.5 sources)
@@ -550,3 +597,5 @@ Scalar types passed to `set_*_args` must match the recipe's element type exactly
 - `examples/`: `matrix_chain`, `tall_and_skinny`, `flash_attention` (SYCL + preprocessor template),
   `benchmark`, `builder`, `simple_ze`, `simple_cl`, `jit`.
 - `test/lit/spv/*.ir`, `test/lit/opt/*.ir` — small, known-good snippets of every instruction.
+- Worked SPMD kernels: github.com/dealii-X/benchmarks, branch `opencl`, `alternatives/src/bk1.ir`,
+  `bk5.ir` and the driver `alternatives/drivers/tinytc.cc` (CEED BK1/BK5 with blocked elements).
