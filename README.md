@@ -202,6 +202,14 @@ At p = 5, 7, 8 the compute steps (~11 GDoF/s alone) and the G stream (~9.4
 GDoF/s alone) overlap poorly; SLM padding, fill groups, prefetching G and
 a compile-time work-group size changed little there.
 
+Against the Kokkos CEED_BK kernels of
+[dealii-X/benchmarks](https://github.com/dealii-X/benchmarks) (Kokkos 5.3.0,
+SYCL ahead of time for DG2, their drivers switched to float;
+`scripts/study/kokkos_build.sh`, then `kokkos_compare.sh`) at the same
+sizes, with Kokkos at its fastest element batch, ours are 1.30-2.16x faster
+on BK1 and BK3 and 1.10-2.10x on BK5 (`results/a770/kokkos_compare_a770.png`,
+`.txt`).
+
 The measurements below are of the portable drivers in `openmp/` (one
 element per thread), on an Arc A770 (16 GB) with icpx 2026.1, compute
 runtime 26.22, 524288 elements, in float. Each value is the minimum
