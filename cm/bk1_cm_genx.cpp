@@ -1,6 +1,7 @@
-// bk1_cm_genx.cpp -- BK1 (mass operator) in C for Metal: one element at a time
-// per hardware thread, the whole element in registers, no shared local memory and
-// no barriers.  Compiled once per order with -DNQ=<nq> (cm/build.sh).
+// bk1_cm_genx.cpp -- BK1 (mass operator) in C for Metal.  p <= 7: one element
+// at a time per hardware thread, the whole element in registers; p = 8: a pair
+// of threads per element, joined through SLM.  Compiled once per order with
+// -DNQ=<nq>, nq = p + 2 (cm/build.sh).
 //
 // Orders p = 1..8.  The layout below is that of p = 1..6; p = 7, 8 (nq = 9,
 // 10) store their tensors in split blocks instead, see "NQ > 8" further down.
@@ -31,7 +32,7 @@
 //            (-DEPT=n, default 1), the loads of the next element issued
 //            before the current one is computed (SIMD1 dispatch: the NDRange
 //            counts threads = elements / EPT)
-//   copy_cm  the memory yardstick: COPY_CHUNK floats per thread, in -> out
+//   copy_cm  the copy bandwidth reference (cm_common.h)
 
 #include <cm/cm.h>
 
@@ -126,6 +127,19 @@ _GENX_ inline void load_element(SurfaceIndex in, SurfaceIndex jxw, uint e, vecto
     load_blocks<in_aligned, 0, NI, NI>(in, e * (nm3 * 4), u_in);
     load_blocks<jxw_aligned, 0, NW, NW>(jxw, e * (nq3 * 4), w);
 }
+#endif
+
+// out of element e, packed
+_GENX_ inline void store_element(SurfaceIndex out, uint e, vector_ref<float, NI> od)
+{
+    if constexpr (in_aligned) {
+        store_blocks<0, nm3, NI>(out, e * (nm3 * 4), od);
+    } else {
+        store_scattered<0, nm3, NI>(out, e * nm3, od);
+    }
+}
+
+#if NQ <= 8
 
 // EPT consecutive elements per thread; the loads of element t + 1 are issued
 // before element t is computed
@@ -148,25 +162,22 @@ extern "C" _GENX_MAIN_ void bk1_cm(SurfaceIndex bpad [[type("buffer_t")]],
     vector<float, NB> b;
     load_blocks<true, 0, NB, NB>(bpad, 0, b);
 
+    const uint last = uint(nelmt) - 1;
 #pragma unroll
     for (int t = 0; t < EPT; ++t) {
         const uint e = e0 + t;
-        // prefetch the next element (past the end: stateful reads return 0)
+        // prefetch the next element (past the end: the last one again)
         vector<float, NI> u_next;
         vector<float, NW> w_next;
         if (t + 1 < EPT) {
-            load_element(in, jxw, e + 1, u_next.select_all(), w_next.select_all());
+            load_element(in, jxw, (e + 1 < last) ? e + 1 : last, u_next.select_all(), w_next.select_all());
         }
 
         // compute and store
         vector<float, NI> od;
         element(u_in.select_all(), w.select_all(), b.select_all(), od.select_all());
         if (e < uint(nelmt)) {
-            if constexpr (in_aligned) {
-                store_blocks<0, nm3, NI>(out, e * (nm3 * 4), od.select_all());
-            } else {
-                store_scattered<0, nm3, NI>(out, e * nm3, od.select_all());
-            }
+            store_element(out, e, od.select_all());
         }
         if (t + 1 < EPT) {
             u_in = u_next;
@@ -206,10 +217,7 @@ extern "C" _GENX_MAIN_ void bk1_cm(SurfaceIndex bpad [[type("buffer_t")]],
 // partial out.  Thread 1 hands its partial to thread 0 through shared local
 // memory; thread 0 adds and stores.  JxW is read once; in is read by both.
 // --------------------------------------------------------------------------
-#ifndef PAIR_P8
-#define PAIR_P8 1   // p = 8: a pair of threads per element (0: one thread, spills)
-#endif
-constexpr bool PAIR = (nq == 10) && PAIR_P8;
+constexpr bool PAIR = (nq == 10);         // p = 8 (one thread per element spills)
 constexpr int NPP = PAIR ? nq / 2 : nq;   // p values per thread
 
 // main part of a split index of extent e, and the extent and first value of
@@ -357,12 +365,11 @@ _GENX_ inline void contract_split(vector_ref<float, NI> in, vector_ref<float, NB
 // The basis on the host (bpad, floats), P = nq:
 //   0          Bf(i, p)  nm x nq, row stride P
 //   nm * P     Bb(p, i)  nq x nm, row stride P
-//   PAIR, from OFF_T = round4((nm + nq) * P), for t = 0, 1:
-//   OFF_T + t * NBFT              Bf_t(i, c) = Bf(i, P_t[c])  nm x 5, row stride 8
-//   OFF_T + 2 * NBFT + t * NBBT   Bb_t(c, i) = Bb(P_t[c], i)  5 x nm, row stride P
+//   PAIR, from NB = round4((nm + nq) * P), for t = 0, 1:
+//   NB + t * NBFT              Bf_t(i, c) = Bf(i, P_t[c])  nm x 5, row stride 8
+//   NB + 2 * NBFT + t * NBBT   Bb_t(c, i) = Bb(P_t[c], i)  5 x nm, row stride P
 constexpr int NBF = round4(nm * P);
 constexpr int NBB = round4(nq * P);
-constexpr int OFF_T = round4((nm + nq) * P);
 constexpr int BST = 8;
 constexpr int NBFT = round4(nm * BST);
 constexpr int NBBT = round4(NPP * P);
@@ -434,10 +441,7 @@ _GENX_ inline void pack_out(vector_ref<float, T_o::size> o, vector_ref<float, NI
 // limit the threads per Xe-core); a barrier after each write and before the
 // slot is reused.  Every thread of the group takes part in every barrier.
 constexpr int MAX_PAIRS = 8;   // work-group of at most 16 threads (PAIR)
-#ifndef HANDOFF_ROUNDS
-#define HANDOFF_ROUNDS 3
-#endif
-constexpr int XR = PAIR ? HANDOFF_ROUNDS : 1;
+constexpr int XR = PAIR ? 3 : 1;   // handoff rounds (3: best at wg 4-8)
 constexpr int XC = NI / XR;
 static_assert(!PAIR || (NI % XR == 0 && XC % 4 == 0), "whole OWords per round");
 constexpr int SLM_SLOT = XC * 4;   // bytes per pair
@@ -497,8 +501,8 @@ extern "C" _GENX_MAIN_ void bk1_cm(SurfaceIndex bpad [[type("buffer_t")]],
     vector<float, T_u::size> u;
     if constexpr (PAIR) {
         vector<float, NBFT> bft;
-        load_blocks<true, 0, NBFT, NBFT>(bpad, (OFF_T + t * NBFT) * 4, bft);
-        contract_split<T_in, NPP, (PAIR ? BST : P)>(u_in.select<T_in::size, 1>(0), bft.select_all(), u.select_all());
+        load_blocks<true, 0, NBFT, NBFT>(bpad, (NB + t * NBFT) * 4, bft);
+        contract_split<T_in, NPP, BST>(u_in.select<T_in::size, 1>(0), bft.select_all(), u.select_all());
     } else {
         contract_split<T_in, NPP, P>(u_in.select<T_in::size, 1>(0), bf.select_all(), u.select_all());
     }
@@ -523,7 +527,7 @@ extern "C" _GENX_MAIN_ void bk1_cm(SurfaceIndex bpad [[type("buffer_t")]],
         constexpr int NBP = PAIR ? NBBT : NBB;
         vector<float, NBP> bp;   // rows of this thread's p
         if constexpr (PAIR) {
-            load_blocks<true, 0, NBP, NBP>(bpad, (OFF_T + 2 * NBFT + t * NBBT) * 4, bp);
+            load_blocks<true, 0, NBP, NBP>(bpad, (NB + 2 * NBFT + t * NBBT) * 4, bp);
         } else {
             load_blocks<(nm * P) % 4 == 0, 0, NBP, NBP>(bpad, nm * P * 4, bp);
         }
@@ -546,11 +550,6 @@ extern "C" _GENX_MAIN_ void bk1_cm(SurfaceIndex bpad [[type("buffer_t")]],
         }
     }
 
-    // store
-    if constexpr (in_aligned) {
-        store_blocks<0, nm3, NI>(out, e * (nm3 * 4), od.select_all());
-    } else {
-        store_scattered<0, nm3, NI>(out, e * nm3, od.select_all());
-    }
+    store_element(out, e, od.select_all());
 }
 #endif

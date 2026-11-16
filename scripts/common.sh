@@ -1,12 +1,12 @@
 # common.sh -- sourced by the Intel GPU scripts (scripts/ and its study/,
 # profile/ subdirectories): oneAPI environment, paths and the memory-capped
-# scope every compile and run goes through.
+# scope every run goes through.
 #
 # env:  ONEAPI_ROOT=/opt/intel/oneapi   oneAPI install
 #       ICPX_VERSION=latest             compiler version under $ONEAPI_ROOT/compiler
 #       GPU_DEVICE=acm-g10              ocloc AOT target (acm-g10 = Arc A770/A750, DG2)
 #       ONEAPI_DEVICE_SELECTOR=level_zero:0
-#       MEM_MAX=8G                      memory cap per compile or run (systemd scope)
+#       MEM_MAX=8G                      memory cap per run (systemd scope)
 #       BUILD_DIR=<repo>/build/a770     CMake build tree of the binaries (preset a770)
 
 SCRIPTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -34,9 +34,9 @@ oneapi_env() {
 }
 
 # capped <cmd...>: run cmd in a systemd user scope limited to $MEM_MAX (no
-# swap), so a runaway compile or a too-large problem fails on its own instead
-# of driving the machine into the OOM killer; prints "peak=<MB>MB" on stderr
-# afterwards.  Without systemd-run the command runs uncapped.
+# swap), so a too-large problem fails on its own instead of driving the
+# machine into the OOM killer; prints "peak=<MB>MB" on stderr afterwards.
+# Without systemd-run the command runs uncapped.
 capped() {
     if command -v systemd-run > /dev/null 2>&1; then
         systemd-run --user --scope -q -p MemoryMax="$MEM_MAX" -p MemorySwapMax=0 \

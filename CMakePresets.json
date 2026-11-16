@@ -14,9 +14,7 @@
       "binaryDir": "${sourceDir}/build/a770",
       "cacheVariables": {
         "CMAKE_CXX_COMPILER": "icpx",
-        "BK_GPU_DEVICE": "acm-g10",
-        "CMAKE_CXX_COMPILER_LAUNCHER": "${sourceDir}/scripts/capped",
-        "CMAKE_CXX_LINKER_LAUNCHER": "${sourceDir}/scripts/capped"
+        "BK_GPU_DEVICE": "acm-g10"
       }
     }
   ],

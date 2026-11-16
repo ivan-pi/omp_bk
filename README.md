@@ -138,10 +138,9 @@ configures `build/a770` and builds the named targets one after another.
   `openmp/` drivers are built with `-DBK_ORDER=<p>`, the other programs with
   `-DNQ=<nq>`. No GPU target is in `all`; `all_<prog>` builds every order of
   a program.
-- **Memory cap:** every compile, link and run goes through a systemd user
-  scope capped at `MEM_MAX` (8G) that prints its peak memory
-  (`scripts/capped` is the preset's compiler launcher), and GPU compiles
-  never run two at a time. The host data grow as nelmt * nq^3: BK3 at the
+- **Memory cap:** every run (`scripts/run.sh`) goes through a systemd user
+  scope capped at `MEM_MAX` (8G) that prints its peak memory, and GPU
+  compiles never run two at a time. The host data grow as nelmt * nq^3: BK3 at the
   default 524288 elements needs ~7.5 GB at p = 6 and ~11 GB at p = 7.
 - **Checks:** the kernel-variant harnesses compare every result with a
   double-precision reference computed on the host, one element per OpenMP
@@ -253,7 +252,7 @@ of the other drivers.
 ```sh
 KERNELS=bk1 cm/build.sh           # build/cm/bk1_cm_<p>.bin, p = 1..8 (cmc -> SPIR-V -> ocloc dg2), host build/cm/bk1_cm
 EPT=2 KERNELS=bk1 cm/build.sh 3   # 2 elements per thread -> bk1_cm_3_e2.bin
-build/cm/bk1_cm 4 448000 20       # p, nelmt, ntests: copy_cm yardstick, then bk1_cm at BK_WG="16 32 64"
+build/cm/bk1_cm 4 448000 20       # p, nelmt, ntests: copy_cm bandwidth, then bk1_cm at BK_WG="16 32 64"
 BK_EPT=2 build/cm/bk1_cm 3 875000 20
 ```
 

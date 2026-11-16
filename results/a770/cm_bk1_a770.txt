@@ -4,7 +4,7 @@ binary loaded by interop), float, ~5.6e7 DoFs (nelmt = 5.6e7 / nm^3), best of 20
 after a warm-up, best of two passes, all checks relerr <= 1.9e-7.  The OpenCL host
 used before gave the same device rates and 0.5-2 GDoF/s less host rate.
 
-copy_cm: CM block-copy yardstick in the same binary, device time, 445-455 GB/s.
+copy_cm: CM block-copy bandwidth reference in the same binary, device time, 445-455 GB/s.
 FP32 peak: 512 XVEs x 8 lanes x 2 flop x 2.4 GHz = 19661 GFLOP/s; flop/DoF is the
 algorithmic count of scripts/plot/plot_roofline.py (padding lanes and the work
 duplicated by the p = 8 thread pairs not counted).

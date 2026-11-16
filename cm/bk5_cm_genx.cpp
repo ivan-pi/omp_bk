@@ -1,7 +1,8 @@
 // bk5_cm_genx.cpp -- BK5 (collocated Laplacian at the quadrature points) in C
-// for Metal with the symmetric geometric factors (G6): one element per
-// hardware thread, the element in registers, no shared local memory and no
-// barriers.  Compiled once per order with -DNQ=<nq>, nq = p + 1 (cm/build.sh).
+// for Metal with the symmetric geometric factors (G6).  p <= 7: one element
+// per hardware thread, the element in registers; p = 8: a work-group of nine
+// threads per element, sharing it through SLM.  Compiled once per order with
+// -DNQ=<nq>, nq = p + 1 (cm/build.sh).
 //
 //   out = D_r^T (g_rr qr + g_rs qs + g_rt qt) + D_s^T (g_rs qr + g_ss qs + g_st qt)
 //       + D_t^T (g_rt qr + g_st qs + g_tt qt),   (qr, qs, qt) = (D_r, D_s, D_t) in
@@ -66,7 +67,6 @@ constexpr int P = (nq <= 4) ? 4 : (nq <= 8) ? 8 : 16;   // row width of the s, t
 static_assert(nq >= 2 && nq <= 9, "p = 1..8");
 static_assert(EPT >= 1, "elements per thread");
 
-constexpr int round8(const int n) { return (n + 7) / 8 * 8; }
 constexpr int NP = round8(nq2 + P - nq);   // flat plane stride: the last row's P lanes fit
 constexpr int NR = nq * P;                 // padded plane: nq rows of P
 constexpr int S = (NP > NR) ? NP : NR;     // plane stride of U/O and Q/R (either form)
@@ -115,6 +115,28 @@ _GENX_ inline void rows(vector_ref<float, NX> x, vector_ref<float, NY> y, vector
     }
 }
 
+// fluxes of one plane, row by row: (rr, rs, rt) = G (qr, qs, qt), qr flat,
+// the rest padded; rt overwrites qt
+_GENX_ inline void fluxes(vector_ref<float, NP> qr, vector_ref<float, NR> qs, vector_ref<float, NR> qt,
+                          vector_ref<float, NGR> g, vector_ref<float, NR> rr, vector_ref<float, NR> rs)
+{
+#pragma unroll
+    for (int j = 0; j < nq; ++j) {
+        const int f = j * nq;       // row j of a flat plane
+        const int c = j * P;        // row j of a padded plane
+        const int gj = j * 6 * nq;  // row j of the factors
+        vector<float, P> q0 = qr.select<P, 1>(f);
+        vector_ref<float, P> q1 = qs.select<P, 1>(c);
+        vector_ref<float, P> q2 = qt.select<P, 1>(c);
+        rr.select<P, 1>(c) = g.select<P, 1>(gj) * q0 + g.select<P, 1>(gj + nq) * q1 +
+                             g.select<P, 1>(gj + 2 * nq) * q2;
+        rs.select<P, 1>(c) = g.select<P, 1>(gj + nq) * q0 + g.select<P, 1>(gj + 3 * nq) * q1 +
+                             g.select<P, 1>(gj + 4 * nq) * q2;
+        q2 = g.select<P, 1>(gj + 2 * nq) * q0 + g.select<P, 1>(gj + 4 * nq) * q1 +
+             g.select<P, 1>(gj + 5 * nq) * q2;
+    }
+}
+
 // the factors of plane i of element e, one contiguous run of NG floats
 // (layout 1, G(e, i, j, f, k)): factor f of row j at g(j 6 nq + f nq)
 _GENX_ inline void load_g(SurfaceIndex G, const uint e, const int i, vector_ref<float, NGR> g)
@@ -141,8 +163,6 @@ _GENX_ inline void finish(SurfaceIndex in, SurfaceIndex out, const uint e, const
                           const bool next, vector_ref<float, nq * S> A, vector_ref<float, nq * S> B, vector_ref<float, ND> d)
 {
     constexpr int NS = aligned ? NP : round8(H + nq3);
-    constexpr int B0 = (H == 0) ? 0 : 4;     // aligned middle [B0, B1) of st
-    constexpr int B1 = (H + nq3) / 4 * 4;
     vector<float, NS> st;
 #pragma unroll
     for (int i = 0; i < nq; ++i) {
@@ -167,10 +187,7 @@ _GENX_ inline void finish(SurfaceIndex in, SurfaceIndex out, const uint e, const
     }
     if constexpr (!aligned) {
         if (store) {
-            const uint base = e * nq3 - H;
-            store_scattered<H, B0 - H, NS>(out, base, st.select_all());
-            store_blocks<B0, B1 - B0, NS>(out, base * 4, st.select_all());
-            store_scattered<B1, H + nq3 - B1, NS>(out, base, st.select_all());
+            store_span<H, nq3, NS>(out, e * nq3 - H, st.select_all());
         }
     }
 }
@@ -206,9 +223,13 @@ extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
     load_blocks<true, 0, ND, ND>(dpad, 0, d);
     vector<float, nq * S> B;
 
-    // EPT elements; past nelmt the reads return 0 and nothing is stored
+    // EPT elements; past nelmt the loads repeat the last element (clamped
+    // index) and nothing is stored
+    const uint last = uint(nelmt) - 1;
     for (int t = 0; t < EPT; ++t) {
         const uint e = e0 + t * W;
+        const uint el = (e < last) ? e : last;            // element loaded
+        const uint en = (e + W < last) ? e + W : last;    // next element loaded
         const bool next = (t + 1 < EPT);
 
         // r derivative, flat planes: Q_i = sum_n D(i, n) U_n
@@ -233,31 +254,17 @@ extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
             rows<P, 1, nq, true, 0, 0, false>(u, u, d, qs.select_all());
             rows<0, 0, 0, false, DCOL, nq, true>(u, u, d, qt.select_all());
 
-            // fluxes, row by row: (rr, rs, rt) = G (qr, qs, qt); rt -> qt
+            // fluxes; R_i = rr, rt -> qt
             vector<float, NR> rr;
             vector<float, NR> rs;
-#pragma unroll
-            for (int j = 0; j < nq; ++j) {
-                const int f = j * nq;       // row j of a flat plane
-                const int c = j * P;        // row j of a padded plane
-                const int gj = j * 6 * nq;  // row j of the factors
-                vector<float, P> q0 = qr.select<P, 1>(f);
-                vector_ref<float, P> q1 = qs.select<P, 1>(c);
-                vector_ref<float, P> q2 = qt.select<P, 1>(c);
-                rr.select<P, 1>(c) = g.select<P, 1>(gj) * q0 + g.select<P, 1>(gj + nq) * q1 +
-                                     g.select<P, 1>(gj + 2 * nq) * q2;
-                rs.select<P, 1>(c) = g.select<P, 1>(gj + nq) * q0 + g.select<P, 1>(gj + 3 * nq) * q1 +
-                                     g.select<P, 1>(gj + 4 * nq) * q2;
-                q2 = g.select<P, 1>(gj + 2 * nq) * q0 + g.select<P, 1>(gj + 4 * nq) * q1 +
-                     g.select<P, 1>(gj + 5 * nq) * q2;
-            }
+            fluxes(qr, qs.select_all(), qt.select_all(), g.select_all(), rr.select_all(), rs.select_all());
             B.select<NR, 1>(i * S) = rr;
 
             // the next factors: plane i + 1, or plane 0 of the next element
             if (i + 1 < nq) {
-                load_g(G, e, i + 1, g.select_all());
+                load_g(G, el, i + 1, g.select_all());
             } else if (next) {
-                load_g(G, e + W, 0, g.select_all());
+                load_g(G, en, 0, g.select_all());
             }
 
             // s and t back-contractions into O_i (U_i is dead)
@@ -267,21 +274,21 @@ extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
         // r back-contraction and store (four cases of the alignment for odd
         // nq); the next element's in is loaded plane by plane meanwhile
         const bool store = (e < uint(nelmt));
-        if constexpr (nq3 % 4 == 0) {
-            finish<0>(in, out, e, e + W, store, next, A.select_all(), B.select_all(), d);
+        if constexpr (aligned) {
+            finish<0>(in, out, e, en, store, next, A.select_all(), B.select_all(), d);
         } else {
             switch ((e * nq3) % 4) {
             case 0:
-                finish<0>(in, out, e, e + W, store, next, A.select_all(), B.select_all(), d);
+                finish<0>(in, out, e, en, store, next, A.select_all(), B.select_all(), d);
                 break;
             case 1:
-                finish<1>(in, out, e, e + W, store, next, A.select_all(), B.select_all(), d);
+                finish<1>(in, out, e, en, store, next, A.select_all(), B.select_all(), d);
                 break;
             case 2:
-                finish<2>(in, out, e, e + W, store, next, A.select_all(), B.select_all(), d);
+                finish<2>(in, out, e, en, store, next, A.select_all(), B.select_all(), d);
                 break;
             default:
-                finish<3>(in, out, e, e + W, store, next, A.select_all(), B.select_all(), d);
+                finish<3>(in, out, e, en, store, next, A.select_all(), B.select_all(), d);
                 break;
             }
         }
@@ -293,22 +300,20 @@ extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
 // One element does not fit a thread's registers at nq = 9, so, as in the
 // SYCL and OpenMP kernels, the nq threads of a work-group share
 // them through shared local memory: thread i of an element owns plane i.
-// One element per work-group (B = 1; 2 and 3 measured 5-10% slower), its SLM
-// 8.4 KB, so that a Xe-core holds as many groups as its threads allow.
+// One element per work-group (two and three measured 5-10% slower), its SLM
+// 8.4 KB, so that a Xe-core holds as many groups as its threads allow; the
+// host launches exactly nelmt groups of nq threads.
 //   load    plane i of in -> U_i (SLM), the factors of plane i, rows i of
 //           Drow and Dcol                                          barrier
 //   steps   Q_i = sum_n D(i, n) U_n (U_n read from SLM); qs, qt, fluxes and
 //           the s, t back-contractions O_i on plane i in registers, as
 //           for p <= 7; R_i = rr -> SLM                            barrier
 //   out_i = O_i + sum_n D(n, i) R_n (R_n read from SLM), packed, stored
-// Every thread reaches both barriers, also past nelmt (the reads there
-// return 0 and nothing is stored).
 
 static_assert(EPT == 1, "nq = 9: one element per nq threads");
-constexpr int MAXB = 1;                  // elements per work-group
-constexpr int SPU = NP;                  // SLM plane strides (floats): U flat,
-constexpr int SPR = NR;                  // R padded
-constexpr int SLM_E = nq * (SPU + SPR) * 4;   // bytes per element
+constexpr int SPU = NP;                       // SLM plane strides (floats): U flat,
+constexpr int SPR = NR;                       // R padded
+constexpr int SLM_E = nq * (SPU + SPR) * 4;   // bytes: U, then R
 static_assert(SPU % 4 == 0 && SPR % 4 == 0, "SLM planes 16 B aligned");
 
 // out_i: the padded rows of o packed at offset H of st, st(0) being the
@@ -318,16 +323,12 @@ template <int H>
 _GENX_ inline void store_plane(SurfaceIndex out, const uint base, vector_ref<float, NR> o)
 {
     constexpr int NS = round8(H + nq2);
-    constexpr int B0 = (H == 0) ? 0 : 4;
-    constexpr int B1 = (H + nq2) / 4 * 4;
     vector<float, NS> st;
 #pragma unroll
     for (int j = 0; j < nq; ++j) {
         st.select<nq, 1>(H + j * nq) = o.select<nq, 1>(j * P);
     }
-    store_scattered<H, B0 - H, NS>(out, base, st.select_all());
-    store_blocks<B0, B1 - B0, NS>(out, base * 4, st.select_all());
-    store_scattered<B1, H + nq2 - B1, NS>(out, base, st.select_all());
+    store_span<H, nq2, NS>(out, base, st.select_all());
 }
 
 extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
@@ -336,14 +337,12 @@ extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
                                    SurfaceIndex out [[type("buffer_t")]],
                                    int nelmt)
 {
-    cm_slm_init(MAXB * SLM_E);
-    const uint slm = cm_slm_alloc(MAXB * SLM_E);
-    const uint l = cm_local_id(0);
-    const uint b = l / nq;                        // element of the group
-    const int i = int(l % nq);                    // plane of this thread
-    const uint e = cm_group_id(0) * MAXB + b;
-    const uint su = b * SLM_E;                    // U of this element (bytes)
-    const uint sr = su + nq * SPU * 4;            // R of this element
+    cm_slm_init(SLM_E);
+    const uint slm = cm_slm_alloc(SLM_E);
+    const int i = int(cm_local_id(0));            // plane of this thread
+    const uint e = cm_group_id(0);                // element of the group
+    constexpr uint su = 0;                        // U in SLM (bytes)
+    constexpr uint sr = nq * SPU * 4;             // R in SLM
 
     // load: plane i of in (to SLM) and its factors, the basis, row i of
     // Drow (D(i, n)) and of Dcol (D(n, i))
@@ -380,22 +379,10 @@ extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
     rows<P, 1, nq, true, 0, 0, false>(u.select_all(), u.select_all(), d, qs.select_all());
     rows<0, 0, 0, false, DCOL, nq, true>(u.select_all(), u.select_all(), d, qt.select_all());
 
-    // fluxes, row by row: (rr, rs, rt) = G (qr, qs, qt); rt -> qt
+    // fluxes; R_i = rr -> SLM, rt -> qt
     vector<float, NR> rr;
     vector<float, NR> rs;
-#pragma unroll
-    for (int j = 0; j < nq; ++j) {
-        const int f = j * nq;
-        const int c = j * P;
-        const int gj = j * 6 * nq;
-        vector<float, P> q0 = qr.select<P, 1>(f);
-        vector_ref<float, P> q1 = qs.select<P, 1>(c);
-        vector_ref<float, P> q2 = qt.select<P, 1>(c);
-        rr.select<P, 1>(c) = g.select<P, 1>(gj) * q0 + g.select<P, 1>(gj + nq) * q1 + g.select<P, 1>(gj + 2 * nq) * q2;
-        rs.select<P, 1>(c) = g.select<P, 1>(gj + nq) * q0 + g.select<P, 1>(gj + 3 * nq) * q1 +
-                             g.select<P, 1>(gj + 4 * nq) * q2;
-        q2 = g.select<P, 1>(gj + 2 * nq) * q0 + g.select<P, 1>(gj + 4 * nq) * q1 + g.select<P, 1>(gj + 5 * nq) * q2;
-    }
+    fluxes(qr.select_all(), qs.select_all(), qt.select_all(), g.select_all(), rr.select_all(), rs.select_all());
     slm_blocks<true, 0, 0, SPR, NR>(slm, sr + i * SPR * 4, rr.select_all());
 
     // s and t back-contractions: O_i
@@ -413,22 +400,20 @@ extern "C" _GENX_MAIN_ void bk5_cm(SurfaceIndex dpad [[type("buffer_t")]],
     }
 
     // store plane i (four cases of its alignment)
-    if (e < uint(nelmt)) {
-        const uint base = e * nq3 + i * nq2;
-        switch (base % 4) {
-        case 0:
-            store_plane<0>(out, base, o.select_all());
-            break;
-        case 1:
-            store_plane<1>(out, base - 1, o.select_all());
-            break;
-        case 2:
-            store_plane<2>(out, base - 2, o.select_all());
-            break;
-        default:
-            store_plane<3>(out, base - 3, o.select_all());
-            break;
-        }
+    const uint base = e * nq3 + i * nq2;
+    switch (base % 4) {
+    case 0:
+        store_plane<0>(out, base, o.select_all());
+        break;
+    case 1:
+        store_plane<1>(out, base - 1, o.select_all());
+        break;
+    case 2:
+        store_plane<2>(out, base - 2, o.select_all());
+        break;
+    default:
+        store_plane<3>(out, base - 3, o.select_all());
+        break;
     }
 }
 #endif

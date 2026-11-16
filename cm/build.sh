@@ -8,30 +8,31 @@
 #   bk5 -> build/cm/bk5_cm (host) and build/cm/bk5_cm_<p>.bin (nq = p + 1)
 #
 # Kernel: cmc (the 2021 CM SDK, $CSDK_DIR) -> SPIR-V -> ocloc for $CM_GPU
-# (default dg2) with the vector-compute backend.  From nq = 6 a kernel uses
-# the large register file (-double-GRF: 256 GRFs, half the threads per EU)
-# to hold its element without spills; GRF=128 or GRF=256 forces one mode for
-# every order.  CMC_FLAGS adds cmc options (e.g. -DSTORE_LANES=32).  EPT=n
-# compiles n elements per thread into bk1_cm_<p>_e<n>.bin (BK1 only; run it
-# with BK_EPT=n).  KEEP=1 keeps the IGC dumps (Gen asm) in
-# $BUILD_DIR/dump_<kernel>_<p>/.
+# (default $GPU_DEVICE of scripts/common.sh) with the vector-compute backend.
+# From nq = 6 a kernel uses the large register file (-double-GRF: 256 GRFs,
+# half the threads per EU) to hold its element without spills; GRF=128 or
+# GRF=256 forces one mode for every order.  CMC_FLAGS adds cmc options.
+# EPT=n compiles n elements per thread into <kernel>_cm_<p>_e<n>.bin (BK1
+# p <= 6, BK5 p <= 7; run it with BK_EPT=n).  KEEP=1 keeps the IGC dumps
+# (Gen asm) in $BUILD_DIR/dump_<binary name>/.
 #
-# Host: icpx -fsycl (oneAPI, set up by scripts/common.sh) with OpenMP for
-# the reference, -fp-model=precise (icpx defaults to a fast model), linked
-# to Level Zero and OpenCL for the interop that loads the binaries, with an
-# RPATH (also for its own dependencies) to the SYCL runtime so the hosts run without the oneAPI environment.
+# Host (rebuilt when its sources are newer): icpx -fsycl with OpenMP for the
+# reference, -fp-model=precise (icpx defaults to a fast model), linked to
+# Level Zero and OpenCL for the interop that loads the binaries.  An RPATH
+# to the oneAPI runtime and a direct link of libumf let the hosts run
+# without the oneAPI environment.
 
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 BUILD_DIR=$(realpath -m "${BUILD_DIR:-$REPO/build/cm}")
 CSDK_DIR=${CSDK_DIR:-/opt/intel/cm_sdk_20211028}
 CMC=${CMC:-$CSDK_DIR/usr/bin/cmc}
-CM_GPU=${CM_GPU:-dg2}
 CXX=${CXX:-icpx}
 KERNELS=${KERNELS:-bk1 bk5}
 orders=${*:-1 2 3 4 5 6 7 8}
 mkdir -p "$BUILD_DIR"
 . "$REPO/scripts/common.sh"
+CM_GPU=${CM_GPU:-$GPU_DEVICE}
 set +eu   # the oneAPI vars.sh scripts are not set -eu clean
 oneapi_env
 set -eu
@@ -61,9 +62,9 @@ for kernel in $KERNELS; do
             -- "$REPO/cm/${kernel}_cm_genx.cpp"
         dump=()
         if [ "${KEEP:-0}" = 1 ]; then
-            rm -rf "$BUILD_DIR/dump_${kernel}_$p"
-            mkdir -p "$BUILD_DIR/dump_${kernel}_$p"
-            dump=(env IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir="$BUILD_DIR/dump_${kernel}_$p")
+            rm -rf "$BUILD_DIR/dump_$name"
+            mkdir -p "$BUILD_DIR/dump_$name"
+            dump=(env IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir="$BUILD_DIR/dump_$name")
         fi
         log=$BUILD_DIR/$name.log
         ${dump[@]+"${dump[@]}"} ocloc compile -q -file "$spv" -spirv_input -device "$CM_GPU" -options "$opts" \
@@ -71,7 +72,11 @@ for kernel in $KERNELS; do
         spill=$(sed -n "s/.*Spill memory used = \([0-9]*\) bytes for kernel ${kernel}_cm.*/\1/p" "$log")
         echo "$name.bin  nq=$nq GRF=$grf${spill:+  SPILL=${spill}B}"
     done
-    "$CXX" -fsycl -std=c++17 -O2 -fp-model=precise -fiopenmp -Wall -I"$REPO/include" -I"$REPO/cm" \
-        "$REPO/cm/${kernel}_cm.cpp" -lze_loader -lOpenCL ${umf[@]+"${umf[@]}"} -Wl,--disable-new-dtags,-rpath,"$rpath" -o "$BUILD_DIR/${kernel}_cm"
-    echo "${kernel}_cm (host)"
+    host=$BUILD_DIR/${kernel}_cm
+    src=$REPO/cm/${kernel}_cm.cpp
+    if [ ! -x "$host" ] || [ -n "$(find "$src" "$REPO/cm/cm_sycl.hpp" "$REPO"/include/bk_*.h -newer "$host")" ]; then
+        "$CXX" -fsycl -std=c++17 -O2 -fp-model=precise -fiopenmp -Wall -I"$REPO/include" -I"$REPO/cm" "$src" \
+            -lze_loader -lOpenCL ${umf[@]+"${umf[@]}"} -Wl,--disable-new-dtags,-rpath,"$rpath" -o "$host"
+        echo "${kernel}_cm (host)"
+    fi
 done

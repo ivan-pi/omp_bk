@@ -1,16 +1,14 @@
-// cm_common.h -- memory helpers and the copy yardstick shared by the C for
-// Metal kernels of cm/ (bk1_cm_genx.cpp, bk5_cm_genx.cpp).
+// cm_common.h -- memory helpers and the copy_cm bandwidth kernel shared by
+// the C for Metal kernels of cm/ (bk1_cm_genx.cpp, bk5_cm_genx.cpp).
 
 #pragma once
 
 #include <cm/cm.h>
 
-#ifndef STORE_LANES
-#define STORE_LANES 16   // lanes of the scattered writes (unaligned stores)
-#endif
-static_assert(STORE_LANES == 8 || STORE_LANES == 16 || STORE_LANES == 32, "scattered write width");
+constexpr int STORE_LANES = 16;   // lanes of the scattered writes (32: no faster)
 
 constexpr int round4(const int n) { return (n + 3) / 4 * 4; }
+constexpr int round8(const int n) { return (n + 7) / 8 * 8; }
 
 // --------------------------------------------------------------------------
 // memory
@@ -70,6 +68,20 @@ _GENX_ inline void store_scattered(SurfaceIndex buf, uint base, vector_ref<float
     }
 }
 
+// N floats from v[H, H + N) to element offset base + H, v(0) being 16 B
+// aligned at element offset `base`: OWord block writes of the aligned middle,
+// scattered writes of the unaligned head and tail
+template <int H, int N, int TOT>
+_GENX_ inline void store_span(SurfaceIndex buf, uint base, vector_ref<float, TOT> v)
+{
+    static_assert(H >= 0 && H < 4, "head offset inside the first OWord");
+    constexpr int B0 = (H == 0) ? 0 : 4;   // aligned middle [B0, B1)
+    constexpr int B1 = (H + N) / 4 * 4;
+    store_scattered<H, B0 - H, TOT>(buf, base, v);
+    store_blocks<B0, B1 - B0, TOT>(buf, base * 4, v);
+    store_scattered<B1, H + N - B1, TOT>(buf, base, v);
+}
+
 // SLM block copies of 32, 16, 8 or 4 floats: v[OFF, OFF + N) <-> byte
 // offset base + (OFF - V0) * 4 of the SLM buffer `slm` (the handle of
 // cm_slm_alloc: an offset added to the handle itself is ignored, every
@@ -89,7 +101,7 @@ _GENX_ inline void slm_blocks(uint slm, uint base, vector_ref<float, TOT> v)
 }
 
 // --------------------------------------------------------------------------
-// memory yardstick: copy COPY_CHUNK floats per thread
+// copy_cm: copy COPY_CHUNK floats per thread, the bandwidth reference of the hosts
 // --------------------------------------------------------------------------
 constexpr int COPY_CHUNK = 256;
 

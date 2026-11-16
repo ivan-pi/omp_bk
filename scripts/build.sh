@@ -17,12 +17,11 @@
 # (every target is named by the polynomial order p)
 #
 # The first call configures $BUILD_DIR with the preset; later calls reuse it.
-# Each compile and link runs at low priority in a memory-capped scope
-# (scripts/capped, common.sh), never two at a time (BK_GPU_JOBS=1).  Prints
-# one line per target with its exit status, largest peak memory and time;
-# the full output is in $BUILD_DIR/logs/<target>.log.
+# GPU compiles and links never run two at a time (BK_GPU_JOBS=1).  Prints one
+# line per target with its exit status and time; the full output is in
+# $BUILD_DIR/logs/<target>.log.
 #
-# env:  see common.sh (GPU_DEVICE, MEM_MAX, BUILD_DIR, ICPX_VERSION);
+# env:  see common.sh (GPU_DEVICE, BUILD_DIR, ICPX_VERSION);
 #       EXTRA_FLAGS are added to the compile and link flags of every GPU
 #       target of $BUILD_DIR (e.g. EXTRA_FLAGS="-ftarget-register-alloc-mode=..."),
 #       so give such builds their own tree: BUILD_DIR=build/a770-grf.
@@ -39,10 +38,13 @@ fi
 oneapi_env
 mkdir -p "$BUILD_DIR/logs"
 cd "$REPO"
-# configure when the tree is new or its device or flags differ
+# configure when the tree is new or its device or flags differ, or when it
+# still has the compiler launcher of an older preset (scripts/capped)
 cached() { sed -n "s/^$1:[A-Z]*=//p" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; }
-if [ "$(cached BK_GPU_DEVICE)" != "$GPU_DEVICE" ] || [ "$(cached BK_EXTRA_FLAGS)" != "${EXTRA_FLAGS:-}" ]; then
+if [ "$(cached BK_GPU_DEVICE)" != "$GPU_DEVICE" ] || [ "$(cached BK_EXTRA_FLAGS)" != "${EXTRA_FLAGS:-}" ] ||
+        [ -n "$(cached CMAKE_CXX_COMPILER_LAUNCHER)" ]; then
     if ! cmake --preset a770 -B "$BUILD_DIR" -DBK_GPU_DEVICE="$GPU_DEVICE" \
+            -UCMAKE_CXX_COMPILER_LAUNCHER -UCMAKE_CXX_LINKER_LAUNCHER \
             -DBK_EXTRA_FLAGS="${EXTRA_FLAGS:-}" > "$BUILD_DIR/logs/configure.log" 2>&1; then
         cat "$BUILD_DIR/logs/configure.log" >&2
         exit 1
@@ -57,8 +59,7 @@ for target in "$@"; do
     cmake --build "$BUILD_DIR" --target "$target" > "$log" 2>&1
     rc=$?
     set -e
-    peak=$(sed -n 's/.*peak=\([0-9]*\)MB.*/\1/p' "$log" | sort -n | tail -1)
-    echo "$target rc=$rc${peak:+ peak=${peak}MB} time=$(( $(date +%s) - start ))s"
+    echo "$target rc=$rc time=$(( $(date +%s) - start ))s"
     if [ $rc -ne 0 ]; then
         tail -20 "$log" >&2
         status=1
