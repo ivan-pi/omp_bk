@@ -87,6 +87,28 @@ struct gs_steps {
                 tmp * JxW[e * nq * nq * nq + (p * nq + q) * nq + r];
         }
     }
+    // step 4 without JxW (BK3's interpolation to the points), thread (e, q, p):
+    // w0(e,q,p,k) -> w1(e,r,q,p)
+    static void s4u(const int tid, const T* __restrict__ B, const T* __restrict__ w0, T* __restrict__ w1)
+    {
+        const int e = tid / (nq * nq);
+        const int q = tid % (nq * nq) / nq;
+        const int p = tid % nq;
+        T reg[nm];
+        UNROLL
+        for (int k = 0; k < nm; ++k) {
+            reg[k] = w0[e * nq * nq * nm + q * nq * nm + p * nm + k];
+        }
+        UNROLL
+        for (int r = 0; r < nq; ++r) {
+            T tmp = 0;
+            UNROLL
+            for (int k = 0; k < nm; ++k) {
+                tmp += reg[k] * B[k * nq + r];
+            }
+            w1[e * nq * nq * nq + r * nq * nq + q * nq + p] = tmp;
+        }
+    }
     // step 4 with JxW stored transposed per element, JxW_t(e, r, q, p) =
     // JxW(e, p, q, r): neighbouring lanes (p) read neighbouring values
     static void s4t(const int tid, const T* __restrict__ B, const T* __restrict__ JxW_t, const T* __restrict__ w0, T* __restrict__ w1)

@@ -1,9 +1,7 @@
 #include <cstddef>
 #include <iostream>
-#include <cmath>
 #include <array>
 #include <vector>
-#include <cstdlib>
 
 #include "bk_common.h"
 #include "bk3_sumfact.h"

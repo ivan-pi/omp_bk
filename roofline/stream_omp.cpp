@@ -98,9 +98,12 @@ void k_bk1p2(float* a, float* b, float* c, const std::size_t n, float*)
     }
 }
 
+// floats read9 writes: blocks of 256, nine reads each
+std::size_t read9_written(const std::size_t n) { return n / (9 * 256) * 256; }
+
 void k_read9(float* a, float*, float* c, const std::size_t n, float*)
 {
-    const std::size_t nw = n / (9 * 256) * 256;
+    const std::size_t nw = read9_written(n);
     #pragma omp target teams distribute parallel for is_device_ptr(a, c)
     for (std::size_t i = 0; i < nw; ++i) {
         const std::size_t blk = i / 256;
@@ -173,8 +176,7 @@ int main(int argc, char** argv)
     report("add",   3 * fb * n, time_min(ntests, k_add,   a, b, c, n, &sum));
     report("triad", 3 * fb * n, time_min(ntests, k_triad, a, b, c, n, &sum));
     report("bk1p2", fb * ne * (27 + 64 + 27), time_min(ntests, k_bk1p2, a, b, c, n, &sum));
-    const std::size_t nw = n / (9 * 256) * 256;
-    report("read9", fb * nw * 10, time_min(ntests, k_read9, a, b, c, n, &sum));
+    report("read9", fb * read9_written(n) * 10, time_min(ntests, k_read9, a, b, c, n, &sum));
 
     // after copy, scale, add and the triads: a = b + 3 c with b = 3 c, c = a + b
     k_read(a, b, c, n, &sum);

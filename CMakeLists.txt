@@ -11,11 +11,10 @@
 #     one binary per order, ahead-of-time compiled for BK_GPU_DEVICE, none of
 #     them in `all` (each takes minutes and gigabytes to build):
 #       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<p>    openmp/ drivers, OpenMP offload (-DBK_ORDER=p)
-#       bk1_offload_<p> bk5_offload_<p>        openmp/offload/ kernel variants (-DNQ=nq)
-#       bk3_offload_<p> bk3_sycl_<p>           BK3 kernel variants (OpenMP offload, SYCL)
-#       bk1_sycl_<p> bk5_sycl_<p>              sycl/ (-DNQ=nq; _jit: JIT-compiled, for
-#                                              specialization constants)
-#     named by the polynomial order p (BK1: nq = p + 2, BK5: nq = p + 1),
+#       bk{1,3,5}_offload_<p>                  openmp/offload/ kernel variants (-DNQ=nq)
+#       bk{1,3,5}_sycl_<p>                     sycl/ (-DNQ=nq; bk1 and bk5 _jit: JIT-compiled,
+#                                              for specialization constants)
+#     named by the polynomial order p (BK1, BK3: nq = p + 2, BK5: nq = p + 1),
 #       all_<prog>                             every order of <prog>
 #     and in `all`: stream_omp (OpenMP offload) and bk_tinytc (if tinytc is found).
 #

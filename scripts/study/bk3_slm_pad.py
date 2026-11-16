@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""bk3_slm_pad.py -- strides of the local boxes of the BK3 sf kernel
-(sycl/bk3_sycl.cpp, openmp/offload/bk3_offload.cpp) that keep its access
-patterns free of SLM bank conflicts.
+"""bk3_slm_pad.py -- strides of the SLM boxes of the BK3 sf kernel
+(include/bk3_gpu_steps.h) that keep its access patterns free of bank
+conflicts; the result is bk3gpu::box_padded (include/bk3_gpu.h).
 
 A box element (e, a, b, c) sits at e * se + a * sa + b * sb + c.  Each step
 of the kernel has work-item t = (e, x, y) access one fixed index and vary
@@ -13,7 +13,6 @@ current layout (sb = nq or nq + 1 for even nq) and the cheapest strides
 
 usage:  scripts/study/bk3_slm_pad.py [nq ...]     (default 3..10)
 """
-import itertools
 import sys
 
 BANKS = 16
@@ -25,9 +24,9 @@ def patterns(nq, nm):
         ("copy", None, None),
         ("1/9 (i,j)", (nm, nm), lambda x, y: (x, y, 1)),
         ("2/8 (i,r)", (nm, nq), lambda x, y: (x, 1, y)),
-        ("3/C/7 (q,r)", (nq, nq), lambda x, y: (1, x, y)),
-        ("A/E (p,r)", (nq, nq), lambda x, y: (x, 1, y)),
-        ("B/F (p,q)", (nq, nq), lambda x, y: (x, y, 1)),
+        ("3/5/7 (q,r)", (nq, nq), lambda x, y: (1, x, y)),
+        ("4/6 (p,r)", (nq, nq), lambda x, y: (x, 1, y)),
+        ("4/6 (p,q)", (nq, nq), lambda x, y: (x, y, 1)),
     ]
 
 

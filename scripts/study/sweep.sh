@@ -43,4 +43,4 @@ for prog in $PROGS; do
     done
 done
 "$SCRIPTS/run.sh" stream_omp > "$BUILD_DIR/stream_omp.out" 2>&1
-grep -E "^(read|write|copy|scale|add|triad|bk1p2|check)" "$BUILD_DIR/stream_omp.out"
+grep -E "^(read|write|copy|scale|add|triad|bk1p2|read9|check)" "$BUILD_DIR/stream_omp.out"

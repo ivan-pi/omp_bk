@@ -186,18 +186,18 @@ offload, SYCL, tinytc) with the scripts that produced them; the roofline
 All of them are memory-bound, at 71-97% of the STREAM bandwidth roof.
 
 BK3 (`bk3_offload`, `bk3_sycl`; `results/a770/bk3_pick_a770.txt`, median of
-3 runs at ~2e7 DoFs, best of the two APIs) against two roofs: STREAM copy
-(459 GB/s) and `stream_omp`'s read9 (428 GB/s), which has BK3's mix of ~90%
-reads (in + G against out):
+3 runs at ~2e7 DoFs, best of the two APIs) against two roofs measured by
+`stream_omp` in the same run: STREAM copy (454 GB/s) and read9 (426 GB/s),
+which has BK3's mix of ~90% reads (in + G against out):
 
 | p             | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
 |---------------|------|------|------|------|------|------|------|------|
-| GDoF/s        | 4.45 | 6.31 | 6.59 | 7.95 | 7.43 | 8.83 | 7.29 | 8.24 |
-| % of copy     | 86   | 89   | 79   | 86   | 75   | 84   | 67   | 73   |
-| % of read9    | 92   | 96   | 84   | 92   | 80   | 90   | 72   | 79   |
+| GDoF/s        | 4.48 | 6.30 | 6.84 | 7.60 | 7.40 | 8.90 | 7.51 | 8.25 |
+| % of copy     | 88   | 90   | 83   | 83   | 75   | 86   | 70   | 74   |
+| % of read9    | 93   | 96   | 88   | 88   | 80   | 91   | 74   | 79   |
 
 What mattered: SIMD8 (`_sg8` in SYCL; IGC picks it by itself for the OpenMP
-`cu`) and the basis matrices held in registers (`sfr`, OpenMP suffix `r`).
+`cu`) and the basis matrices held in registers (variant suffix `r`).
 At p = 5, 7, 8 the compute steps (~11 GDoF/s alone) and the G stream (~9.4
 GDoF/s alone) overlap poorly; SLM padding, fill groups, prefetching G and
 a compile-time work-group size changed little there.
