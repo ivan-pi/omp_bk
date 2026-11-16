@@ -9,9 +9,10 @@
 #   all of them threaded with OpenMP if BK_ENABLE_OPENMP and the compiler
 #   supports it, serial otherwise.
 #
-#   Intel GPU (icpx, BK_GPU_DEVICE = an ocloc device such as acm-g10;
-#   presets "intel-gpu" and "a770"): one binary per order, ahead-of-time
-#   compiled for BK_GPU_DEVICE, by backend:
+#   Intel GPU (icpx, BK_GPU_DEVICE = an ocloc device such as acm-g10, or jit
+#   for SPIR-V compiled at run time; presets "gpu-openmp", "gpu-sycl" and
+#   "a770"): one binary per order, ahead-of-time compiled for BK_GPU_DEVICE,
+#   by backend:
 #     BK_ENABLE_OPENMP (ON):  OpenMP offload
 #       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<p>    openmp/ drivers (-DBK_ORDER=p)
 #       bk{1,3,5}_offload_<p>                  openmp/offload/ kernel variants (-DNQ=nq)
@@ -24,15 +25,16 @@
 #   named by the polynomial order p (BK1, BK3: nq = p + 2, BK5: nq = p + 1),
 #     all_<prog>                               every order of <prog>
 #     all_openmp, all_sycl                     every program of a backend
-#   Each per-order binary takes minutes and gigabytes to build.  They are in
-#   `all` unless BK_GPU_IN_ALL=OFF (preset "a770", where scripts/build.sh
-#   builds them by name or through the all_* targets).  BK_ORDERS_* trim the
-#   orders, BK_GPU_JOBS sets how many compile at once.
+#     drivers                                  every order of BK1, BK3, BK5, BK1_ff
+#   The per-order programs are in `all` unless BK_GPU_IN_ALL=OFF (preset
+#   "a770", where scripts/build.sh builds them by name or through the all_*
+#   targets).  BK_ORDERS_* trim the orders.
 #   OpenMP and SYCL both come with icpx; tinytc is a separate install.
 #
 # One order per binary, so the device compiler sees one kernel set at a
-# time.  Compiles and links of the GPU targets run in the job pool bk_gpu
-# (Ninja; BK_GPU_JOBS at a time).
+# time.  With BK_GPU_JOBS > 0 the compiles and links of the GPU targets run
+# in the Ninja job pool bk_gpu, BK_GPU_JOBS at a time (each peaks at about
+# 0.5 GB once the host loop optimizer is off, BK_GPU_HOST_LOOPOPT_OFF).
 #
 # No build type is needed: the flags below include -O3, and the benchmark
 # keeps its asserts (no -DNDEBUG).
@@ -44,8 +46,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(BK_GPU_DEVICE "" CACHE STRING "ocloc device for the Intel GPU targets (e.g. acm-g10); empty: host build")
-set(BK_GPU_JOBS 1 CACHE STRING "GPU compiles and links run at the same time (Ninja job pool)")
+set(BK_GPU_DEVICE "" CACHE STRING "ocloc device for the Intel GPU targets (e.g. acm-g10), or jit: SPIR-V compiled at run time; empty: host build")
+set(BK_GPU_JOBS 0 CACHE STRING "GPU compiles and links run at the same time (Ninja job pool); 0: no limit beyond ninja -j")
 set(BK_EXTRA_FLAGS "" CACHE STRING "extra compile and link flags of the GPU targets")
 set(BK_ORDERS_P "1;2;3;4;5;6;7;8" CACHE STRING "orders p of BK1_<p>, BK3_<p>, BK1_ff_<p>")
 set(BK_ORDERS_BK5 "1;2;3;4;5;6;7" CACHE STRING "orders p of BK5_<p>")
@@ -53,6 +55,7 @@ set(BK_ORDERS_GPU "1;2;3;4;5;6;7;8" CACHE STRING "orders p of the GPU variant pr
 option(BK_ENABLE_OPENMP "OpenMP: threads in the host tree, offload programs in the GPU tree" ON)
 option(BK_ENABLE_SYCL "SYCL programs (GPU tree)" ON)
 option(BK_ENABLE_TINYTC "bk_tinytc (GPU tree; needs tinytc and BK_ENABLE_SYCL)" OFF)
+option(BK_GPU_HOST_LOOPOPT_OFF "GPU tree: compile host code without icpx's loop optimizer (much faster builds, same device code)" ON)
 option(BK_GPU_IN_ALL "put the per-order GPU programs in `all` (each takes minutes to build)" ON)
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
@@ -126,7 +129,9 @@ endif()
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     message(FATAL_ERROR "BK_GPU_DEVICE=${BK_GPU_DEVICE} needs icpx (CMAKE_CXX_COMPILER=icpx), not ${CMAKE_CXX_COMPILER_ID}")
 endif()
-set_property(GLOBAL APPEND PROPERTY JOB_POOLS bk_gpu=${BK_GPU_JOBS})
+if(BK_GPU_JOBS GREATER 0)
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS bk_gpu=${BK_GPU_JOBS})
+endif()
 separate_arguments(bk_extra UNIX_COMMAND "${BK_EXTRA_FLAGS}")
 
 # api: omp (OpenMP offload, AOT), sycl (AOT), sycl_jit (SPIR-V, compiled at
@@ -135,7 +140,14 @@ separate_arguments(bk_extra UNIX_COMMAND "${BK_EXTRA_FLAGS}")
 # offload targets).
 function(bk_gpu_target name api)
     target_include_directories(${name} PRIVATE ${BK_INCLUDE})
-    if(api STREQUAL "omp")
+    if(BK_GPU_DEVICE STREQUAL "jit" AND api STREQUAL "omp")
+        target_include_directories(${name} PRIVATE ${BK_OPENMP})
+        target_compile_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64)
+        target_link_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64)
+    elseif(BK_GPU_DEVICE STREQUAL "jit" AND api STREQUAL "sycl")
+        bk_gpu_target(${name} sycl_jit)
+        return()
+    elseif(api STREQUAL "omp")
         target_include_directories(${name} PRIVATE ${BK_OPENMP})
         target_compile_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64_gen)
         target_link_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64_gen
@@ -151,9 +163,18 @@ function(bk_gpu_target name api)
         target_compile_options(${name} PRIVATE -fsycl -fiopenmp)
         target_link_options(${name} PRIVATE -fsycl -fiopenmp)
     endif()
+    # icpx's loop optimizer (HIR) spends almost all of the compile time of these
+    # programs on the host side (BK3_4: 81 s of 82 s); -loopopt=0 reaches only
+    # the host compile jobs (as -floopopt-pipeline=none), so the device code is
+    # unchanged and only the host fallback and the references lose HIR.
+    if(BK_GPU_HOST_LOOPOPT_OFF)
+        target_compile_options(${name} PRIVATE "SHELL:-mllvm -loopopt=0")
+    endif()
     target_compile_options(${name} PRIVATE ${bk_extra})
     target_link_options(${name} PRIVATE ${bk_extra})
-    set_target_properties(${name} PROPERTIES JOB_POOL_COMPILE bk_gpu JOB_POOL_LINK bk_gpu)
+    if(BK_GPU_JOBS GREATER 0)
+        set_target_properties(${name} PROPERTIES JOB_POOL_COMPILE bk_gpu JOB_POOL_LINK bk_gpu)
+    endif()
 endfunction()
 
 # <src> once per order p, -D<define>=<p + offset>: targets <prog>_<p>[<suffix>]
@@ -187,10 +208,14 @@ if(NOT BK_ENABLE_OPENMP AND NOT BK_ENABLE_SYCL)
 endif()
 
 if(BK_ENABLE_OPENMP)
+    # drivers: every order of the openmp/ drivers, without the kernel variants
     bk_gpu_orders(BK1 openmp/BK1.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
     bk_gpu_orders(BK3 openmp/BK3.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
     bk_gpu_orders(BK1_ff openmp/BK1_ff.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
     bk_gpu_orders(BK5 openmp/BK5.cpp omp BK_ORDER 0 "" ${BK_ORDERS_BK5})
+    # drivers: every order of the openmp/ drivers, without the kernel variants
+    add_custom_target(drivers)
+    add_dependencies(drivers all_BK1 all_BK3 all_BK1_ff all_BK5)
     bk_gpu_orders(bk1_offload openmp/offload/bk1_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})
     bk_gpu_orders(bk5_offload openmp/offload/bk5_offload.cpp omp NQ 1 "" ${BK_ORDERS_GPU})
     bk_gpu_orders(bk3_offload openmp/offload/bk3_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})

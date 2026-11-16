@@ -38,16 +38,19 @@ The tree is organized by approach; the file names say the kernel.
 
 ## Build
 
-Pick the backends at configure time:
+One build tree per backend: the presets `host` (CPU, any compiler),
+`gpu-openmp` and `gpu-sycl` (Intel GPU, icpx). Their options:
 
 | Option | Default | Builds |
 |---|---|---|
-| `BK_ENABLE_OPENMP` | `ON` | host: OpenMP threads (off: serial); GPU: the OpenMP offload programs (`BK1_<p>`, `bk1_offload_<p>`, ...) |
-| `BK_ENABLE_SYCL` | `ON` | GPU: the SYCL programs (`bk1_sycl_<p>`, ...) |
+| `BK_ENABLE_OPENMP` | `ON` (`gpu-openmp`) | host: OpenMP threads (off: serial); GPU: the OpenMP offload programs (`BK1_<p>`, `bk1_offload_<p>`, ...) |
+| `BK_ENABLE_SYCL` | `ON` (`gpu-sycl`) | GPU: the SYCL programs (`bk1_sycl_<p>`, ...) |
 | `BK_ENABLE_TINYTC` | `OFF` | GPU: `bk_tinytc`; needs SYCL and a tinytc install (`TINYTC_ROOT`) |
-| `BK_GPU_DEVICE` | empty | ocloc device of the GPU tree (`acm-g10` = Arc A770/A750); empty: host tree |
+| `BK_GPU_DEVICE` | `acm-g10` in the GPU presets | ocloc device of the GPU tree (`acm-g10` = Arc A770/A750), or `jit`; empty: host tree |
 | `BK_ORDERS_P`, `BK_ORDERS_BK5`, `BK_ORDERS_GPU` | `1;...;8` (BK5: `1;...;7`) | GPU: the orders p built, one binary each |
 | `BK_GPU_IN_ALL` | `ON` | GPU: per-order programs in `all` (off: build them by name) |
+| `BK_GPU_JOBS` | `0` (no limit) | GPU: compiles and links at once (Ninja), on top of `-j` |
+| `BK_GPU_HOST_LOOPOPT_OFF` | `ON` | GPU: host code without icpx's loop optimizer (see build time below) |
 
 **Which `BK_GPU_DEVICE`?** The GPU programs are compiled ahead of time
 into machine code for one GPU, so this names your GPU as `ocloc` (Intel's
@@ -67,7 +70,11 @@ A380 and the A3 laptop chips), `bmg-g21` (Arc B580/B570), `pvc` (Data Center GPU
 `mtl-u`, `mtl-h` (Meteor Lake integrated graphics; `xe-lpg` covers both),
 `lnl-m` (Lunar Lake integrated graphics). A comma-separated list
 (`acm-g10,bmg-g21`) builds one binary for several GPUs, at the cost of a
-longer compile per GPU.
+longer compile per GPU. `BK_GPU_DEVICE=jit` builds SPIR-V instead, which
+any Intel GPU compiles when a kernel is first launched: the build skips
+ocloc (a few seconds per binary), the first run pays the device compile (1
+to 3 s for a driver), later runs use the driver's kernel cache, and the
+kernels run as fast as ahead-of-time ones.
 
 **CPU (any compiler)**
 
@@ -76,53 +83,59 @@ cmake --preset host               # build/host with the default compiler
 cmake --build build/host          # BK1, BK3, BK5, BK1_ff, BK1_amx, bw_test, amx_pipe, stream_omp
 ```
 
-**Intel GPU, OpenMP offload and SYCL**
+**Intel GPU, OpenMP offload: the BK1, BK3, BK5 drivers**
 
 ```sh
 source /opt/intel/oneapi/setvars.sh
-cmake --preset intel-gpu -DBK_GPU_DEVICE=acm-g10   # build/intel-gpu
-cmake --build build/intel-gpu
+cmake --preset gpu-openmp -DBK_GPU_DEVICE=acm-g10   # build/gpu-openmp
+cmake --build build/gpu-openmp --target drivers     # BK1_<p>, BK3_<p>, BK5_<p>, BK1_ff_<p>: 16 s
+cmake --build build/gpu-openmp                      # plus bk{1,3,5}_offload_<p>, stream_omp: 94 s in all
 ```
 
-**Intel GPU, one backend only, or a few orders**
+**Intel GPU, SYCL**
 
 ```sh
 source /opt/intel/oneapi/setvars.sh
-cmake --preset intel-gpu -B build/sycl -DBK_ENABLE_OPENMP=OFF -DBK_ORDERS_GPU="2;4;6"
-cmake --build build/sycl
+cmake --preset gpu-sycl -DBK_GPU_DEVICE=acm-g10     # build/gpu-sycl
+cmake --build build/gpu-sycl                        # bk{1,3,5}_sycl_<p>, bk{1,5}_sycl_<p>_jit: 142 s
 ```
 
-**Intel GPU, with tinytc**
+**A few orders, or tinytc**
 
 ```sh
-source /opt/intel/oneapi/setvars.sh
+cmake --preset gpu-sycl -B build/sycl246 -DBK_ORDERS_GPU="2;4;6"
 export TINYTC_ROOT=<tinytc install>       # or -DTINYTC_ROOT=..., or the install on CMAKE_PREFIX_PATH
-cmake --preset intel-gpu -DBK_ENABLE_TINYTC=ON
-cmake --build build/intel-gpu --target bk_tinytc
+cmake --preset gpu-sycl -DBK_ENABLE_TINYTC=ON && cmake --build build/gpu-sycl --target bk_tinytc
 ```
 
 Every GPU tree also has the targets `all_<prog>` (every order of a program,
-e.g. `all_bk5_sycl`), `all_openmp` and `all_sycl`.
+e.g. `all_bk5_sycl`), `all_openmp`, `all_sycl` and `drivers`. Times are
+from the A770 machine (16 threads, 32 GB, icpx 2026.1).
 
-> **GPU build time.** Each GPU binary holds one polynomial order and is
-> compiled ahead of time for `BK_GPU_DEVICE`, which takes about a minute
-> and up to several GB of memory per binary (more at high order); with every
-> backend and order there are about 95 of them, i.e. one to two hours on one
-> job. To shorten it:
-> - build only what you need: `BK_ENABLE_*=OFF`, fewer orders
->   (`BK_ORDERS_*`), or single targets (`--target bk1_sycl_4`, `all_bk5_sycl`);
-> - run several compiles at once, if memory allows: `-DBK_GPU_JOBS=4`
->   (default 1; at most about RAM / 8 GB);
-> - compile the kernels of one binary in parallel: split the device code per
->   kernel and let icpx run several device compiles at link time,
+> **GPU build time.** Each GPU binary holds one polynomial order, compiled
+> ahead of time for `BK_GPU_DEVICE`; there are 31 drivers, 31 OpenMP
+> offload variant programs and 40 SYCL ones.
+> - **Host loop optimizer.** Almost all of the OpenMP compile time was icpx's
+>   loop optimizer (HIR) working on the *host* side of each file (`BK3_4`:
+>   81 s of 82 s). `BK_GPU_HOST_LOOPOPT_OFF` (on) passes `-mllvm -loopopt=0`,
+>   which icpx applies to the host compile jobs only: the device code is
+>   unchanged, and the GPU timings, norms and errors are the same. A driver
+>   now builds in 2 to 5 s.
+> - **Parallel jobs.** A GPU compile or link peaks at about 0.5 GB, so by
+>   default Ninja runs as many as `-j` allows (all cores). `-DBK_GPU_JOBS=n`
+>   caps them at n, e.g. on a machine with little memory per core (allow
+>   about 1 GB per job), or when the build shares the machine with GPU runs.
+>   It works with the Ninja generator only; with Makefiles use `make -j n`.
+> - **Build less:** fewer orders (`BK_ORDERS_*`), one backend per tree, or
+>   single targets (`--target bk1_sycl_4`, `all_bk5_sycl`, `drivers`).
+> - **Parallel device link** (not the default): split the device code per
+>   kernel and let icpx compile the pieces in parallel at link time,
 >   ```sh
 >   -DBK_EXTRA_FLAGS="-fsycl-device-code-split=per_kernel -fsycl-max-parallel-link-jobs=8 -fopenmp-device-code-split=per_kernel -fopenmp-max-parallel-link-jobs=8"
 >   ```
->   On the A770 machine (16 threads, icpx 2026.1) this cut `bk1_sycl_6`
->   from 66 s to 29 s but raised its peak memory from 0.7 to 2.2 GB, and
->   `bk1_offload_6` went from 56 s to 46 s, with the same device times and
->   errors. It helps the programs with many kernels most; one
->   measurement each, not yet the default.
+>   This cut the build of `bk1_sycl_6` from 66 s to 29 s at 2.2 GB instead
+>   of 0.7 GB, with the same results; it pays off for a single program with
+>   many kernels, less so when Ninja already runs many jobs.
 
 The flags are `-Wall -pedantic -O3 -std=c++17` with the native instruction
 set and OpenMP; no build type is needed (a `Release` build would add
@@ -207,10 +220,11 @@ first output line says `fma = hardware`).
 
 ## Intel GPUs (icpx, Arc A770)
 
-The CMake preset `a770` is `intel-gpu` as set up on the A770 workstation:
-ahead of time for the ocloc device `acm-g10` (Arc A770/A750; `GPU_DEVICE=...`
-for others, `ocloc compile --help` lists the names), tinytc on, every
-compile memory-capped, and no GPU program in `all`. All GPU builds use
+The CMake preset `a770` is the A770 workstation's tree: both backends in
+one tree, ahead of time for the ocloc device `acm-g10` (Arc A770/A750;
+`GPU_DEVICE=...` for others, `ocloc compile --help` lists the names), tinytc
+on, every compile memory-capped and one at a time, and no GPU program in
+`all`. All GPU builds use
 `-fp-model=precise` against icpx's fast default. `scripts/build.sh` sets up
 the oneAPI environment (`common.sh`, including the `umf` library the Level
 Zero adapter needs), configures `build/a770` and builds the named targets
