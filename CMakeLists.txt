@@ -34,7 +34,7 @@
 # One order per binary, so the device compiler sees one kernel set at a
 # time.  With BK_GPU_JOBS > 0 the compiles and links of the GPU targets run
 # in the Ninja job pool bk_gpu, BK_GPU_JOBS at a time (each peaks at about
-# 0.5 GB once the host loop optimizer is off, BK_GPU_HOST_LOOPOPT_OFF).
+# 0.5 GB without the host fallback).
 #
 # No build type is needed: the flags below include -O3, and the benchmark
 # keeps its asserts (no -DNDEBUG).
@@ -55,7 +55,6 @@ set(BK_ORDERS_GPU "1;2;3;4;5;6;7;8" CACHE STRING "orders p of the GPU variant pr
 option(BK_ENABLE_OPENMP "OpenMP: threads in the host tree, offload programs in the GPU tree" ON)
 option(BK_ENABLE_SYCL "SYCL programs (GPU tree)" ON)
 option(BK_ENABLE_TINYTC "bk_tinytc (GPU tree; needs tinytc and BK_ENABLE_SYCL)" OFF)
-option(BK_GPU_HOST_LOOPOPT_OFF "GPU tree: compile host code without icpx's loop optimizer (much faster builds, same device code)" ON)
 option(BK_GPU_IN_ALL "put the per-order GPU programs in `all` (each takes minutes to build)" ON)
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
@@ -134,6 +133,11 @@ if(BK_GPU_JOBS GREATER 0)
 endif()
 separate_arguments(bk_extra UNIX_COMMAND "${BK_EXTRA_FLAGS}")
 
+# The OpenMP programs are built without a host fallback of their target
+# regions (-fopenmp-offload-mandatory; none has an if clause, and run.sh sets
+# OMP_TARGET_OFFLOAD=MANDATORY anyway): icpx's loop optimizer spent almost
+# all of their compile time on the fallback copies (BK3_4: 81 s of 82 s).
+#
 # api: omp (OpenMP offload, AOT), sycl (AOT), sycl_jit (SPIR-V, compiled at
 # run time), sycl_rt (plain SYCL host code, for run-time compiled kernels).
 # The SYCL programs use host OpenMP for their references (-fiopenmp, no
@@ -142,14 +146,14 @@ function(bk_gpu_target name api)
     target_include_directories(${name} PRIVATE ${BK_INCLUDE})
     if(BK_GPU_DEVICE STREQUAL "jit" AND api STREQUAL "omp")
         target_include_directories(${name} PRIVATE ${BK_OPENMP})
-        target_compile_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64)
+        target_compile_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64 -fopenmp-offload-mandatory)
         target_link_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64)
     elseif(BK_GPU_DEVICE STREQUAL "jit" AND api STREQUAL "sycl")
         bk_gpu_target(${name} sycl_jit)
         return()
     elseif(api STREQUAL "omp")
         target_include_directories(${name} PRIVATE ${BK_OPENMP})
-        target_compile_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64_gen)
+        target_compile_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64_gen -fopenmp-offload-mandatory)
         target_link_options(${name} PRIVATE -fiopenmp -fopenmp-targets=spir64_gen
                             "SHELL:-Xopenmp-target-backend=spir64_gen \"-device ${BK_GPU_DEVICE}\"")
     elseif(api STREQUAL "sycl")
@@ -162,13 +166,6 @@ function(bk_gpu_target name api)
     else()
         target_compile_options(${name} PRIVATE -fsycl -fiopenmp)
         target_link_options(${name} PRIVATE -fsycl -fiopenmp)
-    endif()
-    # icpx's loop optimizer (HIR) spends almost all of the compile time of these
-    # programs on the host side (BK3_4: 81 s of 82 s); -loopopt=0 reaches only
-    # the host compile jobs (as -floopopt-pipeline=none), so the device code is
-    # unchanged and only the host fallback and the references lose HIR.
-    if(BK_GPU_HOST_LOOPOPT_OFF)
-        target_compile_options(${name} PRIVATE "SHELL:-mllvm -loopopt=0")
     endif()
     target_compile_options(${name} PRIVATE ${bk_extra})
     target_link_options(${name} PRIVATE ${bk_extra})

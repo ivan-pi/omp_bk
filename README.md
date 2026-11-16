@@ -50,7 +50,6 @@ One build tree per backend: the presets `host` (CPU, any compiler),
 | `BK_ORDERS_P`, `BK_ORDERS_BK5`, `BK_ORDERS_GPU` | `1;...;8` (BK5: `1;...;7`) | GPU: the orders p built, one binary each |
 | `BK_GPU_IN_ALL` | `ON` | GPU: per-order programs in `all` (off: build them by name) |
 | `BK_GPU_JOBS` | `0` (no limit) | GPU: compiles and links at once (Ninja), on top of `-j` |
-| `BK_GPU_HOST_LOOPOPT_OFF` | `ON` | GPU: host code without icpx's loop optimizer (see build time below) |
 
 **Which `BK_GPU_DEVICE`?** The GPU programs are compiled ahead of time
 into machine code for one GPU, so this names your GPU as `ocloc` (Intel's
@@ -88,8 +87,8 @@ cmake --build build/host          # BK1, BK3, BK5, BK1_ff, BK1_amx, bw_test, amx
 ```sh
 source /opt/intel/oneapi/setvars.sh
 cmake --preset gpu-openmp -DBK_GPU_DEVICE=acm-g10   # build/gpu-openmp
-cmake --build build/gpu-openmp --target drivers     # BK1_<p>, BK3_<p>, BK5_<p>, BK1_ff_<p>: 16 s
-cmake --build build/gpu-openmp                      # plus bk{1,3,5}_offload_<p>, stream_omp: 94 s in all
+cmake --build build/gpu-openmp --target drivers     # BK1_<p>, BK3_<p>, BK5_<p>, BK1_ff_<p>: 15 s
+cmake --build build/gpu-openmp                      # plus bk{1,3,5}_offload_<p>, stream_omp: 114 s in all
 ```
 
 **Intel GPU, SYCL**
@@ -115,12 +114,16 @@ from the A770 machine (16 threads, 32 GB, icpx 2026.1).
 > **GPU build time.** Each GPU binary holds one polynomial order, compiled
 > ahead of time for `BK_GPU_DEVICE`; there are 31 drivers, 31 OpenMP
 > offload variant programs and 40 SYCL ones.
-> - **Host loop optimizer.** Almost all of the OpenMP compile time was icpx's
->   loop optimizer (HIR) working on the *host* side of each file (`BK3_4`:
->   81 s of 82 s). `BK_GPU_HOST_LOOPOPT_OFF` (on) passes `-mllvm -loopopt=0`,
->   which icpx applies to the host compile jobs only: the device code is
->   unchanged, and the GPU timings, norms and errors are the same. A driver
->   now builds in 2 to 5 s.
+> - **No host fallback.** Almost all of the OpenMP compile time was icpx's
+>   loop optimizer (HIR) working on the host fallback copy of each target
+>   region (`BK3_4`: 81 s of 82 s), code that never runs on the GPU
+>   (`run.sh` sets `OMP_TARGET_OFFLOAD=MANDATORY`). The GPU tree compiles
+>   the OpenMP programs with `-fopenmp-offload-mandatory`, which leaves the
+>   fallback out: a driver builds in 1 to 3 s, with the same GPU timings,
+>   norms and errors. Such a binary stops with an error where there is no
+>   GPU instead of running on the host; use the host tree for the CPU. SYCL
+>   kernels have no host fallback, so the SYCL programs never had this cost;
+>   their time is the device code generation at link time.
 > - **Parallel jobs.** A GPU compile or link peaks at about 0.5 GB, so by
 >   default Ninja runs as many as `-j` allows (all cores). `-DBK_GPU_JOBS=n`
 >   caps them at n, e.g. on a machine with little memory per core (allow
@@ -146,6 +149,13 @@ flags go in at configure time, e.g.:
 cmake --preset host -B build/clang -DCMAKE_CXX_COMPILER=clang++
 cmake --preset host -B build/ff8 -DCMAKE_CXX_FLAGS=-DFF_PLANE_BATCH=8
 ```
+
+With icpx the host tree takes minutes to build (BK1, BK3, BK5, BK1_ff: 203 s
+on 16 threads, g++: 13 s), nearly all of it in icpx's loop optimizer (HIR).
+`-DCMAKE_CXX_FLAGS="-mllvm -loopopt=0"` turns it off (8 s), but it changes
+the speed of the host kernels both ways: on the A770 machine's CPU, BK1
+lost about a third, while BK3 got 1.5 to 2.8 times and BK5 up to 2.9 times
+faster (p = 2, 4, 6; one run each).
 
 ## Run
 
