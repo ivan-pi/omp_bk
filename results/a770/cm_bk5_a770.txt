@@ -4,9 +4,8 @@ on NEO 26.40; SYCL host (icpx 2026.1, Level Zero, binary loaded by interop), ~5.
 DoFs, best of 20 runs, best of two passes, compulsory traffic in + out + 6 factors =
 32 B/DoF.  Roof: copy_cm 449-458 GB/s (device) = 14.0-14.3 GDoF/s.  All orders pass
 (relerr <= 2.3e-7).
-Earlier toolchains: the 2021 CM SDK cmc with the system ocloc 26.40 gave the same
-device rates within 1% (and spilled 64 B at p = 7, now none); the OpenCL host used
-before gave 0.1-1 GDoF/s less host rate (p = 8: 11.1).
+The OpenCL host used before gave the same device rates and 0.1-1 GDoF/s less host
+rate (p = 8: 11.1).
 
  p  nq  config          host GDoF/s  device GDoF/s  % of copy_cm  best OpenMP/SYCL G6 (README)
  1   2  EPT=8, wg64         12.8        13.0           93            14.0

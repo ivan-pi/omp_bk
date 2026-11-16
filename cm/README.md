@@ -52,23 +52,24 @@ release and writes two wrappers that give only `cmc` and `ocloc-cm` the
 matched libraries. A system-wide install of the same packages works too; then
 set `CMC` and `OCLOC` (or `CM_TOOLS`) for the Makefile.
 
-**Toolchain versions.** The kernels are tested only with `intel-igc-cm`
-1.0.225.54093 and the `ocloc` of driver build 1146; the Makefile does not
-check which toolchain it is given.
+**Toolchain versions and other GPUs.** The kernels are tested with
+`intel-igc-cm` 1.0.225.54093 and the `ocloc` of driver build 1146, on the
+Arc A770, with the binaries run on the system's newer driver
+(compute-runtime 26.40). The Makefile does not check which toolchain it is
+given.
 
-- Another `intel-igc-cm` needs the `ocloc` of its own driver release:
-  `install_toolchain.sh -b <build> -c <version>` installs such a pair (the
-  package lists on <https://dgpu-docs.intel.com> show which build goes with
-  which version). Untested here.
-- An `ocloc` from another release fails on the SPIR-V with
-  `spirv_read_verify: verify Module failed`; that error means a mismatched
+- `cmc` and `ocloc` must come from the same driver release. For a newer
+  `intel-igc-cm`, `install_toolchain.sh -b <build> -c <version>` installs
+  that release's pair; the package lists on <https://dgpu-docs.intel.com>
+  show which build goes with which version.
+- An `ocloc` from another release rejects the SPIR-V with
+  `spirv_read_verify: verify Module failed`. That error means a mismatched
   pair, not a problem in the kernels.
-- The 2021 CM development package (`cmc` based on clang 8) is not what the
-  Makefile is set up for. It does not know DG2 and ignores `-march`, saying
-  only `warning: GEN not specified so cm_dp2() code may not be optimal`, and
-  it does not enforce the 4 KB vector limit of the current front end. With
-  the matched `ocloc` it still built BK5 at p = 3, and the result passed;
-  the other orders are untested with it.
+- Another GPU: set `GPU_DEVICE` to a name both `cmc -march` and
+  `ocloc -device` accept (e.g. `bmg` for Battlemage; `ocloc compile --help`
+  lists them), and use a compiler release recent enough to know it. Only the
+  A770 is tested, and the tuning (row padding, elements per thread,
+  work-group sizes, the large register file from nq = 6) was done there.
 
 ## Building
 

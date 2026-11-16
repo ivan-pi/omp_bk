@@ -3,9 +3,8 @@ BK1 in C for Metal (cm/bk1_cm_genx.cpp), Arc A770: cmc 1.0.225 (intel-igc-cm, cl
 p = 4), run on NEO 26.40; SYCL host (icpx 2026.1, Level Zero, binary loaded by
 interop), float, ~5.6e7 DoFs (nelmt = 5.6e7 / nm^3), best of 20 runs after a warm-up,
 best of two passes, all checks relerr <= 1.9e-7.
-Earlier toolchains: the 2021 CM SDK cmc (clang 8, -mcpu=TGLLP) with the system ocloc
-26.40 gave the same device rates within 1%, except p = 8 (29.7 vs 30.6 now); the
-OpenCL host used before gave 0.5-2 GDoF/s less host rate.
+The OpenCL host used before gave the same device rates and 0.5-2 GDoF/s less host
+rate.
 
 copy_cm: CM block-copy bandwidth reference in the same binary, device time, 445-455 GB/s.
 FP32 peak: 512 XVEs x 8 lanes x 2 flop x 2.4 GHz = 19661 GFLOP/s; flop/DoF is the
