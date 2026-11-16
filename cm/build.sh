@@ -1,6 +1,6 @@
 #!/bin/bash
 # build.sh -- build the C for Metal kernels (one binary per order) and their
-# OpenCL host drivers into $BUILD_DIR (default build/cm).
+# SYCL host drivers into $BUILD_DIR (default build/cm).
 #
 # usage:  cm/build.sh [p...]         default: 1 2 3 4 5 6 7 8
 #   KERNELS="bk1 bk5" (default both):
@@ -16,7 +16,10 @@
 # with BK_EPT=n).  KEEP=1 keeps the IGC dumps (Gen asm) in
 # $BUILD_DIR/dump_<kernel>_<p>/.
 #
-# Host: g++ with OpenMP (the reference) and the OpenCL ICD loader.
+# Host: icpx -fsycl (oneAPI, set up by scripts/common.sh) with OpenMP for
+# the reference, -fp-model=precise (icpx defaults to a fast model), linked
+# to Level Zero and OpenCL for the interop that loads the binaries, with an
+# RPATH (also for its own dependencies) to the SYCL runtime so the hosts run without the oneAPI environment.
 
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,10 +27,22 @@ BUILD_DIR=$(realpath -m "${BUILD_DIR:-$REPO/build/cm}")
 CSDK_DIR=${CSDK_DIR:-/opt/intel/cm_sdk_20211028}
 CMC=${CMC:-$CSDK_DIR/usr/bin/cmc}
 CM_GPU=${CM_GPU:-dg2}
-CXX=${CXX:-g++}
+CXX=${CXX:-icpx}
 KERNELS=${KERNELS:-bk1 bk5}
 orders=${*:-1 2 3 4 5 6 7 8}
 mkdir -p "$BUILD_DIR"
+. "$REPO/scripts/common.sh"
+set +eu   # the oneAPI vars.sh scripts are not set -eu clean
+oneapi_env
+set -eu
+rpath=$(dirname "$(dirname "$(command -v icpx)")")/lib
+umf=()
+if [ -n "${UMF_ROOT:-}" ]; then
+    # the Level Zero and OpenCL adapters, dlopen'ed by the SYCL runtime, need
+    # libumf but ignore the host's RPATH: link it, so it is already loaded
+    rpath="$rpath:$UMF_ROOT/lib"
+    umf=(-L"$UMF_ROOT/lib" -Wl,--no-as-needed -lumf -Wl,--as-needed)
+fi
 
 for kernel in $KERNELS; do
     for p in $orders; do
@@ -56,7 +71,7 @@ for kernel in $KERNELS; do
         spill=$(sed -n "s/.*Spill memory used = \([0-9]*\) bytes for kernel ${kernel}_cm.*/\1/p" "$log")
         echo "$name.bin  nq=$nq GRF=$grf${spill:+  SPILL=${spill}B}"
     done
-    "$CXX" -std=c++17 -O2 -fopenmp -Wall -I"$REPO/include" -I"$REPO/cm" "$REPO/cm/${kernel}_cm.cpp" -lOpenCL \
-        -o "$BUILD_DIR/${kernel}_cm"
+    "$CXX" -fsycl -std=c++17 -O2 -fp-model=precise -fiopenmp -Wall -I"$REPO/include" -I"$REPO/cm" \
+        "$REPO/cm/${kernel}_cm.cpp" -lze_loader -lOpenCL ${umf[@]+"${umf[@]}"} -Wl,--disable-new-dtags,-rpath,"$rpath" -o "$BUILD_DIR/${kernel}_cm"
     echo "${kernel}_cm (host)"
 done

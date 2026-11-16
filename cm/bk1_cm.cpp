@@ -1,6 +1,7 @@
 // bk1_cm.cpp -- host driver of the C for Metal BK1 kernel (cm/bk1_cm_genx.cpp)
-// through OpenCL (the CLHPP C++ bindings).  The kernel is compiled ahead of
-// time, one binary per order, by cm/build.sh.
+// through SYCL (cm_sycl.hpp: the binary is loaded by Level Zero or OpenCL
+// interop, the arrays are USM).  The kernel is compiled ahead of time, one
+// binary per order, by cm/build.sh.
 //
 //   build/cm/bk1_cm <p> [nelmt] [ntests]      p = 1..8, nq = p + 2
 //
@@ -13,67 +14,25 @@
 // double-precision host reference (bk_harness.h).  Data as in the SYCL
 // driver: pseudo-random in and JxW, basis cos(i * nq + p).
 //
-// Each line reports host time (enqueue to completion) and device time (event
+// The kernel reads past the last element (the prefetch of the next one with
+// EPT > 1, whole OWords); unlike OpenCL buffers USM returns no zeros there,
+// so in and JxW are padded with zero elements.
+//
+// Each line reports host time (submit to completion) and device time (event
 // profiling), the best of ntests runs after a warm-up, in GDoF/s and in GB/s
 // of the compulsory traffic (in, out, JxW), and the device GB/s as a share of
 // copy_cm's.
 
-#include "cm_ocl.hpp"
+#include "cm_sycl.hpp"
 
-#include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
 
-#include <unistd.h>
-
 #include "bk_common.h"
 #include "bk_harness.h"
-
-namespace {
-
-struct times {
-    double host;
-    double device;
-};
-
-// one warm-up launch, then the best host and device time of ntests launches
-template <typename F>
-times time_launches(const int ntests, F&& launch)
-{
-    launch().wait();
-    times best{std::numeric_limits<double>::max(), std::numeric_limits<double>::max()};
-    for (int t = 0; t < ntests; ++t) {
-        const auto t0 = std::chrono::steady_clock::now();
-        cl::Event ev = launch();
-        ev.wait();
-        const auto t1 = std::chrono::steady_clock::now();
-        best.host = std::min(best.host, std::chrono::duration<double>(t1 - t0).count());
-        const double ns = double(ev.getProfilingInfo<CL_PROFILING_COMMAND_END>() -
-                                 ev.getProfilingInfo<CL_PROFILING_COMMAND_START>());
-        best.device = std::min(best.device, 1e-9 * ns);
-    }
-    return best;
-}
-
-std::string exe_dir()
-{
-    char buf[4096];
-    const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (n <= 0) {
-        return ".";
-    }
-    std::string s(buf, std::size_t(n));
-    return s.substr(0, s.rfind('/'));
-}
-
-int round_up_to(const std::size_t n, const int m) { return int((n + m - 1) / m * m); }
-
-} // namespace
 
 int main(int argc, char** argv)
 {
@@ -87,17 +46,31 @@ int main(int argc, char** argv)
     const std::size_t nelmt = (argc > 2) ? std::size_t(std::atoll(argv[2])) : std::size_t(1) << 19;
     const int ntests = (argc > 3) ? std::atoi(argv[3]) : 20;
     const int P = (nq <= 4) ? 4 : (nq <= 8) ? 8 : nq;   // as in the kernel
-    const std::string dir = bk::get_env("BK_CM_DIR").value_or(exe_dir());
+    const std::string dir = bk::get_env("BK_CM_DIR").value_or(cmsycl::exe_dir());
     const int ept = bk::env_int("BK_EPT", 1);   // elements per thread, as compiled
     const std::string bin = dir + "/bk1_cm_" + std::to_string(p) + (ept == 1 ? "" : "_e" + std::to_string(ept)) + ".bin";
 
+    // p = 8: a pair of threads per element (as compiled, PAIR_P8), work-groups
+    // of at most 16 threads, even
+    const bool pair = (nq == 10) && bk::env_int("BK_PAIR", 1) != 0;
+    std::vector<int> wgs;
+    {
+        std::istringstream ws(bk::get_env("BK_WG").value_or(pair ? "4 8 16" : "16 32 64"));
+        for (int wg = 0; ws >> wg;) {
+            if (pair && (wg % 2 != 0 || wg > 16)) {
+                std::fprintf(stderr, "p = 8: the work-group size must be even and at most 16 (BK_WG)\n");
+                return 2;
+            }
+            wgs.push_back(wg);
+        }
+    }
+
     // setup
-    cl::Device dev = cmocl::pick_gpu();
-    cl::Context ctx(dev);
-    cl::CommandQueue q(ctx, dev, CL_QUEUE_PROFILING_ENABLE);
-    cl::Program prog = cmocl::load_program(ctx, dev, bin);
-    std::printf("BK1 CM: p = %d, nq = %d, nelmt = %zu, ntests = %d, device %s, kernel %s\n", p, nq, nelmt,
-                ntests, dev.getInfo<CL_DEVICE_NAME>().c_str(), bin.c_str());
+    sycl::queue q = cmsycl::make_queue();
+    cmsycl::program prog = cmsycl::load_program(q, bin);
+    std::printf("BK1 CM: p = %d, nq = %d, nelmt = %zu, ntests = %d, device %s (%s), kernel %s\n", p, nq, nelmt,
+                ntests, q.get_device().get_info<sycl::info::device::name>().c_str(), cmsycl::backend_name(q),
+                bin.c_str());
 
     // data and the double-precision reference
     const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);
@@ -124,7 +97,6 @@ int main(int argc, char** argv)
     // p = 8 (a pair of threads per element) adds, for t = 0, 1, the copies
     // with thread t's p = {4t..4t+3, 8+t} first: Bf_t (nm x 5, row stride 8),
     // then Bb_t (5 x nm, row stride P), as laid out in the kernel
-    const bool pair = (nq == 10) && bk::env_int("BK_PAIR", 1) != 0;   // as compiled (PAIR_P8)
     const auto r4 = [](const int n) { return (n + 3) / 4 * 4; };
     const int off_t = r4((nm + nq) * P);
     const int nbft = r4(nm * 8);
@@ -148,47 +120,43 @@ int main(int argc, char** argv)
         }
     }
 
-    cl::Buffer d_b(ctx, bpad.begin(), bpad.end(), true);
-    cl::Buffer d_jxw(ctx, JxW.begin(), JxW.end(), true);
-    cl::Buffer d_in(ctx, in.begin(), in.end(), true);
-    cl::Buffer d_out(ctx, CL_MEM_READ_WRITE, in.size() * sizeof(float));
+    // device arrays; zero elements past the end cover what the kernel reads
+    // beyond nelmt: the next element of the last thread, plus one for the
+    // OWord-rounded reads of the last element
+    const std::size_t pad = std::size_t(ept + 1);
+    float* d_b = cmsycl::to_device(q, bpad);
+    float* d_jxw = cmsycl::to_device(q, JxW, pad * nq * nq * nq);
+    float* d_in = cmsycl::to_device(q, in, pad * nm * nm * nm);
+    float* d_out = sycl::malloc_device<float>(in.size() + pad * nm * nm * nm, q);
     const double bytes = sizeof(float) * (2.0 * in.size() + JxW.size());
 
     // memory yardstick: copy the same number of bytes as BK1 moves
-    constexpr int copy_chunk = 256;   // COPY_CHUNK of the kernel
+    constexpr int copy_chunk = 256;   // COPY_CHUNK of cm_common.h
     constexpr int copy_wg = 64;
     const std::size_t copy_n = std::size_t(bytes / sizeof(float) / 2) / (copy_chunk * copy_wg) * (copy_chunk * copy_wg);
-    cl::Buffer d_src(ctx, CL_MEM_READ_WRITE, copy_n * sizeof(float));
-    cl::Buffer d_dst(ctx, CL_MEM_READ_WRITE, copy_n * sizeof(float));
-    q.enqueueFillBuffer(d_src, 1.0f, 0, copy_n * sizeof(float));
-    q.finish();
-    cl::KernelFunctor<cl::Buffer, cl::Buffer> copy_cm(prog, "copy_cm");
-    const times tc = time_launches(ntests, [&] {
-        return copy_cm(cl::EnqueueArgs(q, cl::NDRange(copy_n / copy_chunk), cl::NDRange(copy_wg)), d_src, d_dst);
+    float* d_src = sycl::malloc_device<float>(copy_n, q);
+    float* d_dst = sycl::malloc_device<float>(copy_n, q);
+    q.fill(d_src, 1.0f, copy_n).wait();
+    const sycl::kernel copy_cm = prog.kernel("copy_cm");
+    const cmsycl::times tc = cmsycl::time_launches(ntests, [&] {
+        return cmsycl::launch(q, copy_cm, copy_n / copy_chunk, copy_wg, d_src, d_dst);
     });
     const double copy_gbs = 1e-9 * 2.0 * copy_n * sizeof(float) / tc.device;
     std::printf("%-14s GB/s = %6.1f  (device: GB/s = %6.1f)\n", "copy_cm", 1e-9 * 2.0 * copy_n * sizeof(float) / tc.host,
                 copy_gbs);
 
     // BK1 at each work-group size
-    cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer, cl::Buffer, int> bk1(prog, "bk1_cm");
-    // threads per element: 2 at p = 8 (work-groups of at most 16 threads, even)
-    const int tpe = pair ? 2 : 1;
-    std::istringstream wgs(bk::get_env("BK_WG").value_or(pair ? "4 8 16" : "16 32 64"));
+    const sycl::kernel bk1 = prog.kernel("bk1_cm");
+    const int tpe = pair ? 2 : 1;   // threads per element
     std::vector<float> out(in.size());
     bool ok = true;
-    for (int wg = 0; wgs >> wg;) {
-        if (pair && (wg % 2 != 0 || wg > 16)) {
-            std::fprintf(stderr, "p = 8: the work-group size must be even and at most 16 (BK_WG)\n");
-            return 2;
-        }
-        q.enqueueFillBuffer(d_out, 0.0f, 0, out.size() * sizeof(float));
-        q.finish();
-        const cl::NDRange global(round_up_to((nelmt + ept - 1) / ept * tpe, wg));
-        const times t = time_launches(ntests, [&] {
-            return bk1(cl::EnqueueArgs(q, global, cl::NDRange(wg)), d_b, d_jxw, d_in, d_out, int(nelmt));
+    for (const int wg : wgs) {
+        q.fill(d_out, 0.0f, out.size()).wait();
+        const std::size_t global = cmsycl::round_up_to((nelmt + ept - 1) / ept * tpe, wg);
+        const cmsycl::times t = cmsycl::time_launches(ntests, [&] {
+            return cmsycl::launch(q, bk1, global, wg, d_b, d_jxw, d_in, d_out, int(nelmt));
         });
-        cl::copy(q, d_out, out.begin(), out.end());
+        q.memcpy(out.data(), d_out, out.size() * sizeof(float)).wait();
         const double relerr = bk::rel_maxdiff(out, ref, big);
         ok = ok && relerr < 1e-5;
         const std::string name = "bk1_cm_e" + std::to_string(ept) + "_wg" + std::to_string(wg);
@@ -197,6 +165,10 @@ int main(int argc, char** argv)
                     name.c_str(), 1e-9 * in.size() / t.host, 1e-9 * bytes / t.host, 1e-9 * in.size() / t.device,
                     1e-9 * bytes / t.device, 100.0 * (bytes / t.device) * 1e-9 / copy_gbs, relerr,
                     bk::fail_mark(relerr));
+    }
+
+    for (float* ptr : {d_b, d_jxw, d_in, d_out, d_src, d_dst}) {
+        sycl::free(ptr, q);
     }
     return ok ? 0 : 1;
 }

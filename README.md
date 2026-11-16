@@ -22,7 +22,7 @@ The tree is organized by approach; the file names say the kernel.
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
 | `tinytc/` | `bk_tinytc.cpp` (driver for both kernels), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received), `repro_slm/` (bug reproducer) |
-| `cm/` | `bk1_cm_genx.cpp`, `bk5_cm_genx.cpp` (BK1 and BK5 in C for Metal), `bk1_cm.cpp`, `bk5_cm.cpp` (OpenCL hosts), `cm_common.h`, `cm_ocl.hpp`, `build.sh` |
+| `cm/` | `bk1_cm_genx.cpp`, `bk5_cm_genx.cpp` (BK1 and BK5 in C for Metal), `bk1_cm.cpp`, `bk5_cm.cpp` (SYCL hosts), `cm_common.h`, `cm_sycl.hpp`, `build.sh` |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
@@ -258,14 +258,15 @@ BK_EPT=2 build/cm/bk1_cm 3 875000 20
 ```
 
 It needs the 2021 CM SDK (`/opt/intel/cm_sdk_20211028`, `CSDK_DIR=...`),
-`ocloc` and the OpenCL ICD. The driver checks against the double reference
+`ocloc` and oneAPI (`icpx -fsycl`; the SYCL host loads the binary through Level
+Zero or OpenCL interop). The driver checks against the double reference
 of `bk_harness.h`. On the A770 at ~5.6e7 DoFs
-(`results/a770/cm_bk1_a770.txt`) it reaches 83-97% of a CM copy kernel's
+(`results/a770/cm_bk1_a770.txt`) it reaches 85-98% of a CM copy kernel's
 bandwidth (device time) and 5-20% of the FP32 peak. In host GDoF/s:
 
 | p                  | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
 |--------------------|------|------|------|------|------|------|------|------|
-| CM                 | 16.7 | 20.4 | 25.5 | 25.6 | 28.1 | 26.5 | 29.5 | 28.1 |
+| CM                 | 17.3 | 21.8 | 27.1 | 27.0 | 29.9 | 28.4 | 30.7 | 29.2 |
 | best OpenMP/SYCL   | 19.8 | 24.4 | 23.4 | 25.5 | 26.3 | 29.5 | 27.6 | 26.0 |
 
 
@@ -283,7 +284,7 @@ pattern, not by compute. Host GDoF/s at ~5.6e7 DoFs (`results/a770/cm_bk5_a770.t
 
 | p              | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
 |----------------|------|------|------|------|------|------|------|------|
-| CM             | 12.3 | 11.0 | 12.9 | 12.1 | 12.6 | 12.4 | 12.3 | 11.1 |
+| CM             | 12.8 | 11.5 | 13.4 | 12.3 | 12.9 | 12.6 | 12.7 | 12.2 |
 | % of copy_cm   | 93   | 83   | 96   | 88   | 90   | 89   | 90   | 86   |
 | best OpenMP/SYCL | 14.0 | 13.5 | 13.5 | 12.2 | 12.3 | 11.7 | 13.5 | 11.5 |
 
