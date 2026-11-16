@@ -50,3 +50,43 @@ capped() {
     fi
 }
 export MEM_MAX
+
+# gpu_others [pid]: the processes (pid comm) that hold the GPU's render node
+# ($GPU_PDEV) open, except display clients ($GPU_SHARED_OK) and the process
+# tree of pid -- benchmarks of other sessions, for instance.
+GPU_PDEV=${GPU_PDEV:-0000:03:00.0}
+GPU_SHARED_OK=${GPU_SHARED_OK:-"claude-desktop|firefox|RDD Process|Web Content|Xorg|xfwm4|gnome-shell|kwin_x11|kwin_wayland"}
+gpu_others() {
+    local node pid a comm
+    node=$(ls -d /sys/bus/pci/devices/$GPU_PDEV/drm/renderD* 2>/dev/null | head -1)
+    [ -n "$node" ] || return 0
+    for pid in $(fuser "/dev/dri/${node##*/}" 2>/dev/null); do
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null) || continue
+        [[ $comm =~ ^($GPU_SHARED_OK)$ ]] && continue
+        a=$pid
+        while [ -n "${1:-}" ] && [ "$a" -gt 1 ] && [ "$a" != "$1" ]; do
+            a=$(awk '{print $4}' "/proc/$a/stat" 2>/dev/null || echo 1)
+        done
+        [ -n "${1:-}" ] && [ "$a" = "$1" ] && continue
+        echo "$pid $comm"
+    done
+}
+
+# gpu_wait_idle: wait until no other process has held the GPU for
+# $GPU_IDLE_SECS (default 10) seconds in a row; reports what it waits for.
+gpu_wait_idle() {
+    local quiet=0 others said=""
+    while [ "$quiet" -lt "${GPU_IDLE_SECS:-10}" ]; do
+        others=$(gpu_others)
+        if [ -n "$others" ]; then
+            quiet=0
+            if [ "$said" != "$others" ]; then
+                echo "waiting for the GPU: $(echo $others)" >&2
+                said=$others
+            fi
+        else
+            quiet=$((quiet + 1))
+        fi
+        sleep 1
+    done
+}

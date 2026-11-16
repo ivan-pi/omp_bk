@@ -1,0 +1,278 @@
+; bk3_ec_gs.ir -- bk3_ec.ir with S in global memory (%Sg, $B $Q^3 floats
+; per work-group), so local memory holds 2 $B $Q^3 floats: p = 7 and 8 fit
+; with B = 8.  The local arrays are views of two fixed halves, as tinytc's
+; allocator would place U above w2 (step 3) and overflow at p = 8:
+;   lo: w2, then R, then w4;  hi: w1, then U (= W), then w5.
+; Barriers around S fence global memory too.
+
+;$Q = 4
+;$B = 16
+;$M = 16
+;$wgs = 128
+;$Q_pad = 4
+$P = !calc($Q 1 -)
+$BP = !calc($B $P *)
+$BP2 = !calc($BP $P *)
+$BQ = !calc($B $Q *)
+$BQ2 = !calc($BQ $Q *)
+$BQ3 = !calc($BQ2 $Q *)
+$BP2Q = !calc($BP2 $Q *)
+$BPQ2 = !calc($BP $Q * $Q *)
+$P2 = !calc($P $P *)
+$P3 = !calc($P2 $P *)
+$BP3 = !calc($B $P3 *)
+$Q2 = !calc($Q $Q *)
+$Q3 = !calc($Q2 $Q *)
+$GQ3 = !calc(6 $Q3 *)
+$BGQ3 = !calc($B $GQ3 *)
+
+func @bk3(%Bm: memref<f32x$P x$Q,strided<1,$Q_pad>>,
+          %Dm: memref<f32x$Q x$Q,strided<1,$Q_pad>>,
+          %G:  memref<f32x$B x$Q x$Q x$Q x6x?,strided<$GQ3,1,$Q,$Q2,$Q3,$BGQ3>>,
+          %in: memref<f32x$B x$P x$P x$P x?,strided<$P3,1,$P,$P2,$BP3>>,
+          %out: memref<f32x$B x$P x$P x$P x?,strided<$P3,1,$P,$P2,$BP3>>,
+          %Sg: memref<f32x$B x$Q x$Q x$Q x?>)
+attributes{subgroup_size=$M,work_group_size=[$wgs,1]}
+{
+    %gid = group_id.x : index
+    %c0 = constant 0 : index
+    %cB = constant $B : index
+    %cP = constant $P : index
+    %cQ = constant $Q : index
+    %cBP = constant $BP : index
+    %cBP2 = constant $BP2 : index
+    %cBQ = constant $BQ : index
+    %cBQ2 = constant $BQ2 : index
+    %cBPQ = mul %cBP, %cQ : index
+
+    %G_e = subview %G[0:$B,0:$Q,0:$Q,0:$Q,0:6,%gid] : memref<f32x$B x$Q x$Q x$Q x6,strided<$GQ3,1,$Q,$Q2,$Q3>>
+    %in_e = subview %in[0:$B,0:$P,0:$P,0:$P,%gid] : memref<f32x$B x$P x$P x$P,strided<$P3,1,$P,$P2>>
+    %out_e = subview %out[0:$B,0:$P,0:$P,0:$P,%gid] : memref<f32x$B x$P x$P x$P,strided<$P3,1,$P,$P2>>
+
+    %slm = alloca : memref<f32x$BQ3 x2,local>
+    %lo = subview %slm[0:$BQ3,0] : memref<f32x$BQ3,local>
+    %hi = subview %slm[0:$BQ3,1] : memref<f32x$BQ3,local>
+    %lo_pq2 = subview %lo[0:$BPQ2] : memref<f32x$BPQ2,local>
+    %hi_p2q = subview %hi[0:$BP2Q] : memref<f32x$BP2Q,local>
+    %U = expand %hi[0->$B x$Q x$Q x$Q] : memref<f32x$B x$Q x$Q x$Q,local>
+
+; 1: w1(b,k,j,p) = in(b,k,j,i) B(i,p), rows b, one (k,j) per tile
+
+    %w1 = expand %hi_p2q[0->$B x$P x$P x$Q] : memref<f32x$B x$P x$P x$Q,local>
+    %w1_02 = fuse %w1[0,2] : memref<f32x$BP2 x$Q,local>
+    foreach_tile (%t)=(%c0),(%cBP2) as (%n)<=($M) {
+        %b = rem %t, %cB : index
+        %kj = div %t, %cB : index
+        %k = rem %kj, %cP : index
+        %j = div %kj, %cP : index
+        %a = subview %in_e[0:$B,%k,%j,0:$P] : memref<f32x$B x$P,strided<$P3,$P2>>
+        %0 = constant 0.0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %a[%b,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load %Bm[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        cooperative_matrix_store %3, %w1_02[%t,%c0]
+    }
+    barrier.local
+
+; 2: w2(b,k,q,p) = w1(b,k,j,p) B(j,q), rows (b,k), one p per tile
+
+    %w2 = expand %lo_pq2[0->$B x$P x$Q x$Q] : memref<f32x$B x$P x$Q x$Q,local>
+    %w1_01 = fuse %w1[0,1] : memref<f32x$BP x$P x$Q,local>
+    %w2_01 = fuse %w2[0,1] : memref<f32x$BP x$Q x$Q,local>
+    foreach_tile (%t)=(%c0),(%cBPQ) as (%n)<=($M) {
+        %bk = rem %t, %cBP : index
+        %p = div %t, %cBP : index
+        %a = subview %w1_01[0:$BP,0:$P,%p] : memref<f32x$BP x$P,local>
+        %c = subview %w2_01[0:$BP,0:$Q,%p] : memref<f32x$BP x$Q,local>
+        %0 = constant 0.0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %a[%bk,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load %Bm[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        cooperative_matrix_store %3, %c[%bk,%c0]
+    }
+    barrier.local
+
+; 3: U(b,r,q,p) = w2(b,k,q,p) B(k,r), rows b, one (q,p) per tile
+
+    foreach_tile (%t)=(%c0),(%cBQ2) as (%n)<=($M) {
+        %b = rem %t, %cB : index
+        %qp = div %t, %cB : index
+        %q = rem %qp, %cQ : index
+        %p = div %qp, %cQ : index
+        %a = subview %w2[0:$B,0:$P,%q,%p] : memref<f32x$B x$P,local>
+        %c = subview %U[0:$B,0:$Q,%q,%p] : memref<f32x$B x$Q,local>
+        %0 = constant 0.0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %a[%b,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load %Bm[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        cooperative_matrix_store %3, %c[%b,%c0]
+    }
+    barrier.local
+
+; 4: R(b,r,q,p') = U(b,r,q,p) D(p,p'), rows (b,r,q)
+; 5: S(b,r,q',p) = U(b,r,q,p) D(q,q'), rows (b,r), one p per tile
+
+    %R = expand %lo[0->$B x$Q x$Q x$Q] : memref<f32x$B x$Q x$Q x$Q,local>
+    %S = subview %Sg[0:$B,0:$Q,0:$Q,0:$Q,%gid] : memref<f32x$B x$Q x$Q x$Q>
+    %U02 = fuse %U[0,2] : memref<f32x$BQ2 x$Q,local>
+    %R02 = fuse %R[0,2] : memref<f32x$BQ2 x$Q,local>
+    foreach_tile (%t)=(%c0),(%cBQ2) as (%n)<=($M) {
+        %0 = constant 0.0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %U02[%t,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load %Dm[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        cooperative_matrix_store %3, %R02[%t,%c0]
+    }
+    %U01 = fuse %U[0,1] : memref<f32x$BQ x$Q x$Q,local>
+    %S01 = fuse %S[0,1] : memref<f32x$BQ x$Q x$Q>
+    foreach_tile (%t)=(%c0),(%cBQ2) as (%n)<=($M) {
+        %br = rem %t, %cBQ : index
+        %p = div %t, %cBQ : index
+        %a = subview %U01[0:$BQ,0:$Q,%p] : memref<f32x$BQ x$Q,local>
+        %c = subview %S01[0:$BQ,0:$Q,%p] : memref<f32x$BQ x$Q>
+        %0 = constant 0.0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %a[%br,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load %Dm[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        cooperative_matrix_store %3, %c[%br,%c0]
+    }
+    barrier.global.local
+
+; 6: per (q,p), rows b: qr = R, qs = S, qt = U D along r;
+;    R := Grr qr + Grs qs + Grt qt, S := Grs qr + Gss qs + Gst qt,
+;    U := (Grt qr + Gst qs + Gtt qt) Dt along r (only this tile reads U(.,.,q,p))
+
+    $mat_t = coopmatrix<f32x$M x$Q_pad,matrix_acc>
+    foreach_tile (%t)=(%c0),(%cBQ2) as (%n)<=($M) {
+        %b = rem %t, %cB : index
+        %qp = div %t, %cB : index
+        %q = rem %qp, %cQ : index
+        %p = div %qp, %cQ : index
+        %R_qp = subview %R[0:$B,0:$Q,%q,%p] : memref<f32x$B x$Q,local>
+        %S_qp = subview %S[0:$B,0:$Q,%q,%p] : memref<f32x$B x$Q>
+        %U_qp = subview %U[0:$B,0:$Q,%q,%p] : memref<f32x$B x$Q,local>
+        %G_qp = subview %G_e[0:$B,0:$Q,%q,%p,0:6] : memref<f32x$B x$Q x6,strided<$GQ3,1,$Q3>>
+        %G_0 = subview %G_qp[0:$B,0:$Q,0] : memref<f32x$B x$Q,strided<$GQ3,1>>
+        %G_1 = subview %G_qp[0:$B,0:$Q,1] : memref<f32x$B x$Q,strided<$GQ3,1>>
+        %G_2 = subview %G_qp[0:$B,0:$Q,2] : memref<f32x$B x$Q,strided<$GQ3,1>>
+        %G_3 = subview %G_qp[0:$B,0:$Q,3] : memref<f32x$B x$Q,strided<$GQ3,1>>
+        %G_4 = subview %G_qp[0:$B,0:$Q,4] : memref<f32x$B x$Q,strided<$GQ3,1>>
+        %G_5 = subview %G_qp[0:$B,0:$Q,5] : memref<f32x$B x$Q,strided<$GQ3,1>>
+
+        %qr = cooperative_matrix_load.cols_checked %R_qp[%b,%c0] : $mat_t
+        %Grr = cooperative_matrix_load.cols_checked %G_0[%b,%c0] : $mat_t
+        %Grs = cooperative_matrix_load.cols_checked %G_1[%b,%c0] : $mat_t
+        %Grt = cooperative_matrix_load.cols_checked %G_2[%b,%c0] : $mat_t
+        %fr0 = mul %Grr, %qr : $mat_t
+        %fs0 = mul %Grs, %qr : $mat_t
+        %ft0 = mul %Grt, %qr : $mat_t
+
+        %qs = cooperative_matrix_load.cols_checked %S_qp[%b,%c0] : $mat_t
+        %Gss = cooperative_matrix_load.cols_checked %G_3[%b,%c0] : $mat_t
+        %Gst = cooperative_matrix_load.cols_checked %G_4[%b,%c0] : $mat_t
+        %fr1 = mul %Grs, %qs : $mat_t
+        %fr2 = add %fr0, %fr1 : $mat_t
+        %fs1 = mul %Gss, %qs : $mat_t
+        %fs2 = add %fs0, %fs1 : $mat_t
+        %ft1 = mul %Gst, %qs : $mat_t
+        %ft2 = add %ft0, %ft1 : $mat_t
+
+        %z = constant 0.0 : $mat_t
+        %u = cooperative_matrix_load.cols_checked %U_qp[%b,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %d = cooperative_matrix_load %Dm[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q_pad,matrix_b>
+        %qt = cooperative_matrix_mul_add %u, %d, %z : $mat_t
+        %Gtt = cooperative_matrix_load.cols_checked %G_5[%b,%c0] : $mat_t
+        %fr3 = mul %Grt, %qt : $mat_t
+        %fr = add %fr2, %fr3 : $mat_t
+        %fs3 = mul %Gst, %qt : $mat_t
+        %fs = add %fs2, %fs3 : $mat_t
+        %ft3 = mul %Gtt, %qt : $mat_t
+        %ft = add %ft2, %ft3 : $mat_t
+
+        cooperative_matrix_store.cols_checked %fr, %R_qp[%b,%c0]
+        cooperative_matrix_store.cols_checked %fs, %S_qp[%b,%c0]
+        %fta = cast %ft : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %dt = cooperative_matrix_load.t %Dm[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q_pad,matrix_b>
+        %w = cooperative_matrix_mul_add %fta, %dt, %z : $mat_t
+        cooperative_matrix_store.cols_checked %w, %U_qp[%b,%c0]
+    }
+    barrier.global.local
+
+; 7: W(b,r,q,p) += S(b,r,n,p) D(q,n), rows (b,r), one p per tile
+
+    foreach_tile (%t)=(%c0),(%cBQ2) as (%n)<=($M) {
+        %br = rem %t, %cBQ : index
+        %p = div %t, %cBQ : index
+        %a = subview %S01[0:$BQ,0:$Q,%p] : memref<f32x$BQ x$Q>
+        %c = subview %U01[0:$BQ,0:$Q,%p] : memref<f32x$BQ x$Q,local>
+        %0 = cooperative_matrix_load.cols_checked %c[%br,%c0] : coopmatrix<f32x$M x$Q,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %a[%br,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load.t %Dm[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        cooperative_matrix_store %3, %c[%br,%c0]
+    }
+    barrier.local
+
+; 8: W(b,r,q,p) += R(b,r,q,n) D(p,n), rows (b,r,q)
+
+    foreach_tile (%t)=(%c0),(%cBQ2) as (%n)<=($M) {
+        %0 = cooperative_matrix_load %U02[%t,%c0] : coopmatrix<f32x$M x$Q,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %R02[%t,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load.t %Dm[%c0,%c0] : coopmatrix<f32x$Q_pad x$Q,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$Q,matrix_acc>
+        cooperative_matrix_store %3, %U02[%t,%c0]
+    }
+    barrier.local
+
+; 9: w4(b,k,q,p) = W(b,r,q,p) B(k,r), rows b, one (q,p) per tile
+
+    %w4 = expand %lo_pq2[0->$B x$P x$Q x$Q] : memref<f32x$B x$P x$Q x$Q,local>
+    foreach_tile (%t)=(%c0),(%cBQ2) as (%n)<=($M) {
+        %b = rem %t, %cB : index
+        %qp = div %t, %cB : index
+        %q = rem %qp, %cQ : index
+        %p = div %qp, %cQ : index
+        %a = subview %U[0:$B,0:$Q,%q,%p] : memref<f32x$B x$Q,local>
+        %c = subview %w4[0:$B,0:$P,%q,%p] : memref<f32x$B x$P,local>
+        %0 = constant 0.0 : coopmatrix<f32x$M x$P,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %a[%b,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load.t %Bm[%c0,%c0] : coopmatrix<f32x$Q_pad x$P,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$P,matrix_acc>
+        cooperative_matrix_store %3, %c[%b,%c0]
+    }
+    barrier.local
+
+; 10: w5(b,k,j,p) = w4(b,k,q,p) B(j,q), rows (b,k), one p per tile
+
+    %w5 = expand %hi_p2q[0->$B x$P x$P x$Q] : memref<f32x$B x$P x$P x$Q,local>
+    %w4_01 = fuse %w4[0,1] : memref<f32x$BP x$Q x$Q,local>
+    %w5_01 = fuse %w5[0,1] : memref<f32x$BP x$P x$Q,local>
+    foreach_tile (%t)=(%c0),(%cBPQ) as (%n)<=($M) {
+        %bk = rem %t, %cBP : index
+        %p = div %t, %cBP : index
+        %a = subview %w4_01[0:$BP,0:$Q,%p] : memref<f32x$BP x$Q,local>
+        %c = subview %w5_01[0:$BP,0:$P,%p] : memref<f32x$BP x$P,local>
+        %0 = constant 0.0 : coopmatrix<f32x$M x$P,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %a[%bk,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load.t %Bm[%c0,%c0] : coopmatrix<f32x$Q_pad x$P,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$P,matrix_acc>
+        cooperative_matrix_store %3, %c[%bk,%c0]
+    }
+    barrier.local
+
+; 11: out(b,k,j,i) = w5(b,k,j,p) B(i,p), rows b, one (k,j) per tile
+
+    %w5_02 = fuse %w5[0,2] : memref<f32x$BP2 x$Q,local>
+    foreach_tile (%t)=(%c0),(%cBP2) as (%n)<=($M) {
+        %b = rem %t, %cB : index
+        %kj = div %t, %cB : index
+        %k = rem %kj, %cP : index
+        %j = div %kj, %cP : index
+        %c = subview %out_e[0:$B,%k,%j,0:$P] : memref<f32x$B x$P,strided<$P3,$P2>>
+        %0 = constant 0.0 : coopmatrix<f32x$M x$P,matrix_acc>
+        %1 = cooperative_matrix_load.cols_checked %w5_02[%t,%c0] : coopmatrix<f32x$M x$Q_pad,matrix_a>
+        %2 = cooperative_matrix_load.t %Bm[%c0,%c0] : coopmatrix<f32x$Q_pad x$P,matrix_b>
+        %3 = cooperative_matrix_mul_add %1, %2, %0 : coopmatrix<f32x$M x$P,matrix_acc>
+        cooperative_matrix_store %3, %c[%b,%c0]
+    }
+}

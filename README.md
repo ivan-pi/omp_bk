@@ -21,7 +21,7 @@ The tree is organized by approach; the file names say the kernel.
 | `openmp/` | The portable drivers `BK1.cpp`, `BK3.cpp`, `BK5.cpp`, `BK1_ff.cpp` (host or offload), `bk1_sumfact.h`, `bk3_sumfact.h`, `float_float.h` |
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
-| `tinytc/` | `bk_tinytc.cpp` (driver for both kernels), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received), `repro_slm/` (bug reproducer) |
+| `tinytc/` | `bk_tinytc.cpp` (driver for BK1, BK3 and BK5), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received, `bk3_blk.ir` and `bk3_ec.ir` in tinytc's blocked and our layout, `bk3_*_gs.ir` with S in global memory), `repro_slm/` (bug reproducer), `upstream_issues.md` (drafts) |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp`, `stream_sycl.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
@@ -279,6 +279,11 @@ scripts/study/sweep.sh gpu_results.csv     # BK1, BK3, BK5 at ORDERS="2 4 6", pl
 Builds with other flags get their own tree, which `run.sh` and the study
 scripts then use too: `BUILD_DIR=build/a770-grf EXTRA_FLAGS=... scripts/build.sh ...`.
 
+`run.sh` shares the GPU with no one: it waits until no other process (other
+than display clients) has held it for `GPU_IDLE_SECS` (10) seconds and
+repeats a run during which another one appeared (`GPU_GUARD=0` turns this
+off).
+
 The A770 has no fp64 hardware. BK1_ff is built and run with the driver's
 FP64 emulation (`IGC_EnableDPEmulation=1`, plus
 `OverrideDefaultFP64Settings=1` at run time), which the double reference and
@@ -354,6 +359,27 @@ What mattered: SIMD8 (`_sg8` in SYCL; IGC picks it by itself for the OpenMP
 At p = 5, 7, 8 the compute steps (~11 GDoF/s alone) and the G stream (~9.4
 GDoF/s alone) overlap poorly; SLM padding, fill groups, prefetching G and
 a compile-time work-group size changed little there.
+
+Against the Kokkos CEED_BK kernels of
+[dealii-X/benchmarks](https://github.com/dealii-X/benchmarks) (Kokkos 5.3.0,
+SYCL ahead of time for DG2, their drivers switched to float;
+`scripts/study/kokkos_build.sh`, then `kokkos_compare.sh`) at the same
+sizes, with Kokkos at its fastest element batch, ours are 1.30-2.16x faster
+on BK1 and BK3 and 1.10-2.10x on BK5 (`results/a770/kokkos_compare_a770.png`,
+`.txt`).
+
+BK3 in tinytc (`tinytc/ir/bk3_blk.ir`, `bk3_ec.ir`: BK1's interpolation
+around BK5's Laplacian, a work-group per block of 8-32 elements, the
+sub-group size 8 or 16 as `TT_SG`) keeps U, R and S of 3 B nq^3 floats in
+local memory up to p = 6 (B = 8). At p = 7 and 8 these exceed 64 KiB, and
+`bk3_blk_gs.ir`, `bk3_ec_gs.ir` keep S in global memory instead (a block of
+B nq^3 floats per work-group; `TT_SPILL`, on by default only there; about
+10% slower where it isn't needed, 8.0 vs 8.7 GDoF/s at p = 6). With the best
+configuration per order (`tinytc_survey_bk3_a770.csv`), in its blocked
+layout it matches or slightly beats our best kernel up to p = 6
+(1.00-1.09x) and reaches 0.92x and 0.88x at p = 7 and 8; in our
+element-contiguous layout it reaches 0.62-0.80x of it
+(`bk3_tinytc_compare_a770.png`, `.txt`; `scripts/study/bk3_tinytc_compare.sh`).
 
 The measurements below are of the portable drivers in `openmp/` (one
 element per thread), on an Arc A770 (16 GB) with icpx 2026.1, compute
