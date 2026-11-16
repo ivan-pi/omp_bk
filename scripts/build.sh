@@ -11,7 +11,7 @@
 #                                           specialization-constant variant
 #                                           needs to fold nq)
 #   stream_omp                              roofline/ bandwidth test
-#   bk_tinytc                               tinytc/ driver (tinytc in /opt/tinytc/latest)
+#   bk_tinytc                               tinytc/ driver (TINYTC_ROOT of preset a770)
 #   all_<prog>                              every order of <prog>
 # e.g.    scripts/build.sh BK1_4 bk5_offload_6 all_bk1_sycl
 # (every target is named by the polynomial order p)

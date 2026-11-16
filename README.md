@@ -29,18 +29,100 @@ The tree is organized by approach; the file names say the kernel.
 
 ## Requirements
 
-- CMake 3.21 or later and a C++17 compiler with OpenMP (e.g. GCC or Clang)
-  for the host build; there the `target` regions run on the host.
-- For the GPU builds: the Intel oneAPI DPC++/C++ compiler (icpx) and an
-  Intel GPU with the Level Zero driver; tinytc (in `/opt/tinytc`) for
+- CMake 3.21 or later and a C++17 compiler, with OpenMP for threads (e.g. GCC
+  or Clang), for the host build; there the `target` regions run on the host.
+- For the GPU builds: the Intel oneAPI DPC++/C++ compiler (icpx, which
+  provides both OpenMP offload and SYCL), Ninja, and an Intel GPU with the
+  Level Zero driver. Optional: the Tiny Tensor Compiler (tinytc) for
   `bk_tinytc`.
 
 ## Build
 
+Pick the backends at configure time:
+
+| Option | Default | Builds |
+|---|---|---|
+| `BK_ENABLE_OPENMP` | `ON` | host: OpenMP threads (off: serial); GPU: the OpenMP offload programs (`BK1_<p>`, `bk1_offload_<p>`, ...) |
+| `BK_ENABLE_SYCL` | `ON` | GPU: the SYCL programs (`bk1_sycl_<p>`, ...) |
+| `BK_ENABLE_TINYTC` | `OFF` | GPU: `bk_tinytc`; needs SYCL and a tinytc install (`TINYTC_ROOT`) |
+| `BK_GPU_DEVICE` | empty | ocloc device of the GPU tree (`acm-g10` = Arc A770/A750); empty: host tree |
+| `BK_ORDERS_P`, `BK_ORDERS_BK5`, `BK_ORDERS_GPU` | `1;...;8` (BK5: `1;...;7`) | GPU: the orders p built, one binary each |
+| `BK_GPU_IN_ALL` | `ON` | GPU: per-order programs in `all` (off: build them by name) |
+
+**Which `BK_GPU_DEVICE`?** The GPU programs are compiled ahead of time
+into machine code for one GPU, so this names your GPU as `ocloc` (Intel's
+device compiler, which icpx calls) knows it. There is no generic value;
+the preset's `acm-g10` is the Arc A770/A750 (Alchemist ACM-G10 die, Xe-HPG).
+To find yours, run `sycl-ls`, which prints each GPU with its IP version:
+
+```
+[level_zero:gpu][level_zero:0] ... Intel(R) Arc(TM) A770 Graphics 12.55.8 [...]
+```
+
+That version (`12.55.8`) can be passed as it is (`-DBK_GPU_DEVICE=12.55.8`),
+and `ocloc ids <name>` shows which version a name stands for (`ocloc ids
+acm-g10` gives 12.55.8). `ocloc compile --help` lists every name under
+`-device`. Some common ones: `acm-g10` (Arc A770/A750), `acm-g11` (Arc
+A380 and the A3 laptop chips), `bmg-g21` (Arc B580/B570), `pvc` (Data Center GPU Max),
+`mtl-u`, `mtl-h` (Meteor Lake integrated graphics; `xe-lpg` covers both),
+`lnl-m` (Lunar Lake integrated graphics). A comma-separated list
+(`acm-g10,bmg-g21`) builds one binary for several GPUs, at the cost of a
+longer compile per GPU.
+
+**CPU (any compiler)**
+
 ```sh
-cmake --preset host               # configure build/host with the default compiler
+cmake --preset host               # build/host with the default compiler
 cmake --build build/host          # BK1, BK3, BK5, BK1_ff, BK1_amx, bw_test, amx_pipe, stream_omp
 ```
+
+**Intel GPU, OpenMP offload and SYCL**
+
+```sh
+source /opt/intel/oneapi/setvars.sh
+cmake --preset intel-gpu -DBK_GPU_DEVICE=acm-g10   # build/intel-gpu
+cmake --build build/intel-gpu
+```
+
+**Intel GPU, one backend only, or a few orders**
+
+```sh
+source /opt/intel/oneapi/setvars.sh
+cmake --preset intel-gpu -B build/sycl -DBK_ENABLE_OPENMP=OFF -DBK_ORDERS_GPU="2;4;6"
+cmake --build build/sycl
+```
+
+**Intel GPU, with tinytc**
+
+```sh
+source /opt/intel/oneapi/setvars.sh
+export TINYTC_ROOT=<tinytc install>       # or -DTINYTC_ROOT=..., or the install on CMAKE_PREFIX_PATH
+cmake --preset intel-gpu -DBK_ENABLE_TINYTC=ON
+cmake --build build/intel-gpu --target bk_tinytc
+```
+
+Every GPU tree also has the targets `all_<prog>` (every order of a program,
+e.g. `all_bk5_sycl`), `all_openmp` and `all_sycl`.
+
+> **GPU build time.** Each GPU binary holds one polynomial order and is
+> compiled ahead of time for `BK_GPU_DEVICE`, which takes about a minute
+> and up to several GB of memory per binary (more at high order); with every
+> backend and order there are about 95 of them, i.e. one to two hours on one
+> job. To shorten it:
+> - build only what you need: `BK_ENABLE_*=OFF`, fewer orders
+>   (`BK_ORDERS_*`), or single targets (`--target bk1_sycl_4`, `all_bk5_sycl`);
+> - run several compiles at once, if memory allows: `-DBK_GPU_JOBS=4`
+>   (default 1; at most about RAM / 8 GB);
+> - compile the kernels of one binary in parallel: split the device code per
+>   kernel and let icpx run several device compiles at link time,
+>   ```sh
+>   -DBK_EXTRA_FLAGS="-fsycl-device-code-split=per_kernel -fsycl-max-parallel-link-jobs=8 -fopenmp-device-code-split=per_kernel -fopenmp-max-parallel-link-jobs=8"
+>   ```
+>   On the A770 machine (16 threads, icpx 2026.1) this cut `bk1_sycl_6`
+>   from 66 s to 29 s but raised its peak memory from 0.7 to 2.2 GB, and
+>   `bk1_offload_6` went from 56 s to 46 s, with the same device times and
+>   errors. It helps the programs with many kernels most; one
+>   measurement each, not yet the default.
 
 The flags are `-Wall -pedantic -O3 -std=c++17` with the native instruction
 set and OpenMP; no build type is needed (a `Release` build would add
@@ -125,18 +207,19 @@ first output line says `fma = hardware`).
 
 ## Intel GPUs (icpx, Arc A770)
 
-The CMake preset `a770` builds for an Intel GPU with icpx, ahead of time for
-the ocloc device `acm-g10` (Arc A770/A750; `GPU_DEVICE=...` for others,
-`ocloc compile --help` lists the names), with `-fp-model=precise` against
-icpx's fast default. `scripts/build.sh` sets up the oneAPI environment
-(`common.sh`, including the `umf` library the Level Zero adapter needs),
-configures `build/a770` and builds the named targets one after another.
+The CMake preset `a770` is `intel-gpu` as set up on the A770 workstation:
+ahead of time for the ocloc device `acm-g10` (Arc A770/A750; `GPU_DEVICE=...`
+for others, `ocloc compile --help` lists the names), tinytc on, every
+compile memory-capped, and no GPU program in `all`. All GPU builds use
+`-fp-model=precise` against icpx's fast default. `scripts/build.sh` sets up
+the oneAPI environment (`common.sh`, including the `umf` library the Level
+Zero adapter needs), configures `build/a770` and builds the named targets
+one after another.
 
 - **One order per binary,** so the device compiler sees one kernel set at a
   time, named by the polynomial order p (`BK5_3`, `bk1_offload_4`): the
   `openmp/` drivers are built with `-DBK_ORDER=<p>`, the other programs with
-  `-DNQ=<nq>`. No GPU target is in `all`; `all_<prog>` builds every order of
-  a program.
+  `-DNQ=<nq>`. `all_<prog>` builds every order of a program.
 - **Memory cap:** every compile, link and run goes through a systemd user
   scope capped at `MEM_MAX` (8G) that prints its peak memory
   (`scripts/capped` is the preset's compiler launcher), and GPU compiles
@@ -153,7 +236,7 @@ PROFILE=1 scripts/run.sh BK1_4 4           # plus the per-kernel device times
 scripts/build.sh BK1_ff_4 && scripts/run.sh BK1_ff_4 4 524288 3
 scripts/build.sh bk1_offload_4 bk5_sycl_6  # kernel variants: OpenMP offload and SYCL
 scripts/build.sh bk3_offload_4 bk3_sycl_4  # BK3: port of the CUDA kernel (cu) and column sweeps (sf)
-scripts/build.sh bk_tinytc                 # tinytc driver (tinytc from /opt/tinytc/latest)
+scripts/build.sh bk_tinytc                 # tinytc driver (preset a770: TINYTC_ROOT=/opt/tinytc/latest)
 scripts/study/sweep.sh gpu_results.csv     # BK1, BK3, BK5 at ORDERS="2 4 6", plus STREAM
 ```
 

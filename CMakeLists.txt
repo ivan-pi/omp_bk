@@ -6,17 +6,29 @@
 #     BK1 BK3 BK5 BK1_ff         openmp/      every order in one binary
 #     BK1_amx                    amx/         software-emulated AMX off Apple Silicon
 #     bw_test amx_pipe stream_omp roofline/   (accel_gemm on macOS)
+#   all of them threaded with OpenMP if BK_ENABLE_OPENMP and the compiler
+#   supports it, serial otherwise.
 #
-#   Intel GPU (icpx, BK_GPU_DEVICE = an ocloc device such as acm-g10; preset "a770"):
-#     one binary per order, ahead-of-time compiled for BK_GPU_DEVICE, none of
-#     them in `all` (each takes minutes and gigabytes to build):
-#       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<p>    openmp/ drivers, OpenMP offload (-DBK_ORDER=p)
+#   Intel GPU (icpx, BK_GPU_DEVICE = an ocloc device such as acm-g10;
+#   presets "intel-gpu" and "a770"): one binary per order, ahead-of-time
+#   compiled for BK_GPU_DEVICE, by backend:
+#     BK_ENABLE_OPENMP (ON):  OpenMP offload
+#       BK1_<p> BK3_<p> BK1_ff_<p> BK5_<p>    openmp/ drivers (-DBK_ORDER=p)
 #       bk{1,3,5}_offload_<p>                  openmp/offload/ kernel variants (-DNQ=nq)
+#       stream_omp                             roofline/ bandwidth test
+#     BK_ENABLE_SYCL (ON):    SYCL
 #       bk{1,3,5}_sycl_<p>                     sycl/ (-DNQ=nq; bk1 and bk5 _jit: JIT-compiled,
 #                                              for specialization constants)
-#     named by the polynomial order p (BK1, BK3: nq = p + 2, BK5: nq = p + 1),
-#       all_<prog>                             every order of <prog>
-#     and in `all`: stream_omp (OpenMP offload) and bk_tinytc (if tinytc is found).
+#     BK_ENABLE_TINYTC (OFF): bk_tinytc        tinytc/ (needs tinytc_sycl, TINYTC_ROOT,
+#                                              and BK_ENABLE_SYCL)
+#   named by the polynomial order p (BK1, BK3: nq = p + 2, BK5: nq = p + 1),
+#     all_<prog>                               every order of <prog>
+#     all_openmp, all_sycl                     every program of a backend
+#   Each per-order binary takes minutes and gigabytes to build.  They are in
+#   `all` unless BK_GPU_IN_ALL=OFF (preset "a770", where scripts/build.sh
+#   builds them by name or through the all_* targets).  BK_ORDERS_* trim the
+#   orders, BK_GPU_JOBS sets how many compile at once.
+#   OpenMP and SYCL both come with icpx; tinytc is a separate install.
 #
 # One order per binary, so the device compiler sees one kernel set at a
 # time.  Compiles and links of the GPU targets run in the job pool bk_gpu
@@ -25,7 +37,7 @@
 # No build type is needed: the flags below include -O3, and the benchmark
 # keeps its asserts (no -DNDEBUG).
 
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.21...3.31)
 project(omp_bk LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -38,7 +50,10 @@ set(BK_EXTRA_FLAGS "" CACHE STRING "extra compile and link flags of the GPU targ
 set(BK_ORDERS_P "1;2;3;4;5;6;7;8" CACHE STRING "orders p of BK1_<p>, BK3_<p>, BK1_ff_<p>")
 set(BK_ORDERS_BK5 "1;2;3;4;5;6;7" CACHE STRING "orders p of BK5_<p>")
 set(BK_ORDERS_GPU "1;2;3;4;5;6;7;8" CACHE STRING "orders p of the GPU variant programs (bk1_offload_<p>, bk3_sycl_<p>, ...)")
-set(BK_TINYTC_ROOT "/opt/tinytc/latest" CACHE PATH "tinytc install searched for bk_tinytc")
+option(BK_ENABLE_OPENMP "OpenMP: threads in the host tree, offload programs in the GPU tree" ON)
+option(BK_ENABLE_SYCL "SYCL programs (GPU tree)" ON)
+option(BK_ENABLE_TINYTC "bk_tinytc (GPU tree; needs tinytc and BK_ENABLE_SYCL)" OFF)
+option(BK_GPU_IN_ALL "put the per-order GPU programs in `all` (each takes minutes to build)" ON)
 
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
     message(WARNING "CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} defines NDEBUG; the benchmark is meant to keep its asserts")
@@ -65,7 +80,17 @@ set(BK_OPENMP ${CMAKE_SOURCE_DIR}/openmp)
 if(NOT BK_GPU_DEVICE)
     # ---------------------------------------------------------------- host
     add_compile_options(-pedantic)
-    find_package(OpenMP)
+    if(BK_ENABLE_OPENMP)
+        find_package(OpenMP)
+        if(NOT OpenMP_CXX_FOUND)
+            message(WARNING "${CMAKE_CXX_COMPILER_ID} has no OpenMP: the host programs run serially (BK_ENABLE_OPENMP=OFF silences this)")
+        endif()
+    endif()
+    if(OpenMP_CXX_FOUND)
+        message(STATUS "host tree: OpenMP threads (SYCL and tinytc programs need a GPU tree, BK_GPU_DEVICE)")
+    else()
+        message(STATUS "host tree: serial, no OpenMP (SYCL and tinytc programs need a GPU tree, BK_GPU_DEVICE)")
+    endif()
 
     function(bk_host name src)
         add_executable(${name} ${src})
@@ -132,52 +157,97 @@ function(bk_gpu_target name api)
 endfunction()
 
 # <src> once per order p, -D<define>=<p + offset>: targets <prog>_<p>[<suffix>]
-# and all_<prog>[<suffix>]
+# and all_<prog>[<suffix>], the latter added to all_<backend> (openmp, sycl)
+if(BK_GPU_IN_ALL)
+    set(bk_exclude "")
+else()
+    set(bk_exclude EXCLUDE_FROM_ALL)
+endif()
+add_custom_target(all_openmp)
+add_custom_target(all_sycl)
 function(bk_gpu_orders prog src api define offset suffix)
     add_custom_target(all_${prog}${suffix})
+    if(api STREQUAL "omp")
+        add_dependencies(all_openmp all_${prog}${suffix})
+    else()
+        add_dependencies(all_sycl all_${prog}${suffix})
+    endif()
     foreach(order IN LISTS ARGN)
         set(name ${prog}_${order}${suffix})
         math(EXPR value "${order} + ${offset}")
-        add_executable(${name} EXCLUDE_FROM_ALL ${src})
+        add_executable(${name} ${bk_exclude} ${src})
         target_compile_definitions(${name} PRIVATE ${define}=${value})
         bk_gpu_target(${name} ${api})
         add_dependencies(all_${prog}${suffix} ${name})
     endforeach()
 endfunction()
 
-bk_gpu_orders(BK1 openmp/BK1.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
-bk_gpu_orders(BK3 openmp/BK3.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
-bk_gpu_orders(BK1_ff openmp/BK1_ff.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
-bk_gpu_orders(BK5 openmp/BK5.cpp omp BK_ORDER 0 "" ${BK_ORDERS_BK5})
-bk_gpu_orders(bk1_offload openmp/offload/bk1_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})
-bk_gpu_orders(bk5_offload openmp/offload/bk5_offload.cpp omp NQ 1 "" ${BK_ORDERS_GPU})
-bk_gpu_orders(bk3_offload openmp/offload/bk3_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})
-bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
-bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl NQ 1 "" ${BK_ORDERS_GPU})
-bk_gpu_orders(bk3_sycl sycl/bk3_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
-bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl_jit NQ 2 _jit ${BK_ORDERS_GPU})
-bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl_jit NQ 1 _jit ${BK_ORDERS_GPU})
+if(NOT BK_ENABLE_OPENMP AND NOT BK_ENABLE_SYCL)
+    message(WARNING "GPU tree with BK_ENABLE_OPENMP=OFF and BK_ENABLE_SYCL=OFF: no BK programs")
+endif()
 
-# The A770 has no fp64 hardware: BK1_ff (double reference, float-float
-# split/join) is compiled with IGC's FP64 emulation.
-set(dp_compile env IGC_EnableDPEmulation=1 ${CMAKE_CXX_COMPILER_LAUNCHER})
-set(dp_link env IGC_EnableDPEmulation=1 ${CMAKE_CXX_LINKER_LAUNCHER})
-foreach(p IN LISTS BK_ORDERS_P)
-    set_target_properties(BK1_ff_${p} PROPERTIES CXX_COMPILER_LAUNCHER "${dp_compile}" CXX_LINKER_LAUNCHER "${dp_link}")
-endforeach()
+if(BK_ENABLE_OPENMP)
+    bk_gpu_orders(BK1 openmp/BK1.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
+    bk_gpu_orders(BK3 openmp/BK3.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
+    bk_gpu_orders(BK1_ff openmp/BK1_ff.cpp omp BK_ORDER 0 "" ${BK_ORDERS_P})
+    bk_gpu_orders(BK5 openmp/BK5.cpp omp BK_ORDER 0 "" ${BK_ORDERS_BK5})
+    bk_gpu_orders(bk1_offload openmp/offload/bk1_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})
+    bk_gpu_orders(bk5_offload openmp/offload/bk5_offload.cpp omp NQ 1 "" ${BK_ORDERS_GPU})
+    bk_gpu_orders(bk3_offload openmp/offload/bk3_offload.cpp omp NQ 2 "" ${BK_ORDERS_GPU})
 
-add_executable(stream_omp roofline/stream_omp.cpp)
-bk_gpu_target(stream_omp omp)
+    # The A770 has no fp64 hardware: BK1_ff (double reference, float-float
+    # split/join) is compiled with IGC's FP64 emulation.
+    set(dp_compile env IGC_EnableDPEmulation=1 ${CMAKE_CXX_COMPILER_LAUNCHER})
+    set(dp_link env IGC_EnableDPEmulation=1 ${CMAKE_CXX_LINKER_LAUNCHER})
+    foreach(p IN LISTS BK_ORDERS_P)
+        set_target_properties(BK1_ff_${p} PROPERTIES CXX_COMPILER_LAUNCHER "${dp_compile}" CXX_LINKER_LAUNCHER "${dp_link}")
+    endforeach()
+
+    add_executable(stream_omp roofline/stream_omp.cpp)
+    bk_gpu_target(stream_omp omp)
+    add_dependencies(all_openmp stream_omp)
+endif()
+
+if(BK_ENABLE_SYCL)
+    bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
+    bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl NQ 1 "" ${BK_ORDERS_GPU})
+    bk_gpu_orders(bk3_sycl sycl/bk3_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
+    bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl_jit NQ 2 _jit ${BK_ORDERS_GPU})
+    bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl_jit NQ 1 _jit ${BK_ORDERS_GPU})
+endif()
 
 # tinytc: the kernels (tinytc/ir/*.ir) are compiled at run time, so the
-# driver is plain SYCL host code.
-list(APPEND CMAKE_PREFIX_PATH ${BK_TINYTC_ROOT})
-find_package(tinytc_sycl CONFIG QUIET)
-if(tinytc_sycl_FOUND)
+# driver is plain SYCL host code.  Optional: asked for, it must be found.
+if(BK_ENABLE_TINYTC)
+    if(NOT BK_ENABLE_SYCL)
+        message(FATAL_ERROR "BK_ENABLE_TINYTC needs BK_ENABLE_SYCL (bk_tinytc is a SYCL program)")
+    endif()
+    # tinytc installs its own config packages (tinytc_sycl pulls in tinytc,
+    # tinytc_ze and tinytc_cl).  The install is found from -DTINYTC_ROOT, else
+    # $TINYTC_ROOT (set by tinytc's setvars.sh), else CMAKE_PREFIX_PATH.
+    if(NOT TINYTC_ROOT AND DEFINED ENV{TINYTC_ROOT})
+        set(TINYTC_ROOT "$ENV{TINYTC_ROOT}")
+    endif()
+    if(TINYTC_ROOT)
+        list(PREPEND CMAKE_PREFIX_PATH "${TINYTC_ROOT}")
+    endif()
+    find_package(tinytc_sycl CONFIG)
+    if(NOT tinytc_sycl_FOUND)
+        message(FATAL_ERROR "BK_ENABLE_TINYTC: tinytc_sycl not found (TINYTC_ROOT=${TINYTC_ROOT}); "
+                            "source <tinytc>/setvars.sh, pass -DTINYTC_ROOT=<tinytc install>, "
+                            "or set BK_ENABLE_TINYTC=OFF")
+    endif()
+    message(STATUS "tinytc: ${tinytc_sycl_DIR}")
     add_executable(bk_tinytc tinytc/bk_tinytc.cpp)
     bk_gpu_target(bk_tinytc sycl_rt)
     target_compile_definitions(bk_tinytc PRIVATE TT_IR_DIR="${CMAKE_SOURCE_DIR}/tinytc/ir")
     target_link_libraries(bk_tinytc PRIVATE tinytc::tinytc_sycl)
-else()
-    message(STATUS "tinytc_sycl not found under BK_TINYTC_ROOT=${BK_TINYTC_ROOT}: no bk_tinytc")
 endif()
+
+if(BK_GPU_IN_ALL)
+    set(bk_where "in all")
+else()
+    set(bk_where "not in all: build them by name, all_<prog>, all_openmp or all_sycl")
+endif()
+message(STATUS "GPU tree for ${BK_GPU_DEVICE}: OpenMP offload ${BK_ENABLE_OPENMP}, SYCL ${BK_ENABLE_SYCL}, "
+               "tinytc ${BK_ENABLE_TINYTC}; per-order programs ${bk_where}")
