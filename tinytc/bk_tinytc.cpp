@@ -9,10 +9,12 @@
 // (bk5.ir with its global-memory race fixed), and bk3_blk.ir, on our arrays
 // converted to their blocked layout (below) and the result converted back.
 // TT_LAYOUT=orig: as blk with the unmodified bk5.ir.
+// TT_LAYOUT=blk_ch (BK3): bk3_blk_ch.ir, blk with the r direction chained in
+// registers and 3 B nm nq^2 floats of local memory instead of 3 B nq^3.
 //
 //   scripts/build.sh bk_tinytc              (-> build/a770/bk_tinytc)
 //   build/a770/bk_tinytc <1|3|5> <p> [nelmt] [ntests]   (BK1, BK3: nq = p + 2, BK5: nq = p + 1)
-//   env: TT_LAYOUT (ec or blk), TT_IR_DIR (default: tinytc/ir of the source tree),
+//   env: TT_LAYOUT (ec, blk or blk_ch), TT_IR_DIR (default: tinytc/ir of the source tree),
 //        TT_QPAD (row stride of the basis, default: the next power of two >= nq),
 //        TT_FEATURES (tinytc core feature flags, e.g. 0 for none),
 //        TT_SPV (write the generated SPIR-V to this file),
@@ -174,9 +176,10 @@ int main(int argc, char** argv)
     const int wgs = bk::env_int("TT_WGS", default_wgs(nq));
     const std::string dir = bk::get_env("TT_IR_DIR").value_or(TT_IR_DIR);
     const std::string layout = bk::get_env("TT_LAYOUT").value_or("ec");
-    const bool blocked = (layout == "blk" || layout == "orig");
+    const bool chain = (layout == "blk_ch");
+    const bool blocked = (layout == "blk" || layout == "orig" || chain);
     if (!blocked && layout != "ec") {
-        std::fprintf(stderr, "TT_LAYOUT=%s: ec, blk or orig\n", layout.c_str());
+        std::fprintf(stderr, "TT_LAYOUT=%s: ec, blk, blk_ch or orig\n", layout.c_str());
         return 2;
     }
     if (!blocked && B != 16 && bk != 3) {
@@ -190,18 +193,23 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "BK%d: only 1, 3 and 5\n", bk);
         return 2;
     }
-    const bool spill =
-        (bk == 3) && bk::env_int("TT_SPILL", 3 * B * nq * nq * nq * int(sizeof(float)) > 65536) != 0;
+    // BK3: the local arrays hold B nq^3 floats each, or B nm nq^2 chained (blk_ch)
+    const int array_bytes = B * (chain ? nm : nq) * nq * nq * int(sizeof(float));
+    const bool spill = (bk == 3) && bk::env_int("TT_SPILL", 3 * array_bytes > 65536) != 0;
+    if (chain && (bk != 3 || spill)) {
+        std::fprintf(stderr, "TT_LAYOUT=blk_ch: BK3 only, without TT_SPILL\n");
+        return 2;
+    }
     if (bk == 3) {
         if (layout == "orig" || B % sg != 0) {
-            std::fprintf(stderr, "BK3: TT_LAYOUT ec or blk, TT_B a multiple of TT_SG\n");
+            std::fprintf(stderr, "BK3: TT_LAYOUT ec, blk or blk_ch, TT_B a multiple of TT_SG\n");
             return 2;
         }
-        // U and R (and S unless spilled) of B nq^3 floats each in the 64 KiB of local memory
+        // three arrays (two with S spilled) in the 64 KiB of local memory
         const int arrays = spill ? 2 : 3;
-        if (arrays * B * nq * nq * nq * int(sizeof(float)) > 65536) {
-            std::fprintf(stderr, "BK3 tinytc: %d B nq^3 floats (B = %d, nq = %d) exceed 64 KiB of local memory\n",
-                         arrays, B, nq);
+        if (arrays * array_bytes > 65536) {
+            std::fprintf(stderr, "BK3 tinytc: %d arrays of %d bytes (B = %d, nq = %d) exceed 64 KiB of local memory\n",
+                         arrays, array_bytes, B, nq);
             return 2;
         }
     }
@@ -222,6 +230,7 @@ int main(int argc, char** argv)
     std::vector<double> ref(in.size());
     std::vector<float> basis_t(pad * pad, 0.0f);   // tinytc's padded basis
     std::vector<float> dbasis_t(pad * pad, 0.0f);  // BK3: and derivative
+    std::vector<float> bd_t(pad * pad, 0.0f);      // BK3 chained: B D
     if (bk == 3) {
         const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);
         const std::vector<float> D = bk::make_test_basis<float>(nq, nq);
@@ -233,6 +242,15 @@ int main(int argc, char** argv)
         for (int n = 0; n < nq; ++n) {
             for (int a = 0; a < nq; ++a) {
                 dbasis_t[a * pad + n] = D[n * nq + a];   // Dm(n, a) = D(n, a)
+            }
+        }
+        for (int i = 0; i < nm; ++i) {
+            for (int a = 0; a < nq; ++a) {
+                double sum = 0.0;
+                for (int n = 0; n < nq; ++n) {
+                    sum += double(basis[i * nq + n]) * double(D[n * nq + a]);
+                }
+                bd_t[a * pad + i] = float(sum);   // BDm(i, a) = sum_n B(i, n) D(n, a)
             }
         }
         bk::reference_bk3(nq, nelmt, basis, D, geo, in, ref);
@@ -258,6 +276,7 @@ int main(int argc, char** argv)
     // blk: tinytc's layout, blocks of B elements, element innermost
     float* d_basis = to_device(q, basis_t);
     float* d_dbasis = to_device(q, dbasis_t);
+    float* d_bd = to_device(q, bd_t);
     float* d_geo = blocked ? to_device(q, to_blocks(geo, nelmt, ngeo, B)) : to_device(q, geo);
     float* d_in = blocked ? to_device(q, to_blocks(in, nelmt, npts, B)) : to_device(q, in);
     float* d_out = sycl::malloc_device<float>(in.size(), q);
@@ -271,6 +290,8 @@ int main(int argc, char** argv)
         ir += "_ec";
     } else if (layout == "blk" && bk != 1) {
         ir += "_blk";
+    } else if (chain) {
+        ir += "_blk_ch";
     }
     ir += spill ? "_gs.ir" : ".ir";
     sycl::kernel k = [&]() {
@@ -287,6 +308,8 @@ int main(int argc, char** argv)
         return q.submit([&](sycl::handler& h) {
             if (spill) {
                 h.set_args(d_basis, d_dbasis, d_geo, n64, d_in, n64, d_out, n64, d_scratch, n64);
+            } else if (chain) {
+                h.set_args(d_basis, d_dbasis, d_bd, d_geo, n64, d_in, n64, d_out, n64);
             } else if (bk == 3) {
                 h.set_args(d_basis, d_dbasis, d_geo, n64, d_in, n64, d_out, n64);
             } else {
@@ -309,6 +332,7 @@ int main(int argc, char** argv)
                 relerr, bk::fail_mark(relerr));
     sycl::free(d_basis, q);
     sycl::free(d_dbasis, q);
+    sycl::free(d_bd, q);
     sycl::free(d_geo, q);
     sycl::free(d_in, q);
     sycl::free(d_out, q);

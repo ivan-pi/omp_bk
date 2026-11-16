@@ -4,7 +4,8 @@
 #
 # usage:  scripts/study/tinytc_final.sh <picks.txt> [out.csv]
 #         picks.txt: lines "<bk> <layout> <p> <wgs> [<sg> <B>]" (e.g. the best of
-#         tinytc_survey.sh; sg, B: BK3's sub-group and block sizes, default 16)
+#         tinytc_survey.sh; layout ec, blk or, BK3, blk_ch; sg, B: BK3's
+#         sub-group and block sizes, default 16)
 # env:    DOFS=56234132 (the DoF-sweep point near 5.6e7) REPS=3 NTESTS=20
 # CSV:    bk,layout,p,nq,wgs,rep,nelmt,dofs,gdofs,gbs,gdofs_dev,gbs_dev,relerr,status,sg,B
 #         (layout as the driver reports it: BK3 blk_gs, ec_gs where S spills)
