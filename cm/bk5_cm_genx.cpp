@@ -2,7 +2,7 @@
 // for Metal with the symmetric geometric factors (G6).  p <= 7: one element
 // per hardware thread, the element in registers; p = 8: a work-group of nine
 // threads per element, sharing it through SLM.  Compiled once per order with
-// -DNQ=<nq>, nq = p + 1 (cm/build.sh).
+// -DNQ=<nq>, nq = p + 1 (cm/Makefile).
 //
 //   out = D_r^T (g_rr qr + g_rs qs + g_rt qt) + D_s^T (g_rs qr + g_ss qs + g_st qt)
 //       + D_t^T (g_rt qr + g_st qs + g_tt qt),   (qr, qs, qt) = (D_r, D_s, D_t) in

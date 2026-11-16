@@ -46,6 +46,6 @@ p = 7, 8 (split): indices of extent 9, 10 stored as 8 + tail blocks, exact size.
     instead of one 2.9 KB slot: best at wg 4-8 (28.1), one round best at wg 16.
 
 Commands:
-  cm/build.sh; EPT=2 cm/build.sh 3; EPT=8 cm/build.sh 1
+  make -C cm                                   # also bk1_cm_1_e8.bin, bk1_cm_3_e2.bin
   BK_EPT=<n> BK_WG="16 32 64" build/cm/bk1_cm <p> <nelmt> 20
   BK_WG="4 8 16" build/cm/bk1_cm 8 76817 20

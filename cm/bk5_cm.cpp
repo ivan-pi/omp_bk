@@ -1,7 +1,7 @@
 // bk5_cm.cpp -- host driver of the C for Metal BK5 kernel (cm/bk5_cm_genx.cpp,
 // symmetric geometric factors G6) through SYCL (cm_sycl.hpp: the binary is
 // loaded by Level Zero or OpenCL interop, the arrays are USM).  The kernel is
-// compiled ahead of time, one binary per order, by cm/build.sh.
+// compiled ahead of time, one binary per order, by cm/Makefile.
 //
 //   build/cm/bk5_cm <p> [nelmt] [ntests]      p = 1..8, nq = p + 1
 //

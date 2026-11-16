@@ -22,7 +22,7 @@ The tree is organized by approach; the file names say the kernel.
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
 | `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
 | `tinytc/` | `bk_tinytc.cpp` (driver for BK1, BK3 and BK5), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received, `bk3_blk.ir` and `bk3_ec.ir` in tinytc's blocked and our layout, `bk3_*_gs.ir` with S in global memory), `repro_slm/` (bug reproducer), `upstream_issues.md` (drafts) |
-| `cm/` | `bk1_cm_genx.cpp`, `bk5_cm_genx.cpp` (BK1 and BK5 in C for Metal), `bk1_cm.cpp`, `bk5_cm.cpp` (SYCL hosts), `cm_common.h`, `cm_sycl.hpp`, `build.sh` |
+| `cm/` | `bk1_cm_genx.cpp`, `bk5_cm_genx.cpp` (BK1 and BK5 in C for Metal), `bk1_cm.cpp`, `bk5_cm.cpp` (SYCL hosts), `cm_common.h`, `cm_sycl.hpp`, `Makefile`, `README.md` |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
 | `roofline/` | Micro-benchmarks for the roofs: `stream_omp.cpp`, `stream_sycl.cpp` (GPU), `bw_test.cpp`, `amx_pipe.cpp`, `accel_gemm.cpp` (CPU, AMX, macOS) |
 | `scripts/` | Intel GPU build, run and environment; `study/` sweeps and surveys, `plot/`, `profile/` (Advisor, VTune) |
@@ -405,77 +405,16 @@ the float BK1 kernel (likely register spills of the per-thread array, not
 confirmed). Emulated double runs at 0.05-0.09 GDoF/s. All BK1_ff checks pass
 on the A770 at p = 2, 4 and 6, with and without `BK_RANDOM=1`.
 
-## C for Metal version of BK1
+## C for Metal versions of BK1 and BK5
 
-`cm/bk1_cm_genx.cpp` is BK1 in Intel C for Metal (CM), the explicit-SIMD
-GPU language: a kernel describes one hardware thread, with vectors that live
-in registers and register-region operations instead of shared memory. Each
-thread runs a whole element (or `EPT` consecutive elements, the next one's
-loads issued before the current one is computed) in registers. Each of the
-six contractions sums over the slowest index of a register tensor and
-appends the new index as the fastest, so it is a small GEMM per element.
+`cm/` has BK1 and BK5 (G6) in Intel C for Metal, an explicit-SIMD language
+for Intel GPUs, with SYCL hosts. They are built by `make -C cm` (the 2021 CM
+SDK and `ocloc`), not by CMake. On the A770 they reach 85-98% (BK1) and
+83-96% (BK5) of a CM copy kernel's bandwidth, ahead of the best OpenMP/SYCL
+variant at p = 3-5 and 7-8 (BK1) and at p = 4-6 and 8 (BK5).
+[`cm/README.md`](cm/README.md) explains C for Metal, where to get it, and how
+to build and run the kernels.
 
-- p = 1..6: every tensor is a `rows x P` register matrix with its fast index
-  padded to P = 4 or 8, and every instruction is a full SIMD16 `mad`.
-- p = 7, 8: padding 9 or 10 to 16 does not fit the register file, so an index
-  of extent 9 or 10 is stored as a main block of 8 and a tail of 1 or 2. Main
-  blocks take one SIMD8 `mad` per row, tails one SIMD16 `mad` per 16 rows of a
-  column. At p = 8 one element still does not fit 256 registers, so a pair of
-  threads shares it: each computes half of the quadrature index p and a
-  partial result, and one hands its partial to the other through shared local
-  memory.
-
-The basis is padded or permuted on the host; in, out and JxW use the layouts
-of the other drivers.
-
-```sh
-KERNELS=bk1 cm/build.sh           # build/cm/bk1_cm_<p>.bin, p = 1..8 (cmc -> SPIR-V -> ocloc dg2), host build/cm/bk1_cm
-EPT=2 KERNELS=bk1 cm/build.sh 3   # 2 elements per thread -> bk1_cm_3_e2.bin
-build/cm/bk1_cm 4 448000 20       # p, nelmt, ntests: copy_cm bandwidth, then bk1_cm at BK_WG="16 32 64"
-BK_EPT=2 build/cm/bk1_cm 3 875000 20
-```
-
-It needs the 2021 CM SDK (`/opt/intel/cm_sdk_20211028`, `CSDK_DIR=...`),
-`ocloc` and oneAPI (`icpx -fsycl`; the SYCL host loads the binary through Level
-Zero or OpenCL interop). The driver checks against the double reference
-of `bk_harness.h`. On the A770 at ~5.6e7 DoFs
-(`results/a770/cm_bk1_a770.txt`) it reaches 85-98% of a CM copy kernel's
-bandwidth (device time) and 5-20% of the FP32 peak. In host GDoF/s:
-
-| p                  | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
-|--------------------|------|------|------|------|------|------|------|------|
-| CM                 | 17.3 | 21.8 | 27.1 | 27.0 | 29.9 | 28.4 | 30.7 | 29.2 |
-| best OpenMP/SYCL   | 19.8 | 24.4 | 23.4 | 25.5 | 26.3 | 29.5 | 27.6 | 26.0 |
-
-
-## C for Metal version of BK5
-
-`cm/bk5_cm_genx.cpp` is BK5 with the symmetric factors (G6) in CM, one
-element per hardware thread in registers. Each plane i of the element is held
-flat (memory order) for loads and the pointwise r steps, and the s and t
-derivatives, the fluxes and their back-contractions work on rows padded to
-P = 4 or 8, so that every register destination is aligned. G is read in
-layout 1 (`G(e, i, j, f, k)`), one contiguous run per plane, and the output is
-packed per element and written by aligned block writes. A build without
-arithmetic runs at the same speed: the kernel is limited by its memory access
-pattern, not by compute. Host GDoF/s at ~5.6e7 DoFs (`results/a770/cm_bk5_a770.txt`):
-
-| p              | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    |
-|----------------|------|------|------|------|------|------|------|------|
-| CM             | 12.8 | 11.5 | 13.4 | 12.3 | 12.9 | 12.6 | 12.7 | 12.2 |
-| % of copy_cm   | 93   | 83   | 96   | 88   | 90   | 89   | 90   | 86   |
-| best OpenMP/SYCL | 14.0 | 13.5 | 13.5 | 12.2 | 12.3 | 11.7 | 13.5 | 11.5 |
-
-p = 1 and 2 use 8 and 2 elements per thread (`EPT`). At p = 8 (nq = 9) one
-element does not fit a thread's registers; as in the SYCL kernel, a
-work-group of nine threads shares it through shared local memory, each
-thread owning one plane, with two barriers per element.
-
-```sh
-KERNELS=bk5 cm/build.sh               # build/cm/bk5_cm_<p>.bin, host build/cm/bk5_cm
-build/cm/bk5_cm 4 448000 20           # p, nelmt, ntests: copy_cm, then bk5_cm at BK_WG="16 32 64"
-EPT=8 KERNELS=bk5 cm/build.sh 1 && BK_EPT=8 build/cm/bk5_cm 1 7000000 20
-```
 ## Apple AMX version of BK1
 
 `amx/BK1_amx.cpp` runs the BK1 sum factorization on the Apple AMX

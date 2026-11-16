@@ -42,7 +42,7 @@ element per group (SLM 8.4 KB) 11.1 host / 12.2 device GDoF/s; two and three
 elements per group 10.5 and 10.0 (fewer groups per Xe-core).
 
 Commands:
-  cm/build.sh                                  # KERNELS="bk1 bk5"; bk5_cm_<p>.bin, host build/cm/bk5_cm
-  EPT=8 KERNELS=bk5 cm/build.sh 1; BK_EPT=8 build/cm/bk5_cm 1 7000000 20
-  EPT=2 KERNELS=bk5 cm/build.sh 2; BK_EPT=2 build/cm/bk5_cm 2 2074074 20
+  make -C cm                                   # bk5_cm_<p>.bin, bk5_cm_1_e8.bin, bk5_cm_2_e2.bin, host build/cm/bk5_cm
+  BK_EPT=8 build/cm/bk5_cm 1 7000000 20
+  BK_EPT=2 build/cm/bk5_cm 2 2074074 20
   build/cm/bk5_cm <p> $((56000000/(p+1)**3)) 20

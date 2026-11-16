@@ -1,7 +1,7 @@
 // bk1_cm.cpp -- host driver of the C for Metal BK1 kernel (cm/bk1_cm_genx.cpp)
 // through SYCL (cm_sycl.hpp: the binary is loaded by Level Zero or OpenCL
 // interop, the arrays are USM).  The kernel is compiled ahead of time, one
-// binary per order, by cm/build.sh.
+// binary per order, by cm/Makefile.
 //
 //   build/cm/bk1_cm <p> [nelmt] [ntests]      p = 1..8, nq = p + 2
 //

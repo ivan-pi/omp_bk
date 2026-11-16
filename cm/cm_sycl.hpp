@@ -1,6 +1,6 @@
 // cm_sycl.hpp -- SYCL host helpers for the C for Metal kernels of cm/ (the
 // hosts bk1_cm.cpp and bk5_cm.cpp).  A CM kernel is a device binary from
-// ocloc (cm/build.sh); SYCL loads it through the backend's interop:
+// ocloc (cm/Makefile); SYCL loads it through the backend's interop:
 //
 //   sycl::queue q = cmsycl::make_queue();                    // in order, profiling on
 //   cmsycl::program prog = cmsycl::load_program(q, path);    // kernel_binary("bk1", p, ept)
@@ -90,7 +90,7 @@ inline std::string exe_dir()
     return s.substr(0, s.rfind('/'));
 }
 
-// the binary cm/build.sh writes for `kernel` (bk1, bk5) at order p with ept
+// the binary cm/Makefile writes for `kernel` (bk1, bk5) at order p with ept
 // elements per thread: <dir>/<kernel>_cm_<p>[_e<ept>].bin, dir $BK_CM_DIR or
 // the executable's directory
 inline std::string kernel_binary(const std::string& kernel, const int p, const int ept)

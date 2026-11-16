@@ -1,7 +1,7 @@
 // bk1_cm_genx.cpp -- BK1 (mass operator) in C for Metal.  p <= 7: one element
 // at a time per hardware thread, the whole element in registers; p = 8: a pair
 // of threads per element, joined through SLM.  Compiled once per order with
-// -DNQ=<nq>, nq = p + 2 (cm/build.sh).
+// -DNQ=<nq>, nq = p + 2 (cm/Makefile).
 //
 // Orders p = 1..8.  The layout below is that of p = 1..6; p = 7, 8 (nq = 9,
 // 10) store their tensors in split blocks instead, see "NQ > 8" further down.
