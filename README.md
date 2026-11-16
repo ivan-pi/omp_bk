@@ -64,7 +64,8 @@ and `ocloc ids <name>` shows which version a name stands for (`ocloc ids
 acm-g10` gives 12.55.8). `ocloc compile --help` lists every name under
 `-device`. Some common ones: `acm-g10` (Arc A770/A750), `acm-g11` (Arc
 A380 and the A3 laptop chips), `bmg-g21` (Arc B580/B570), `pvc` (Data Center GPU Max),
-`mtl`, `lnl-m` (Core Ultra integrated graphics). A comma-separated list
+`mtl-u`, `mtl-h` (Meteor Lake integrated graphics; `xe-lpg` covers both),
+`lnl-m` (Lunar Lake integrated graphics). A comma-separated list
 (`acm-g10,bmg-g21`) builds one binary for several GPUs, at the cost of a
 longer compile per GPU.
 
