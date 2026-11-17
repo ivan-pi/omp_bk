@@ -10,6 +10,9 @@
 #                                           JIT compilation, which the
 #                                           specialization-constant variant
 #                                           needs to fold nq)
+#   bk1_sycl_sc                             sycl/ BK1, every order in one JIT
+#                                           binary, shape from a specialization
+#                                           constant (run.sh bk1_sycl_sc <p>)
 #   stream_omp                              roofline/ bandwidth test
 #   bk_tinytc                               tinytc/ driver (TINYTC_ROOT of preset a770)
 #   all_<prog>                              every order of <prog>
