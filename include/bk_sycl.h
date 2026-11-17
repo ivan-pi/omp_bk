@@ -14,7 +14,9 @@
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <limits>
 
@@ -39,6 +41,72 @@ auto launch_properties()
     } else {
         return syclex::properties{};
     }
+}
+
+// The launch geometry of a kernel: elements per work-group (batch),
+// work-items per group (block), the required sub-group size (sg, 0: IGC's
+// choice), the range (dims: 1, or 2 as groups x work-group, or 0 for a plain
+// range of one work-item per element, the work-group left to the runtime) and
+// floats of local memory per group (lmem, all its local arrays together).
+// A kernel declares it as
+//   static constexpr bk::kernel_shape shape{batch, block, sg, dims, lmem};
+// takes its sub-group size from it in get(properties_tag), and is launched by
+// bk::launch, so declaration and launch cannot disagree.
+struct kernel_shape {
+    int batch;
+    int block;
+    int sg;
+    int dims;
+    int lmem;
+};
+
+// a shape an Xe-HPG GPU can run: at most 1024 work-items, a multiple of 16
+// (whole sub-groups of 16, as block copies need; with sg = 32 the last
+// sub-group may be partial), at most 60 KB of local memory
+constexpr bool shape_valid(const kernel_shape& s)
+{
+    if (s.dims == 0) {
+        return s.batch == 1 && s.block == 0 && s.lmem == 0;
+    }
+    return s.batch >= 1 && s.block >= 1 && s.block <= 1024 && s.block % 16 == 0 && (s.dims == 1 || s.dims == 2) &&
+           s.lmem >= 0 && s.lmem * int(sizeof(float)) <= 61440;
+}
+
+// a local array of n floats, for the kernels' make(cgh) below
+inline sycl::local_accessor<float, 1> local_floats(sycl::handler& cgh, const int n)
+{
+    return sycl::local_accessor<float, 1>(sycl::range<1>(n), cgh);
+}
+
+// One launch over nelmt elements in shape s, whose range has Dims
+// dimensions: ceil(nelmt / batch) work-groups of s.block work-items (along
+// the range's last dimension), or `groups` of them when groups > 0 (kernels
+// that stride over the batches).  make(cgh) builds the kernel functor, its
+// local arrays included.  For shapes known at run time (specialization
+// constants); compile-time shapes go through launch<K> below.
+template <int Dims, typename Make>
+sycl::event launch(sycl::queue& q, const kernel_shape& s, const int nelmt, Make&& make, const int groups = 0)
+{
+    assert(s.dims == Dims && shape_valid(s));
+    const std::size_t ngroups = (groups > 0) ? std::size_t(groups) : std::size_t((nelmt + s.batch - 1) / s.batch);
+    const std::size_t block = s.block;
+    return q.submit([&](sycl::handler& cgh) {
+        if constexpr (Dims == 0) {
+            cgh.parallel_for(sycl::range<1>(std::size_t(nelmt)), make(cgh));
+        } else if constexpr (Dims == 2) {
+            cgh.parallel_for(sycl::nd_range<2>({ngroups, block}, {1, block}), make(cgh));
+        } else {
+            cgh.parallel_for(sycl::nd_range<1>(ngroups * block, block), make(cgh));
+        }
+    });
+}
+
+// One launch of kernel K in its shape K::shape, checked at compile time.
+template <typename K, typename Make>
+sycl::event launch(sycl::queue& q, const int nelmt, Make&& make, const int groups = 0)
+{
+    static_assert(shape_valid(K::shape), "at most 1024 work-items, a multiple of 16, at most 60 KB of local memory");
+    return launch<K::shape.dims>(q, K::shape, nelmt, make, groups);
 }
 
 // best host and device times start at max() and drop with each launch;

@@ -35,6 +35,12 @@ time the constant is a run-time value and the same kernel is 2.5-5x slower
    generation: BK1 opt ran 20% slower in one. `[[intel::kernel_args_restrict]]`
    has no measurable effect on these kernels; see `include/bk_sycl.h` and
    `repro_simd/` for the details.
+   Every SYCL kernel here declares its launch geometry as
+   `static constexpr bk::kernel_shape shape` (batch, work-group size,
+   sub-group size, range dimension, local memory) and is launched by
+   `bk::launch<K>`, which builds the range from it and checks the device
+   limits at compile time; shapes known only at run time use
+   `bk::launch<dims>(q, shape, ...)`.
 3. **Build before timing.** The driver builds each selected shape with
    `bk::build_specialized<Kernel, SpecId>(q, value)` and launches it with
    `cgh.use_kernel_bundle`. The build time is then measured on its own,

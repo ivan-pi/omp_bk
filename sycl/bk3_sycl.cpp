@@ -59,7 +59,9 @@ struct cu_kernel {
     static constexpr int nq2 = nq * nq;
     static constexpr int nq3 = nq2 * nq;
     static constexpr int nm3 = nm * nm * nm;
-    static_assert((nm * nq + nq2 + 4 * batch * nq3) * 4 <= 61440, "SLM within 60 KB");
+    // B, D and four work boxes in local memory; launched by bk::launch
+    static constexpr bk::kernel_shape shape{batch, bk3gpu::cu_block(nq, batch), sg, 1,
+                                            nm * nq + nq2 + 4 * batch * nq3};
     using interp = bk1gpu::gs_steps<float, nq>;
     using steps = bk3gpu::cu_steps<float, nq>;
 
@@ -80,7 +82,7 @@ struct cu_kernel {
     // advises) and a required sub-group size sg (0: IGC's choice)
     auto get(sycl::ext::oneapi::experimental::properties_tag) const
     {
-        return bk::launch_properties<sg, bk3gpu::cu_block(nq, batch)>();
+        return bk::launch_properties<shape.sg, shape.block>();
     }
 
     [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const
@@ -161,7 +163,9 @@ struct sf_kernel {
     static constexpr int nm = nq - 1;
     static constexpr int nq2 = nq * nq;
     static constexpr int nm3 = nm * nm * nm;
-    static_assert(3 * batch * steps::ebox * 4 <= 61440, "three SLM boxes within 60 KB");
+    // three boxes in local memory; launched by bk::launch
+    static constexpr bk::kernel_shape shape{batch, bk3gpu::sf_block(nq, batch), sg, 1, 3 * batch * steps::ebox};
+    static_assert(!carry || shape.block >= batch * nq2, "carry: one work-item per column");
 
     const float* gB;
     const float* gD;
@@ -176,7 +180,7 @@ struct sf_kernel {
     // the work-group size fixed at compile time, sg as in cu_kernel
     auto get(sycl::ext::oneapi::experimental::properties_tag) const
     {
-        return bk::launch_properties<sg, bk3gpu::sf_block(nq, batch)>();
+        return bk::launch_properties<shape.sg, shape.block>();
     }
 
     [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const
@@ -267,33 +271,43 @@ template <int batch, int sg>
 sycl::event launch_cu(sycl::queue& q, const device_data& d)
 {
     using K = cu_kernel<NQ, batch, sg>;
-    constexpr int block = bk3gpu::cu_block(NQ, batch);
-    static_assert(block <= 1024, "at most 1024 work-items");
     constexpr int nq3 = NQ * NQ * NQ;
     const int nbatches = (d.nelmt + batch - 1) / batch;
-    const int ngroups = (g_grid > 0 && g_grid < nbatches) ? g_grid : nbatches;
-    const sycl::nd_range<1> range{std::size_t(ngroups) * block, std::size_t(block)};
-    return q.submit([&](sycl::handler& cgh) {
-        const K k{d.basis, d.D, d.G, d.in, d.out, d.nelmt,
-                  local((NQ - 1) * NQ, cgh), local(NQ * NQ, cgh), local(batch * nq3, cgh), local(batch * nq3, cgh),
-                  local(batch * nq3, cgh), local(batch * nq3, cgh)};
-        cgh.parallel_for(range, k);
-    });
+    const int groups = (g_grid > 0 && g_grid < nbatches) ? g_grid : 0;   // BK_TEAMS: stride over the batches
+    return bk::launch<K>(
+        q, d.nelmt,
+        [&](sycl::handler& cgh) {
+            return K{d.basis,
+                     d.D,
+                     d.G,
+                     d.in,
+                     d.out,
+                     d.nelmt,
+                     bk::local_floats(cgh, (NQ - 1) * NQ),
+                     bk::local_floats(cgh, NQ * NQ),
+                     bk::local_floats(cgh, batch * nq3),
+                     bk::local_floats(cgh, batch * nq3),
+                     bk::local_floats(cgh, batch * nq3),
+                     bk::local_floats(cgh, batch * nq3)};
+        },
+        groups);
 }
 
 template <int batch, int sg, bool carry, bool padded, bool breg>
 sycl::event launch_sf(sycl::queue& q, const device_data& d)
 {
     using K = sf_kernel<NQ, batch, carry, padded, breg, sg>;
-    constexpr int block = bk3gpu::sf_block(NQ, batch);
-    static_assert(!carry || block >= batch * NQ * NQ, "carry: one work-item per column");
     constexpr int ebox = bk3gpu::box_layout(NQ, padded).se;
-    const int ngroups = (d.nelmt + batch - 1) / batch;
-    const sycl::nd_range<1> range{std::size_t(ngroups) * block, std::size_t(block)};
-    return q.submit([&](sycl::handler& cgh) {
-        const K k{d.basis, d.D, d.G, d.in, d.out, d.nelmt,
-                  local(batch * ebox, cgh), local(batch * ebox, cgh), local(batch * ebox, cgh)};
-        cgh.parallel_for(range, k);
+    return bk::launch<K>(q, d.nelmt, [&](sycl::handler& cgh) {
+        return K{d.basis,
+                 d.D,
+                 d.G,
+                 d.in,
+                 d.out,
+                 d.nelmt,
+                 bk::local_floats(cgh, batch * ebox),
+                 bk::local_floats(cgh, batch * ebox),
+                 bk::local_floats(cgh, batch * ebox)};
     });
 }
 

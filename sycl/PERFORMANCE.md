@@ -12,7 +12,9 @@ registers, not from the arithmetic.
 Hold the kernel's pointers as members of the functor you pass to
 `parallel_for`. Put a required sub-group or work-group size in the
 functor's own `get(syclex::properties_tag)` (`bk::launch_properties` in
-`include/bk_sycl.h`), not in a wrapper.
+`include/bk_sycl.h`), not in a wrapper. Declaring the geometry once, as a
+`bk::kernel_shape` the launcher reads (`bk::launch`), keeps the declared
+sizes and the actual launch from drifting apart.
 
 - **Why:** a wrapper functor that holds the kernel as a member and calls it
   changes IGC's code generation. For example, it switches global loads from

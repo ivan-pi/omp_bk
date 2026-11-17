@@ -63,12 +63,18 @@ constexpr int opt_lmem(const opt_params& P)
     return P.batch * (bk1gpu::slm_w0(P.nq, P.L) + bk1gpu::slm_w1(P.L));
 }
 
+// the launch geometry of shape P (include/bk_sycl.h); the block copies need
+// SIMD16
+constexpr bk::kernel_shape opt_shape(const opt_params& P, const bool block_io)
+{
+    return {P.batch, P.block, block_io ? 16 : 0, 1, opt_lmem(P)};
+}
+
 // a shape the kernel can run: one work-item per point of the widest step,
-// and whole sub-groups of 16 for the block copies (full_group)
+// within the device's limits (bk::shape_valid)
 constexpr bool opt_valid(const opt_params& P, const bool block_io)
 {
-    return P.nq >= 2 && P.nq <= MAXNQ && P.batch >= 1 && P.batch * P.nq * P.nq <= P.block && P.block <= 1024 &&
-           (!block_io || P.block % 16 == 0);
+    return P.nq >= 2 && P.nq <= MAXNQ && P.batch * P.nq * P.nq <= P.block && bk::shape_valid(opt_shape(P, block_io));
 }
 
 // The shapes of the drivers, named <aot> in bk1_sycl.cpp and <sc> in
@@ -348,16 +354,14 @@ template <typename T, typename Shape, bool block_io>
 sycl::event launch(sycl::queue& q, const opt_params& P, const device_data<T>& d,
                    const sycl::kernel_bundle<sycl::bundle_state::executable>* exe = nullptr)
 {
-    const int ngroups = (d.nelmt + P.batch - 1) / P.batch;
-    const sycl::nd_range<1> range{std::size_t(ngroups) * P.block, std::size_t(P.block)};
-    return q.submit([&](sycl::handler& cgh) {
+    return bk::launch<1>(q, opt_shape(P, block_io), d.nelmt, [&](sycl::handler& cgh) {
         if (exe != nullptr) {
             cgh.use_kernel_bundle(*exe);
         } else {
             Shape::set(cgh, P);
         }
-        sycl::local_accessor<T, 1> lm(sycl::range<1>(opt_lmem(P)), cgh);
-        cgh.parallel_for(range, opt_kernel<T, Shape, block_io>{d.basis, d.JxW_t, d.in, d.out, d.nelmt, lm});
+        const sycl::local_accessor<T, 1> lm = bk::local_floats(cgh, opt_lmem(P));
+        return opt_kernel<T, Shape, block_io>{d.basis, d.JxW_t, d.in, d.out, d.nelmt, lm};
     });
 }
 

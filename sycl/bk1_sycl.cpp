@@ -62,8 +62,8 @@ struct seven_step {
     static constexpr int nm = nq - 1;
     static constexpr int nq3 = nq * nq * nq;
     static constexpr int nm3 = nm * nm * nm;
-    static constexpr int block = bk1gpu::gs_block(nq, batch);
-    static constexpr int lmem = batch * (nq3 + nq3);
+    // two nq^3 boxes per element in local memory; launched by bk::launch
+    static constexpr bk::kernel_shape shape{batch, bk1gpu::gs_block(nq, batch), sg, 1, batch * (nq3 + nq3)};
 
     const T* basis;
     const T* JxW_t;
@@ -72,7 +72,7 @@ struct seven_step {
     int nelmt;
     sycl::local_accessor<T, 1> lm;
 
-    auto get(sycl::ext::oneapi::experimental::properties_tag) const { return bk::launch_properties<sg>(); }
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const { return bk::launch_properties<shape.sg>(); }
 
     [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const { run(it); }
 
@@ -155,13 +155,16 @@ struct seven_step {
 // left to the runtime); sg: the required sub-group size (0: IGC's choice)
 template <typename T, int nq, bool vec_io, int wg, int sg>
 struct one_element {
+    // a plain range (dims 0), or groups of wg elements; no local memory
+    static constexpr bk::kernel_shape shape = (wg == 0) ? bk::kernel_shape{1, 0, sg, 0, 0}
+                                                        : bk::kernel_shape{wg, wg, sg, 1, 0};
     const T* basis;
     const T* JxW_t;
     const T* in;
     T* out;
     int nelmt;
 
-    auto get(sycl::ext::oneapi::experimental::properties_tag) const { return bk::launch_properties<sg>(); }
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const { return bk::launch_properties<shape.sg>(); }
 
     [[intel::kernel_args_restrict]] void operator()(sycl::item<1> it) const { run(static_cast<int>(it.get_id(0))); }
     [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const
@@ -324,11 +327,8 @@ template <int nq, int batch, bool copy, bool local_fence, int sg>
 sycl::event launch(sycl::queue& q, const device_data& d)
 {
     using K = seven_step<float, nq, batch, copy, local_fence, sg>;
-    const int ngroups = (d.nelmt + batch - 1) / batch;
-    const sycl::nd_range<1> range{std::size_t(ngroups) * K::block, std::size_t(K::block)};
-    return q.submit([&](sycl::handler& cgh) {
-        sycl::local_accessor<float, 1> lm(sycl::range<1>(K::lmem), cgh);
-        cgh.parallel_for(range, K{d.basis, d.JxW_t, d.in, d.out, d.nelmt, lm});
+    return bk::launch<K>(q, d.nelmt, [&](sycl::handler& cgh) {
+        return K{d.basis, d.JxW_t, d.in, d.out, d.nelmt, bk::local_floats(cgh, K::shape.lmem)};
     });
 }
 
@@ -349,15 +349,8 @@ sycl::event launch_opt(sycl::queue& q, const device_data& d)
 template <int wg, int sg = 0, bool vec_io = false>
 sycl::event launch_elem(sycl::queue& q, const device_data& d)
 {
-    const one_element<float, NQ, vec_io, wg, sg> k{d.basis, d.JxW_t, d.in, d.out, d.nelmt};
-    return q.submit([&](sycl::handler& cgh) {
-        if constexpr (wg == 0) {
-            cgh.parallel_for(sycl::range<1>(std::size_t(d.nelmt)), k);
-        } else {
-            const std::size_t global = (std::size_t(d.nelmt) + wg - 1) / wg * wg;
-            cgh.parallel_for(sycl::nd_range<1>(global, wg), k);
-        }
-    });
+    using K = one_element<float, NQ, vec_io, wg, sg>;
+    return bk::launch<K>(q, d.nelmt, [&](sycl::handler&) { return K{d.basis, d.JxW_t, d.in, d.out, d.nelmt}; });
 }
 
 struct variant {

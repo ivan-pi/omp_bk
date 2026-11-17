@@ -104,17 +104,17 @@ constexpr int sf_block(const int nq, const int batch, const int width)
     return (w < 1024) ? w : 1024;
 }
 
-// sg: the required sub-group size (8 or 16 for the _sg8, _sg16 variants, 0: IGC's
-// choice); dims: a 1D range, or a 2D one (batches x work-group, the shape
-// OpenMP offload launches: the _2d variants)
-template <typename T, int nq, int F, int batch, int sg = 0, int dims = 1>
+// batch elements per work-group of block work-items; sg: the required
+// sub-group size (8 or 16 for the _sg8, _sg16 variants, 0: IGC's choice);
+// dims: a 1D range, or a 2D one (batches x work-group, the shape OpenMP
+// offload launches: the _2d variants).  Launched by bk::launch.
+template <typename T, int nq, int F, int batch, int block, int sg, int dims>
 struct sf_kernel {
     static constexpr int nq2 = nq * nq;
     static constexpr int nq3 = nq2 * nq;
     static constexpr int pk = k_stride(nq);
     static constexpr int ebox = nq2 * pk;
-    static constexpr int lmem = 3 * batch * ebox;
-    static_assert(lmem * int(sizeof(T)) <= 61440, "three local arrays within 60 KB");
+    static constexpr bk::kernel_shape shape{batch, block, sg, dims, 3 * batch * ebox};
 
     const T* D;
     const T* G;
@@ -123,7 +123,7 @@ struct sf_kernel {
     int nelmt;
     sycl::local_accessor<T, 1> lm;
 
-    auto get(sycl::ext::oneapi::experimental::properties_tag) const { return bk::launch_properties<sg>(); }
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const { return bk::launch_properties<shape.sg>(); }
 
     [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<dims> it) const { run(it); }
 
@@ -286,23 +286,13 @@ struct device_data {
 
 using launch_fn = sycl::event (*)(sycl::queue&, const device_data&);
 
-template <int F, int batch, int block, int sg, bool two_d = false>
+template <int F, int batch, int block, int sg, int dims = 1>
 sycl::event launch_sf(sycl::queue& q, const device_data& d)
 {
-    using K = sf_kernel<float, NQ, F, batch, sg, two_d ? 2 : 1>;
-    static_assert(block <= 1024 && block % 16 == 0, "whole sub-groups, at most 1024 work-items");
-    const int ngroups = (d.nelmt + batch - 1) / batch;
-    const sycl::nd_range<1> range{std::size_t(ngroups) * block, std::size_t(block)};
+    using K = sf_kernel<float, NQ, F, batch, block, sg, dims>;
     const float* G = d.G[F == 6 ? 0 : 1];
-    return q.submit([&](sycl::handler& cgh) {
-        sycl::local_accessor<float, 1> lm(sycl::range<1>(K::lmem), cgh);
-        const K k{d.D, G, d.in, d.out, d.nelmt, lm};
-        if constexpr (two_d) {
-            const sycl::nd_range<2> range2{{std::size_t(ngroups), std::size_t(block)}, {1, std::size_t(block)}};
-            cgh.parallel_for(range2, k);
-        } else {
-            cgh.parallel_for(range, k);
-        }
+    return bk::launch<K>(q, d.nelmt, [&](sycl::handler& cgh) {
+        return K{d.D, G, d.in, d.out, d.nelmt, bk::local_floats(cgh, K::shape.lmem)};
     });
 }
 
@@ -315,7 +305,7 @@ struct variant {
 #define SF(F, B, W, SG, SUFFIX) \
     {"sf" #F "c_b" #B "x" #W SUFFIX, &launch_sf<F, sf_batch(NQ, B), sf_block(NQ, sf_batch(NQ, B), W), SG>, F}
 #define SF2(F, B, W) \
-    {"sf" #F "c_b" #B "x" #W "_2d", &launch_sf<F, sf_batch(NQ, B), sf_block(NQ, sf_batch(NQ, B), W), 0, true>, F}
+    {"sf" #F "c_b" #B "x" #W "_2d", &launch_sf<F, sf_batch(NQ, B), sf_block(NQ, sf_batch(NQ, B), W), 0, 2>, F}
 
 const variant variants[] = {
     SF(6, 1, 1, 0, ""), SF(6, 2, 1, 0, ""), SF(6, 4, 1, 0, ""), SF(6, 8, 1, 0, ""),
