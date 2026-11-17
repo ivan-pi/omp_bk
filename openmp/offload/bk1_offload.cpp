@@ -33,6 +33,7 @@
 #include "bk1_offload/plane_tid.h"
 #include "bk1_offload/grid_stride.h"
 #include "bk1_offload/grid_inline.h"
+#include "bk1_offload/simple_map.h"
 
 #ifndef NQ
 #define NQ 6
@@ -111,6 +112,10 @@ const variant variants[] = {
     {"planeT256", &SumFactorizationPlaneTid<float, NQ, plane_batch(NQ, 256), false>},
     {"planeX1",   &SumFactorizationPlaneTid<float, NQ, 1, true>},
     {"planeX256", &SumFactorizationPlaneTid<float, NQ, plane_batch(NQ, 256), true>},
+    {"smap_b1",   &SumFactorizationSimpleMap<float, NQ, 1>},
+    {"smap_t256", &SumFactorizationSimpleMap<float, NQ, point_batch(NQ, 256)>},
+    {"smap_t512", &SumFactorizationSimpleMap<float, NQ, point_batch(NQ, 512)>},
+    {"smap_t1024", &SumFactorizationSimpleMap<float, NQ, point_batch(NQ, 1024)>},
 };
 
 } // namespace

@@ -8,6 +8,9 @@
 //   scripts/build.sh bk1_sycl_<p>_jit   (JIT, for spec)
 //   scripts/run.sh bk1_sycl_<p> [nelmt] [ntests]
 //   BK_KERNEL="C_l_sg0_b1 spec" ...   run a subset (default: all)
+//   BK_SYCL_CPU=1 ...                 the CPU device (OpenCL) instead of the GPU,
+//                                     to check kernels without one; needs a JIT
+//                                     tree (cmake -DBK_GPU_DEVICE=jit)
 //
 // Variant names <C|D>_<g|l>_sg<N>_b<B>:
 //   C  copy in -> local memory and local memory -> out (8 barriers)
@@ -19,6 +22,9 @@
 // elem: one element per work-item (range; elem_wg128: nd_range, 128 per group;
 //   elem_sg16/32: the same with that sub-group size required; elem_v4: in
 //   and out moved as float4 vectors where the block allows)
+// smap: the dealii-X CUDA "SimpleMap" kernel, one work-item per quadrature
+//   point (_b1: one element per work-group, _t<n>: about n work-items of
+//   elements); JxW in its plain layout
 // spec: C_l with nq from a specialization constant (register arrays sized
 // for MAXNQ, loop bounds known at JIT time); use the bk1_sycl_<p>_jit build for the
 // constant to be folded (an AOT build emulates it as a run-time buffer).
@@ -155,6 +161,139 @@ struct no_sg {
     K k;
     [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const { k.run(it); }
 };
+
+// ---------------------------------------------------------------------------
+// smap: the "SimpleMap" kernel of the dealii-X CUDA BK1 benchmarks
+// (BwdTransHexKernel_QP_1D_SimpleMap), as smap in the OpenMP harness
+// (openmp/offload/bk1_offload/simple_map.h): one work-item per quadrature
+// point, nq^3 slots per element and a batch of elements per work-group
+// (work-item x -> element e = x / nq^3, slot l = x % nq^3), a guard per step,
+// each output one dot product read from the two local boxes, in the CUDA
+// kernel's thread order.  The basis is copied to local memory; JxW is read
+// in its plain layout (e, p, q, r), contiguous across the slots of step 4.
+// Step 8 writes out directly.  The boxes are indexed through the accessor,
+// so they keep the local address space.
+// ---------------------------------------------------------------------------
+template <typename T, int nq, int batch>
+struct simple_map {
+    static constexpr int nm = nq - 1;
+    static constexpr int nq3 = nq * nq * nq;
+    static constexpr int nm3 = nm * nm * nm;
+    static constexpr int block = round16(batch * nq3);
+    static constexpr int w0 = nm * nq;            // offsets in local memory
+    static constexpr int w1 = w0 + batch * nq3;
+    static constexpr int lmem = w1 + batch * nq3;
+    static_assert(batch >= 1, "at least one element per work-group");
+    static_assert(block <= 1024, "a work-group holds at most 1024 work-items");
+    static_assert(nm * nq <= block, "one work-item per basis entry for the copy");
+
+    const T* basis;
+    const T* JxW;
+    const T* in;
+    T* out;
+    int nelmt;
+    sycl::local_accessor<T, 1> lm;
+
+    void run(const sycl::nd_item<1>& it) const
+    {
+        const int x = static_cast<int>(it.get_local_id(0));
+        const int eb = static_cast<int>(it.get_group(0));
+        const int remaining = nelmt - eb * batch;
+        const int nb = (batch < remaining) ? batch : remaining;
+        const int e = x / nq3;
+        const int l = x % nq3;
+        const bool active = e < nb;
+        const int o0 = w0 + e * nq3;
+        const int o1 = w1 + e * nq3;
+        const std::size_t ge = std::size_t(eb) * batch + e;
+
+        if (x < nm * nq) {
+            lm[x] = basis[x];
+        }
+        // step 1 : copy
+        if (active && l < nm3) {
+            lm[o0 + l] = in[ge * nm3 + l];
+        }
+        it.barrier(sycl::access::fence_space::local_space);
+        // step 2 : direction 0, (p, j, k)
+        if (active && l < nq * nm * nm) {
+            const int p = l / (nm * nm);
+            const int j = l % (nm * nm) / nm;
+            const int k = l % nm;
+            T tmp = 0;
+            for (int i = 0; i < nm; ++i) {
+                tmp += lm[o0 + i * nm * nm + j * nm + k] * lm[i * nq + p];
+            }
+            lm[o1 + l] = tmp;
+        }
+        it.barrier(sycl::access::fence_space::local_space);
+        // step 3 : direction 1, (q, p, k)
+        if (active && l < nq * nq * nm) {
+            const int q = l / (nq * nm);
+            const int p = l % (nq * nm) / nm;
+            const int k = l % nm;
+            T tmp = 0;
+            for (int j = 0; j < nm; ++j) {
+                tmp += lm[o1 + p * nm * nm + j * nm + k] * lm[j * nq + q];
+            }
+            lm[o0 + l] = tmp;
+        }
+        it.barrier(sycl::access::fence_space::local_space);
+        // steps 4+5 : direction 2, times JxW, (p, q, r)
+        if (active) {
+            const int p = l / (nq * nq);
+            const int q = l % (nq * nq) / nq;
+            const int r = l % nq;
+            T tmp = 0;
+            for (int k = 0; k < nm; ++k) {
+                tmp += lm[o0 + q * nq * nm + p * nm + k] * lm[k * nq + r];
+            }
+            lm[o1 + l] = tmp * JxW[ge * nq3 + l];
+        }
+        it.barrier(sycl::access::fence_space::local_space);
+        // step 6 : direction 2 back, (p, q, k)
+        if (active && l < nq * nq * nm) {
+            const int p = l / (nq * nm);
+            const int q = l % (nq * nm) / nm;
+            const int k = l % nm;
+            T tmp = 0;
+            for (int r = 0; r < nq; ++r) {
+                tmp += lm[o1 + p * nq * nq + q * nq + r] * lm[k * nq + r];
+            }
+            lm[o0 + l] = tmp;
+        }
+        it.barrier(sycl::access::fence_space::local_space);
+        // step 7 : direction 1 back, (p, j, k)
+        if (active && l < nq * nm * nm) {
+            const int p = l / (nm * nm);
+            const int j = l % (nm * nm) / nm;
+            const int k = l % nm;
+            T tmp = 0;
+            for (int q = 0; q < nq; ++q) {
+                tmp += lm[o0 + p * nq * nm + q * nm + k] * lm[j * nq + q];
+            }
+            lm[o1 + l] = tmp;
+        }
+        it.barrier(sycl::access::fence_space::local_space);
+        // step 8 : direction 0 back, (i, j, k), straight to out
+        if (active && l < nm3) {
+            const int i = l / (nm * nm);
+            const int j = l % (nm * nm) / nm;
+            const int k = l % nm;
+            T tmp = 0;
+            for (int p = 0; p < nq; ++p) {
+                tmp += lm[o1 + p * nm * nm + j * nm + k] * lm[i * nq + p];
+            }
+            out[ge * nm3 + l] = tmp;
+        }
+    }
+};
+
+// elements per work-group of smap: fill about `threads` work-items
+constexpr int point_batch(const int nq, const int threads)
+{
+    return (threads / (nq * nq * nq) > 1) ? threads / (nq * nq * nq) : 1;
+}
 
 // ---------------------------------------------------------------------------
 // the same kernel (C_l) with nq from a specialization constant
@@ -499,6 +638,7 @@ struct device_data {
     float* in;
     float* out;
     int nelmt;
+    float* JxW = nullptr;   // plain layout (e, p, q, r), only for the smap variants
 };
 
 using launch_fn = sycl::event (*)(sycl::queue&, const device_data&);
@@ -550,6 +690,18 @@ sycl::event launch_opt(sycl::queue& q, const device_data& d)
     });
 }
 
+template <int batch>
+sycl::event launch_smap(sycl::queue& q, const device_data& d)
+{
+    using K = simple_map<float, NQ, batch>;
+    const int ngroups = (d.nelmt + batch - 1) / batch;
+    const sycl::nd_range<1> range{std::size_t(ngroups) * K::block, std::size_t(K::block)};
+    return q.submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<float, 1> lm(sycl::range<1>(K::lmem), cgh);
+        cgh.parallel_for(range, no_sg<K>{K{d.basis, d.JxW, d.in, d.out, d.nelmt, lm}});
+    });
+}
+
 template <int wg, int sg = 0, bool vec_io = false>
 sycl::event launch_elem(sycl::queue& q, const device_data& d)
 {
@@ -574,6 +726,7 @@ sycl::event launch_elem(sycl::queue& q, const device_data& d)
 struct variant {
     const char* name;
     launch_fn fn;
+    bool plain_jxw = false;   // reads JxW in its plain layout (device_data::JxW)
 };
 
 #define V(C, G, SG, B) \
@@ -622,6 +775,10 @@ const variant variants[] = {
 #endif
     {"inl_b32", &launch_spec<bk1gpu::cap_batch(NQ, 32), NQ>},
     {"inl_b64", &launch_spec<bk1gpu::cap_batch(NQ, 64), NQ>},
+    {"smap_b1", &launch_smap<1>, true},
+    {"smap_t256", &launch_smap<point_batch(NQ, 256)>, true},
+    {"smap_t512", &launch_smap<point_batch(NQ, 512)>, true},
+    {"smap_t1024", &launch_smap<point_batch(NQ, 1024)>, true},
 };
 
 } // namespace
@@ -634,7 +791,8 @@ int main(int argc, char** argv)
     const int ntests = (argc > 2) ? std::atoi(argv[2]) : 20;
 
     // BK_PROFILE=0: no event profiling (no device times, less launch
-    // overhead); BK_INORDER=1: an in-order queue
+    // overhead); BK_INORDER=1: an in-order queue; BK_SYCL_CPU=1: the CPU
+    // device instead of the GPU (a check of the kernels without a GPU)
     const bool profile = bk::get_env("BK_PROFILE").value_or("1") != "0";
     const bool in_order = bk::get_env("BK_INORDER").value_or("0") == "1";
     sycl::property_list props;
@@ -645,7 +803,8 @@ int main(int argc, char** argv)
     } else if (in_order) {
         props = sycl::property_list{sycl::property::queue::in_order{}};
     }
-    sycl::queue q{sycl::gpu_selector_v, props};
+    const bool on_cpu = bk::get_env("BK_SYCL_CPU").value_or("0") == "1";
+    sycl::queue q = on_cpu ? sycl::queue{sycl::cpu_selector_v, props} : sycl::queue{sycl::gpu_selector_v, props};
     std::printf("BK1 SYCL: p = %d, nq = %d, nelmt = %zu, ntests = %d, device %s\n", nq - 2, nq, nelmt,
                 ntests, q.get_device().get_info<sycl::info::device::name>().c_str());
 
@@ -664,6 +823,14 @@ int main(int argc, char** argv)
     q.copy(basis.data(), d.basis, basis.size());
     q.copy(JxW_t.data(), d.JxW_t, JxW_t.size());
     q.copy(in.data(), d.in, in.size());
+    bool need_plain_jxw = false;
+    for (const variant& v : variants) {
+        need_plain_jxw = need_plain_jxw || (v.plain_jxw && bk::selected(v.name));
+    }
+    if (need_plain_jxw) {
+        d.JxW = sycl::malloc_device<float>(JxW.size(), q);
+        q.copy(JxW.data(), d.JxW, JxW.size());
+    }
     q.wait_and_throw();
 
     const double bytes = sizeof(float) * (2.0 * in.size() + JxW.size());
@@ -687,5 +854,8 @@ int main(int argc, char** argv)
     sycl::free(d.JxW_t, q);
     sycl::free(d.in, q);
     sycl::free(d.out, q);
+    if (d.JxW != nullptr) {
+        sycl::free(d.JxW, q);
+    }
     return 0;
 }
