@@ -171,13 +171,26 @@ LLVM/MLIR-flavoured SSA. `%local`, `@global`, `;` comments. Every value-producin
   multiple of the subgroup size. `num_subgroups.x = wg[0]/sgs`, `num_subgroups.y = wg[1]`.
 - **Collective region** (function body default): instructions like `gemm`, `axpby`, `alloca`, `foreach`
   are executed by the whole work-group, work distribution is implementation-defined, and **barriers are
-  inserted automatically** between linalg instructions (`gemm`, `axpby`, …). **Not** between two
-  `foreach`/`foreach_tile` loops: if one loop writes SLM that the next reads, put `barrier.local`
-  between them yourself (checked with `-pinsert-barrier`: it adds none there, as the pass skips SPMD
-  bodies and records no memory effects for the foreach instruction itself; v0.5).
+  inserted automatically, but only before linalg instructions** (`gemm`, `ger`, `axpby`, …) that
+  touch memory written or read before them, including by a preceding `parallel`/`foreach` region
+  (`foreach -> gemm`, `parallel -> ger` get one). **Never before an SPMD region:** `gemm -> foreach`,
+  `axpby -> parallel`, two consecutive `foreach`/`foreach_tile` loops, and the back-edge of a
+  collective `for` (`ger` at the end of iteration k, `parallel` at the start of k+1) get none; place
+  `barrier.local` there yourself, **in the collective region just before the SPMD region**, not as
+  the first instruction inside `parallel` (that form can hang the compiler, §8). Check every kernel
+  with `tinytc-opt -pinsert-lifetime-stop -pinsert-barrier k.ir | grep -n "barrier\|gemm\|ger\|foreach\|parallel"`
+  (v0.5; the pass skips SPMD bodies and records no memory effects for the foreach instruction itself).
 - **SPMD region** (`parallel { }`, `foreach`, `foreach_tile` bodies): OpenCL-style per-work-item code;
   you insert `barrier.local` / `barrier.global` yourself. Collective instructions are illegal inside.
 - Mixed instructions (`load`, `store`, arithmetic, `for`, `if`, `subview`, …) work in both.
+- Composition (checked with v0.5): a collective `for` may hold both `parallel` regions and linalg ops
+  (e.g. an SPMD step, then `ger` on `subview`s sized by the loop index); a collective `if` may hold
+  linalg ops; mixed code in the collective region (e.g. a `for` loading from an `alloca`) runs
+  redundantly on every work-item, which is how a uniform value is computed for a collective `if`.
+  Values defined inside `parallel {}` do not escape it: pass results out through memory, or compute
+  them redundantly in each sub-group (e.g. an argmax with `subgroup_reduce_max` then
+  `subgroup_reduce_min` on the index; both accept `index`) so that no broadcast through SLM is needed. Linalg ops on dynamic `local`
+  subviews (`ger` on a shrinking trailing block) lower to a plain 2-D `foreach`.
 
 ### Types
 - Scalars: `bool`, `i8 i16 i32 i64 index`, `bf16 f16 f32 f64`, `c32 c64`. `index` is 64-bit.
@@ -507,6 +520,13 @@ Scalar types passed to `set_*_args` must match the recipe's element type exactly
 - The flash-attention example recommends `IGC_EnableSelectiveScalarizer=1` and
   `NEO_CACHE_PERSISTENT=0` for best performance/benchmarking.
 - Time with many repetitions after a warm-up launch; never include JIT in timings.
+- **When tinytc is the wrong tool.** It fits GEMM-shaped work: batched contractions and fused
+  GEMM + elementwise kernels. It has no per-work-item arrays (only scalars and cooperative
+  matrices), so per-thread state, such as a small matrix being factored, lives in SLM: divergent
+  per-thread algorithms (pivoting solvers, per-thread recurrences) pay an SLM load/store for every
+  update, or several work-group barriers per step when a work-group shares one problem.
+  Register-resident SYCL/ESIMD or C for Metal kernels, or an existing library, do such work
+  several times faster.
 
 ### Tiny batched contractions (sum factorization)
 From the tinytc author's CEED BK1/BK5 kernels (dealii-X/benchmarks, branch `opencl`,
@@ -566,9 +586,20 @@ From the tinytc author's CEED BK1/BK5 kernels (dealii-X/benchmarks, branch `open
   `tinytc::submit(handler.get(), queue)`; the `cooperative_matrix_apply` example's `cmp.le` is
   `less_than_equal` in the real grammar. The printer shows `cooperative_matrix_apply (%i,%j,%v) in %t`;
   the parser also accepts `=%t`.
-- Barriers are automatic only between linalg instructions in collective regions; inside `parallel {}`,
-  and between consecutive `foreach`/`foreach_tile` loops that communicate through SLM, you must place
-  `barrier.local` yourself. Missing ones give wrong results, not errors.
+- Barriers are automatic only *before* linalg instructions in collective regions (§3). Inside
+  `parallel {}`, before any `parallel`/`foreach`/`foreach_tile` that reads what a linalg op or an
+  earlier SPMD loop wrote, and on the back-edge of a collective `for`, place `barrier.local` yourself.
+  Missing ones give wrong results, not errors. The pass also adds some unneeded ones (between two
+  `axpby` writing disjoint subviews of one `alloca`; a `barrier.global` before a write-back).
+- **`insert-barrier` can loop forever (v0.5).** JIT (`compile_to_spirv*`, `create_kernel_bundle`
+  from a program), `tinytc` and `tinytc-opt -pinsert-barrier` then spin at 100% CPU with flat
+  memory in `insert_barrier_pass::run_on_region`. Whether it happens depends on heap layout and
+  instruction order (even the length of the path the IR was read from), so a kernel that compiled
+  once can hang later. Seen with a collective `for` holding a `parallel` region
+  that starts with `barrier.local`, followed by a `ger`. Moving that barrier into the collective
+  region just before `parallel` fixed it for every kernel tried. Run JIT tests under `timeout`, and when a run never returns,
+  `gdb -p <pid> -batch -ex "thread apply all bt"` shows whether a pass is stuck (host) or the
+  host is waiting on the GPU.
 - **SLM over the per-work-group limit (64 KiB on DG2) is not diagnosed by tinytc.** Kernel creation
   fails with only `tinytc error 18: Error occured in compute runtime`; underneath, `zeModuleCreate`
   returns `ZE_RESULT_ERROR_OUT_OF_DEVICE_MEMORY` with an empty build log, although device memory is
@@ -587,7 +618,10 @@ From the tinytc author's CEED BK1/BK5 kernels (dealii-X/benchmarks, branch `open
 - `$` variables may be defined anywhere, including inside a function body; a type alias such as
   `$mat_t = coopmatrix<f32x$M x$K,matrix_acc>` shortens repeated tile types.
 - f64, bf16, f16 and float atomics depend on SPIR-V capabilities of the device (check with
-  `tinytc-ze-info`/`tinytc-cl-info`); integrated GPUs often lack fp64.
+  `tinytc-ze-info`/`tinytc-cl-info`); integrated GPUs often lack fp64. Arc A-series (DG2) reports
+  `float64: no`; with IGC's emulation (`OverrideDefaultFP64Settings=1 IGC_EnableDPEmulation=1` in the
+  environment) `tinytc-ze-info` reports `yes` (software-emulated and slow; running f64 kernels
+  that way was not tested).
 - `compile_to_spirv*` mutates the program (passes run in place). Re-parse if you need the original.
 
 ## 9. Where to look in the repo
