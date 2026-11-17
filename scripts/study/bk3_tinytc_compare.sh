@@ -8,9 +8,9 @@
 #         picks.txt: lines "3 <layout> <p> <wgs> <sg> <B>" (tinytc_final.sh)
 # env:    ORDERS="1 ... 8" DOFS=2e7 REPS=3 NTESTS=10
 # CSV:    bk,p,impl,variant,rep,gdofs,check   (scripts/plot/plot_compare.py;
-#         impl: omp, sycl, tinytc (blocked layout) or tinytc_ec (ours);
-#         tinytc variant <layout>_sg<sg>_b<B>_w<wgs>, layout blk_gs or ec_gs
-#         where S spills to global memory)
+#         impl: omp, sycl, tinytc (blocked layout: blk, blk_ch) or tinytc_ec
+#         (ours); tinytc variant <layout>_sg<sg>_b<B>_w<wgs>, layout blk_gs or
+#         ec_gs where S spills to global memory)
 . "$(dirname "$0")/../common.sh"
 PICKS=$1
 OUT=${2:-bk3_tinytc_compare.csv}

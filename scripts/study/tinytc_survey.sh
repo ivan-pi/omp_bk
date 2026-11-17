@@ -5,7 +5,9 @@
 # double-precision reference.
 #
 # usage:  scripts/study/tinytc_survey.sh [out.csv]
-# env:    DOFS=1e7 NTESTS=10 LAYOUTS="ec blk" WGS="0 64 128 256 512 1024"
+# env:    DOFS=1e7 NTESTS=10 LAYOUTS="ec blk" BK3_LAYOUTS="$LAYOUTS blk_ch"
+#         (blk_ch: bk3_blk_ch.ir, the r direction chained in registers)
+#         WGS="0 64 128 256 512 1024"
 #         (0: the original driver's table)  ORDERS="1 ... 8" (p; BK1, BK3:
 #         nq = p + 2, BK5: nq = p + 1)  BKS="1 3 5"
 #         BK3_SB="8:8 8:16 16:16 16:32" (sub-group size:elements per block)
@@ -17,6 +19,7 @@ OUT=${1:-tinytc_survey.csv}
 DOFS=${DOFS:-1e7}
 NTESTS=${NTESTS:-10}
 LAYOUTS=${LAYOUTS:-"ec blk"}
+BK3_LAYOUTS=${BK3_LAYOUTS:-"$LAYOUTS blk_ch"}
 WGS=${WGS:-"0 64 128 256 512 1024"}
 ORDERS=${ORDERS:-"1 2 3 4 5 6 7 8"}
 BKS=${BKS:-"1 3 5"}
@@ -31,10 +34,12 @@ for bk in $BKS; do
         fi
         ne=$(python3 -c "print(max(32, round($DOFS / $per) // 32 * 32))")
         sbs="16:16"
+        layouts=$LAYOUTS
         if [ $bk = 3 ]; then
             sbs=$BK3_SB
+            layouts=$BK3_LAYOUTS
         fi
-        for layout in $LAYOUTS; do
+        for layout in $layouts; do
             for sb in $sbs; do
                 sg=${sb%:*}
                 B=${sb#*:}
