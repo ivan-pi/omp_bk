@@ -7,6 +7,7 @@
 | `bk1_sycl_opt.h` | the BK1 opt kernel, its shape struct `opt_params` and shape table `opt_variants` |
 | `bk1_sycl_harness.h` | host side of both BK1 drivers: data, reference, timing, result lines |
 | `bk3_sycl.cpp`, `bk5_sycl.cpp` | BK3 and BK5 variants, one order per binary |
+| `PERFORMANCE.md` | do's and don'ts for fast SYCL kernels, from what we measured here |
 | `repro_simd/` | reproducer for Intel: IGC's SIMD width for BK5's `sf9c_b1x1` kernel, and how a wrapper functor changes it |
 
 Shared: `include/bk_sycl.h` (queue with `BK_PROFILE`/`BK_INORDER`, timing,
