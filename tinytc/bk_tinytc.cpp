@@ -219,12 +219,11 @@ int main(int argc, char** argv)
     std::vector<float> in(nelmt * npts);
     std::vector<float> geo(nelmt * ngeo);   // JxW, G6 factor-major (BK3) or interleaved (BK5)
     bk::fill_random_test_data(in, geo);
-    std::vector<double> ref(in.size());
+    const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);   // BK1, BK3
+    const std::vector<float> D = bk::make_test_basis<float>(nq, nq);       // BK3, BK5
     std::vector<float> basis_t(pad * pad, 0.0f);   // tinytc's padded basis
     std::vector<float> dbasis_t(pad * pad, 0.0f);  // BK3: and derivative
     if (bk == 3) {
-        const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);
-        const std::vector<float> D = bk::make_test_basis<float>(nq, nq);
         for (int i = 0; i < nm; ++i) {
             for (int a = 0; a < nq; ++a) {
                 basis_t[a * pad + i] = basis[i * nq + a];   // Bm(i, a) = B(i, a)
@@ -235,25 +234,29 @@ int main(int argc, char** argv)
                 dbasis_t[a * pad + n] = D[n * nq + a];   // Dm(n, a) = D(n, a)
             }
         }
-        bk::reference_bk3(nq, nelmt, basis, D, geo, in, ref);
     } else if (bk == 1) {
-        const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);
         for (int i = 0; i < nm; ++i) {
             for (int a = 0; a < nq; ++a) {
                 basis_t[a * pad + i] = basis[i * nq + a];   // basis0(a, i)
             }
         }
-        bk::reference_bk1(nq, nelmt, basis, geo, in, ref);
     } else {
-        const std::vector<float> D = bk::make_test_basis<float>(nq, nq);
         for (int i = 0; i < nq; ++i) {
             for (int n = 0; n < nq; ++n) {
                 basis_t[i * pad + n] = D[i * nq + n];   // dbasis(i, n)
             }
         }
-        bk::reference_bk5(nq, nelmt, D, geo, in, ref);
     }
-    const double big = bk::max_abs(ref);
+    // BK_CHECK=0: benchmark only, no reference
+    const bk::reference_check check(in.size(), [&](std::vector<double>& ref) {
+        if (bk == 3) {
+            bk::reference_bk3(nq, nelmt, basis, D, geo, in, ref);
+        } else if (bk == 1) {
+            bk::reference_bk1(nq, nelmt, basis, geo, in, ref);
+        } else {
+            bk::reference_bk5(nq, nelmt, D, geo, in, ref);
+        }
+    });
 
     // blk: tinytc's layout, blocks of B elements, element innermost
     float* d_basis = to_device(q, basis_t);
@@ -296,17 +299,20 @@ int main(int argc, char** argv)
         });
     };
     const bk::launch_times t = bk::time_launches(ntests, launch);
-    std::vector<float> out(in.size());
-    q.copy(d_out, out.data(), out.size()).wait();
-    if (blocked) {
-        out = from_blocks(out, nelmt, npts, B);
-    }
-    const double relerr = bk::rel_maxdiff(out, ref, big);
+    std::vector<float> out;
+    const std::string chk = check.text([&]() -> const std::vector<float>& {
+        out.resize(in.size());
+        q.copy(d_out, out.data(), out.size()).wait();
+        if (blocked) {
+            out = from_blocks(out, nelmt, npts, B);
+        }
+        return out;
+    });
     const double dofs = double(nelmt) * npts;
     const double bytes = sizeof(float) * double(nelmt) * (2.0 * npts + ngeo);
-    std::printf("tt%d_%-10s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %.1e%s\n", bk,
+    std::printf("tt%d_%-10s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %s\n", bk,
                 label.c_str(), 1e-9 * dofs / t.host, 1e-9 * bytes / t.host, 1e-9 * dofs / t.device, 1e-9 * bytes / t.device,
-                relerr, bk::fail_mark(relerr));
+                chk.c_str());
     sycl::free(d_basis, q);
     sycl::free(d_dbasis, q);
     sycl::free(d_geo, q);

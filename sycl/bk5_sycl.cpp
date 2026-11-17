@@ -8,13 +8,15 @@
 //   scripts/run.sh bk5_sycl_<p> [nelmt] [ntests]
 //   BK_KERNEL="sf6c_b1x1 sf9c_b1x1" ...         run a subset (default: all)
 //
-// Variant names sf<F>c_b<batch>x<w>[_sg16]:
+// Variant names sf<F>c_b<batch>x<w>[_sg8|_sg16]:
 //   F      6 (symmetric half: rr rs rt ss st tt) or 9 (full 3 x 3, row-major)
 //   c      G in layout c: G(f, k, i, j) per element
 //   batch  elements per work-group (capped so the three arrays fit 60 KB)
 //   w      work-items per column of the batch (1 or 2), rounded to whole
 //          sub-groups of 16 and capped at 1024
-//   _sg16  sub-group size 16 required (otherwise the compiler's choice)
+//   _sg8, _sg16  sub-group size (SIMD width) 8 or 16 required (otherwise
+//          IGC's choice: SIMD16 for G9 at nq = 9, where SIMD8 is up to 1.5x
+//          faster; sycl/repro_simd/)
 //   _2d    a 2D range (batches x work-group), as OpenMP offload launches
 // BK_ALIGN=n allocates the device arrays with n-byte alignment.
 // Steps per batch (U, R, S: nq^2 rows of pk floats per element, pk = nq or
@@ -102,14 +104,17 @@ constexpr int sf_block(const int nq, const int batch, const int width)
     return (w < 1024) ? w : 1024;
 }
 
-template <typename T, int nq, int F, int batch>
+// batch elements per work-group of block work-items; sg: the required
+// sub-group size (8 or 16 for the _sg8, _sg16 variants, 0: IGC's choice);
+// dims: a 1D range, or a 2D one (batches x work-group, the shape OpenMP
+// offload launches: the _2d variants).  Launched by bk::launch.
+template <typename T, int nq, int F, int batch, int block, int sg, int dims>
 struct sf_kernel {
     static constexpr int nq2 = nq * nq;
     static constexpr int nq3 = nq2 * nq;
     static constexpr int pk = k_stride(nq);
     static constexpr int ebox = nq2 * pk;
-    static constexpr int lmem = 3 * batch * ebox;
-    static_assert(lmem * int(sizeof(T)) <= 61440, "three local arrays within 60 KB");
+    static constexpr bk::kernel_shape shape{batch, block, sg, dims, 3 * batch * ebox};
 
     const T* D;
     const T* G;
@@ -118,10 +123,11 @@ struct sf_kernel {
     int nelmt;
     sycl::local_accessor<T, 1> lm;
 
-    [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const { run(it); }
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const { return bk::launch_properties<shape.sg>(); }
+
+    [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<dims> it) const { run(it); }
 
     // the work-group is the last dimension of the range, the batch the first
-    template <int dims>
     void run(sycl::nd_item<dims> it) const
     {
         const int lid = static_cast<int>(it.get_local_id(dims - 1));
@@ -267,19 +273,6 @@ struct sf_kernel {
     }
 };
 
-// a 2D range (batches x work-group), the shape OpenMP offload launches
-template <typename K>
-struct as2d {
-    K k;
-    [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<2> it) const { k.run(it); }
-};
-
-template <typename K>
-struct sg16 {
-    K k;
-    [[sycl::reqd_sub_group_size(16), intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const { k(it); }
-};
-
 // ---------------------------------------------------------------------------
 // harness
 // ---------------------------------------------------------------------------
@@ -293,25 +286,13 @@ struct device_data {
 
 using launch_fn = sycl::event (*)(sycl::queue&, const device_data&);
 
-template <int F, int batch, int block, bool sub16, bool two_d = false>
+template <int F, int batch, int block, int sg, int dims = 1>
 sycl::event launch_sf(sycl::queue& q, const device_data& d)
 {
-    using K = sf_kernel<float, NQ, F, batch>;
-    static_assert(block <= 1024 && block % 16 == 0, "whole sub-groups, at most 1024 work-items");
-    const int ngroups = (d.nelmt + batch - 1) / batch;
-    const sycl::nd_range<1> range{std::size_t(ngroups) * block, std::size_t(block)};
+    using K = sf_kernel<float, NQ, F, batch, block, sg, dims>;
     const float* G = d.G[F == 6 ? 0 : 1];
-    return q.submit([&](sycl::handler& cgh) {
-        sycl::local_accessor<float, 1> lm(sycl::range<1>(K::lmem), cgh);
-        const K k{d.D, G, d.in, d.out, d.nelmt, lm};
-        if constexpr (two_d) {
-            const sycl::nd_range<2> range2{{std::size_t(ngroups), std::size_t(block)}, {1, std::size_t(block)}};
-            cgh.parallel_for(range2, as2d<K>{k});
-        } else if constexpr (sub16) {
-            cgh.parallel_for(range, sg16<K>{k});
-        } else {
-            cgh.parallel_for(range, k);
-        }
+    return bk::launch<K>(q, d.nelmt, [&](sycl::handler& cgh) {
+        return K{d.D, G, d.in, d.out, d.nelmt, bk::local_floats(cgh, K::shape.lmem)};
     });
 }
 
@@ -324,19 +305,23 @@ struct variant {
 #define SF(F, B, W, SG, SUFFIX) \
     {"sf" #F "c_b" #B "x" #W SUFFIX, &launch_sf<F, sf_batch(NQ, B), sf_block(NQ, sf_batch(NQ, B), W), SG>, F}
 #define SF2(F, B, W) \
-    {"sf" #F "c_b" #B "x" #W "_2d", &launch_sf<F, sf_batch(NQ, B), sf_block(NQ, sf_batch(NQ, B), W), false, true>, F}
+    {"sf" #F "c_b" #B "x" #W "_2d", &launch_sf<F, sf_batch(NQ, B), sf_block(NQ, sf_batch(NQ, B), W), 0, 2>, F}
 
 const variant variants[] = {
-    SF(6, 1, 1, false, ""), SF(6, 2, 1, false, ""), SF(6, 4, 1, false, ""), SF(6, 8, 1, false, ""),
-    SF(6, 16, 1, false, ""), SF(6, 32, 1, false, ""),
-    SF(6, 1, 2, false, ""), SF(6, 2, 2, false, ""), SF(6, 4, 2, false, ""), SF(6, 8, 2, false, ""),
-    SF(6, 16, 2, false, ""), SF(6, 32, 2, false, ""),
-    SF(6, 1, 1, true, "_sg16"), SF(6, 1, 2, true, "_sg16"), SF(6, 4, 2, true, "_sg16"),
-    SF(9, 1, 1, false, ""), SF(9, 2, 1, false, ""), SF(9, 4, 1, false, ""), SF(9, 8, 1, false, ""),
-    SF(9, 16, 1, false, ""), SF(9, 32, 1, false, ""),
-    SF(9, 1, 2, false, ""), SF(9, 2, 2, false, ""), SF(9, 4, 2, false, ""), SF(9, 8, 2, false, ""),
-    SF(9, 16, 2, false, ""), SF(9, 32, 2, false, ""),
-    SF(9, 1, 1, true, "_sg16"), SF(9, 1, 2, true, "_sg16"),
+    SF(6, 1, 1, 0, ""), SF(6, 2, 1, 0, ""), SF(6, 4, 1, 0, ""), SF(6, 8, 1, 0, ""),
+    SF(6, 16, 1, 0, ""), SF(6, 32, 1, 0, ""),
+    SF(6, 1, 2, 0, ""), SF(6, 2, 2, 0, ""), SF(6, 4, 2, 0, ""), SF(6, 8, 2, 0, ""),
+    SF(6, 16, 2, 0, ""), SF(6, 32, 2, 0, ""),
+    SF(6, 1, 1, 16, "_sg16"), SF(6, 1, 2, 16, "_sg16"), SF(6, 4, 2, 16, "_sg16"),
+    SF(6, 1, 1, 8, "_sg8"), SF(6, 1, 2, 8, "_sg8"), SF(6, 4, 1, 8, "_sg8"), SF(6, 4, 2, 8, "_sg8"),
+    SF(6, 16, 1, 8, "_sg8"),
+    SF(9, 1, 1, 0, ""), SF(9, 2, 1, 0, ""), SF(9, 4, 1, 0, ""), SF(9, 8, 1, 0, ""),
+    SF(9, 16, 1, 0, ""), SF(9, 32, 1, 0, ""),
+    SF(9, 1, 2, 0, ""), SF(9, 2, 2, 0, ""), SF(9, 4, 2, 0, ""), SF(9, 8, 2, 0, ""),
+    SF(9, 16, 2, 0, ""), SF(9, 32, 2, 0, ""),
+    SF(9, 1, 1, 16, "_sg16"), SF(9, 1, 2, 16, "_sg16"),
+    SF(9, 1, 1, 8, "_sg8"), SF(9, 1, 2, 8, "_sg8"), SF(9, 4, 1, 8, "_sg8"), SF(9, 4, 2, 8, "_sg8"),
+    SF(9, 16, 1, 8, "_sg8"),
     SF2(6, 1, 1), SF2(6, 8, 2), SF2(9, 1, 1), SF2(9, 4, 2),
 };
 
@@ -349,7 +334,8 @@ int main(int argc, char** argv)
     const std::size_t nelmt = (argc > 1) ? std::size_t(std::atoll(argv[1])) : std::size_t(1) << 17;
     const int ntests = (argc > 2) ? std::atoi(argv[2]) : 10;
 
-    sycl::queue q{sycl::gpu_selector_v, sycl::property_list{sycl::property::queue::enable_profiling{}}};
+    // BK_PROFILE=0: no device times; BK_INORDER=1: an in-order queue
+    sycl::queue q = bk::make_queue();
     std::printf("BK5 SYCL: p = %d, nq = %d, nelmt = %zu (%zu DoFs), ntests = %d, device %s\n", nq - 1, nq, nelmt,
                 nelmt * nq3, ntests, q.get_device().get_info<sycl::info::device::name>().c_str());
 
@@ -357,9 +343,10 @@ int main(int argc, char** argv)
     std::vector<float> in(nelmt * nq3);
     std::vector<float> G6i(nelmt * 6 * nq3);
     bk::fill_random_test_data(in, G6i);   // in in [-1, 1], G6i = 1.5 + [-1, 1]
-    std::vector<double> ref(in.size());
-    bk::reference_bk5(nq, nelmt, D, G6i, in, ref);
-    const double big = bk::max_abs(ref);
+    // BK_CHECK=0: benchmark only, no reference
+    const bk::reference_check check(in.size(), [&](std::vector<double>& ref) {
+        bk::reference_bk5(nq, nelmt, D, G6i, in, ref);
+    });
 
     // BK_ALIGN=n: device arrays from aligned_alloc_device with n-byte
     // alignment (default: malloc_device)
@@ -389,22 +376,24 @@ int main(int argc, char** argv)
     q.wait_and_throw();
     G6i = std::vector<float>();
 
-    std::vector<float> out(in.size());
+    std::vector<float> out(check.on() ? in.size() : 0);
     for (const variant& v : variants) {
         if (!bk::selected(v.name)) {
             continue;
         }
-        q.memset(d.out, 0, out.size() * sizeof(float)).wait();
+        q.memset(d.out, 0, in.size() * sizeof(float)).wait();
         bk::launch_times t{};
         if (!bk::time_variant(v.name, ntests, [&] { return v.fn(q, d); }, t)) {
             continue;
         }
-        q.copy(d.out, out.data(), out.size()).wait();
-        const double relerr = bk::rel_maxdiff(out, ref, big);
+        const std::string chk = check.text([&]() -> const std::vector<float>& {
+            q.copy(d.out, out.data(), out.size()).wait();
+            return out;
+        });
         const double bytes = sizeof(float) * double(nelmt) * nq3 * (2.0 + v.F);
-        std::printf("%-15s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %.1e%s\n",
+        std::printf("%-15s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %s\n",
                     v.name, 1e-9 * in.size() / t.host, 1e-9 * bytes / t.host, 1e-9 * in.size() / t.device,
-                    1e-9 * bytes / t.device, relerr, bk::fail_mark(relerr));
+                    1e-9 * bytes / t.device, chk.c_str());
     }
     sycl::free(d.D, q);
     for (float* g : d.G) {

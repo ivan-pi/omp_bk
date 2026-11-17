@@ -30,6 +30,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <iterator>
 #include <vector>
 
@@ -52,13 +53,15 @@ float* ptr(const local& a) { return a.get_multi_ptr<sycl::access::decorated::no>
 // cu: one accessor per SLM array, so the compiler knows that a store to a
 // work box leaves B and D unchanged
 // ---------------------------------------------------------------------------
-template <int nq, int batch>
+template <int nq, int batch, int sg>
 struct cu_kernel {
     static constexpr int nm = nq - 1;
     static constexpr int nq2 = nq * nq;
     static constexpr int nq3 = nq2 * nq;
     static constexpr int nm3 = nm * nm * nm;
-    static_assert((nm * nq + nq2 + 4 * batch * nq3) * 4 <= 61440, "SLM within 60 KB");
+    // B, D and four work boxes in local memory; launched by bk::launch
+    static constexpr bk::kernel_shape shape{batch, bk3gpu::cu_block(nq, batch), sg, 1,
+                                            nm * nq + nq2 + 4 * batch * nq3};
     using interp = bk1gpu::gs_steps<float, nq>;
     using steps = bk3gpu::cu_steps<float, nq>;
 
@@ -75,7 +78,14 @@ struct cu_kernel {
     local l_rqr;
     local l_rqs;
 
-    void operator()(sycl::nd_item<1> it) const
+    // the work-group size fixed at compile time (as the oneAPI GPU guide
+    // advises) and a required sub-group size sg (0: IGC's choice)
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const
+    {
+        return bk::launch_properties<shape.sg, shape.block>();
+    }
+
+    [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const
     {
         const int lid = static_cast<int>(it.get_local_id(0));
         const int lsz = static_cast<int>(it.get_local_range(0));
@@ -147,13 +157,15 @@ struct cu_kernel {
 // ---------------------------------------------------------------------------
 // sf: one batch per work-group, one accessor per box
 // ---------------------------------------------------------------------------
-template <int nq, int batch, bool carry, bool padded, bool breg>
+template <int nq, int batch, bool carry, bool padded, bool breg, int sg>
 struct sf_kernel {
     using steps = bk3gpu::sf_steps<float, nq, padded>;
     static constexpr int nm = nq - 1;
     static constexpr int nq2 = nq * nq;
     static constexpr int nm3 = nm * nm * nm;
-    static_assert(3 * batch * steps::ebox * 4 <= 61440, "three SLM boxes within 60 KB");
+    // three boxes in local memory; launched by bk::launch
+    static constexpr bk::kernel_shape shape{batch, bk3gpu::sf_block(nq, batch), sg, 1, 3 * batch * steps::ebox};
+    static_assert(!carry || shape.block >= batch * nq2, "carry: one work-item per column");
 
     const float* gB;
     const float* gD;
@@ -165,7 +177,13 @@ struct sf_kernel {
     local lR;
     local lS;
 
-    void operator()(sycl::nd_item<1> it) const
+    // the work-group size fixed at compile time, sg as in cu_kernel
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const
+    {
+        return bk::launch_properties<shape.sg, shape.block>();
+    }
+
+    [[intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const
     {
         const int lid = static_cast<int>(it.get_local_id(0));
         const int lsz = static_cast<int>(it.get_local_range(0));
@@ -233,23 +251,6 @@ struct sf_kernel {
     }
 };
 
-// the kernel with its work-group size fixed at compile time (wg, as the
-// oneAPI GPU guide advises) and a required sub-group size sg (0: IGC's choice)
-template <typename K, int sg, int wg>
-struct with_sg {
-    K k;
-    [[sycl::reqd_work_group_size(wg), sycl::reqd_sub_group_size(sg), intel::kernel_args_restrict]] void operator()(
-        sycl::nd_item<1> it) const
-    {
-        k(it);
-    }
-};
-template <typename K, int wg>
-struct with_sg<K, 0, wg> {
-    K k;
-    [[sycl::reqd_work_group_size(wg), intel::kernel_args_restrict]] void operator()(sycl::nd_item<1> it) const { k(it); }
-};
-
 // ---------------------------------------------------------------------------
 // harness
 // ---------------------------------------------------------------------------
@@ -269,34 +270,44 @@ inline int g_grid = 0;   // BK_TEAMS
 template <int batch, int sg>
 sycl::event launch_cu(sycl::queue& q, const device_data& d)
 {
-    using K = cu_kernel<NQ, batch>;
-    constexpr int block = bk3gpu::cu_block(NQ, batch);
-    static_assert(block <= 1024, "at most 1024 work-items");
+    using K = cu_kernel<NQ, batch, sg>;
     constexpr int nq3 = NQ * NQ * NQ;
     const int nbatches = (d.nelmt + batch - 1) / batch;
-    const int ngroups = (g_grid > 0 && g_grid < nbatches) ? g_grid : nbatches;
-    const sycl::nd_range<1> range{std::size_t(ngroups) * block, std::size_t(block)};
-    return q.submit([&](sycl::handler& cgh) {
-        const K k{d.basis, d.D, d.G, d.in, d.out, d.nelmt,
-                  local((NQ - 1) * NQ, cgh), local(NQ * NQ, cgh), local(batch * nq3, cgh), local(batch * nq3, cgh),
-                  local(batch * nq3, cgh), local(batch * nq3, cgh)};
-        cgh.parallel_for(range, with_sg<K, sg, block>{k});
-    });
+    const int groups = (g_grid > 0 && g_grid < nbatches) ? g_grid : 0;   // BK_TEAMS: stride over the batches
+    return bk::launch<K>(
+        q, d.nelmt,
+        [&](sycl::handler& cgh) {
+            return K{d.basis,
+                     d.D,
+                     d.G,
+                     d.in,
+                     d.out,
+                     d.nelmt,
+                     bk::local_floats(cgh, (NQ - 1) * NQ),
+                     bk::local_floats(cgh, NQ * NQ),
+                     bk::local_floats(cgh, batch * nq3),
+                     bk::local_floats(cgh, batch * nq3),
+                     bk::local_floats(cgh, batch * nq3),
+                     bk::local_floats(cgh, batch * nq3)};
+        },
+        groups);
 }
 
 template <int batch, int sg, bool carry, bool padded, bool breg>
 sycl::event launch_sf(sycl::queue& q, const device_data& d)
 {
-    using K = sf_kernel<NQ, batch, carry, padded, breg>;
-    constexpr int block = bk3gpu::sf_block(NQ, batch);
-    static_assert(!carry || block >= batch * NQ * NQ, "carry: one work-item per column");
+    using K = sf_kernel<NQ, batch, carry, padded, breg, sg>;
     constexpr int ebox = bk3gpu::box_layout(NQ, padded).se;
-    const int ngroups = (d.nelmt + batch - 1) / batch;
-    const sycl::nd_range<1> range{std::size_t(ngroups) * block, std::size_t(block)};
-    return q.submit([&](sycl::handler& cgh) {
-        const K k{d.basis, d.D, d.G, d.in, d.out, d.nelmt,
-                  local(batch * ebox, cgh), local(batch * ebox, cgh), local(batch * ebox, cgh)};
-        cgh.parallel_for(range, with_sg<K, sg, block>{k});
+    return bk::launch<K>(q, d.nelmt, [&](sycl::handler& cgh) {
+        return K{d.basis,
+                 d.D,
+                 d.G,
+                 d.in,
+                 d.out,
+                 d.nelmt,
+                 bk::local_floats(cgh, batch * ebox),
+                 bk::local_floats(cgh, batch * ebox),
+                 bk::local_floats(cgh, batch * ebox)};
     });
 }
 
@@ -331,7 +342,8 @@ int main(int argc, char** argv)
     const int ntests = (argc > 2) ? std::atoi(argv[2]) : 10;
     g_grid = bk::env_int("BK_TEAMS", 0);
 
-    sycl::queue q{sycl::gpu_selector_v, sycl::property_list{sycl::property::queue::enable_profiling{}}};
+    // BK_PROFILE=0: no device times; BK_INORDER=1: an in-order queue
+    sycl::queue q = bk::make_queue();
     std::printf("BK3 SYCL: p = %d, nq = %d, nelmt = %zu (%zu DoFs), ntests = %d, device %s\n", nq - 2, nq, nelmt,
                 nelmt * nm * nm * nm, ntests, q.get_device().get_info<sycl::info::device::name>().c_str());
 
@@ -340,9 +352,10 @@ int main(int argc, char** argv)
     std::vector<float> in(nelmt * nm * nm * nm);
     std::vector<float> G(nelmt * 6 * nq * nq * nq);
     bk::fill_random_test_data(in, G);   // in in [-1, 1], G = 1.5 + [-1, 1]
-    std::vector<double> ref(in.size());
-    bk::reference_bk3(nq, nelmt, basis, D, G, in, ref);
-    const double big = bk::max_abs(ref);
+    // BK_CHECK=0: benchmark only, no reference
+    const bk::reference_check check(in.size(), [&](std::vector<double>& ref) {
+        bk::reference_bk3(nq, nelmt, basis, D, G, in, ref);
+    });
 
     device_data d{sycl::malloc_device<float>(basis.size(), q), sycl::malloc_device<float>(D.size(), q),
                   sycl::malloc_device<float>(G.size(), q), sycl::malloc_device<float>(in.size(), q),
@@ -354,7 +367,7 @@ int main(int argc, char** argv)
     q.wait_and_throw();
 
     const double bytes = sizeof(float) * (2.0 * in.size() + G.size());
-    std::vector<float> out(in.size());
+    std::vector<float> out(check.on() ? in.size() : 0);
     for (std::size_t v = 0; v < std::size(variants); ++v) {
         const variant& var = variants[v];
         if (!bk::selected(var.name)) {
@@ -364,16 +377,18 @@ int main(int argc, char** argv)
             std::printf("%-12s = %s\n", var.name, same->name);
             continue;
         }
-        q.memset(d.out, 0, out.size() * sizeof(float)).wait();
+        q.memset(d.out, 0, in.size() * sizeof(float)).wait();
         bk::launch_times t{};
         if (!bk::time_variant(var.name, ntests, [&] { return var.fn(q, d); }, t)) {
             continue;
         }
-        q.copy(d.out, out.data(), out.size()).wait();
-        const double relerr = bk::rel_maxdiff(out, ref, big);
-        std::printf("%-12s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %.1e%s\n",
+        const std::string chk = check.text([&]() -> const std::vector<float>& {
+            q.copy(d.out, out.data(), out.size()).wait();
+            return out;
+        });
+        std::printf("%-12s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %s\n",
                     var.name, 1e-9 * in.size() / t.host, 1e-9 * bytes / t.host, 1e-9 * in.size() / t.device,
-                    1e-9 * bytes / t.device, relerr, bk::fail_mark(relerr));
+                    1e-9 * bytes / t.device, chk.c_str());
     }
     sycl::free(d.basis, q);
     sycl::free(d.D, q);

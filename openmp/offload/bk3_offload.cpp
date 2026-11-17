@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
+#include <string>
 #include <vector>
 
 #include "bk_common.h"
@@ -258,9 +259,10 @@ int main(int argc, char** argv)
     std::vector<float> in(nelmt * nm * nm * nm);
     std::vector<float> G(nelmt * 6 * nq * nq * nq);
     bk::fill_random_test_data(in, G);   // in in [-1, 1], G = 1.5 + [-1, 1]
-    std::vector<double> ref(in.size());
-    bk::reference_bk3(nq, nelmt, basis, D, G, in, ref);
-    const double big = bk::max_abs(ref);
+    // BK_CHECK=0: benchmark only, no reference
+    const bk::reference_check check(in.size(), [&](std::vector<double>& ref) {
+        bk::reference_bk3(nq, nelmt, basis, D, G, in, ref);
+    });
     std::vector<float> out(in.size());
     std::printf("BK3 offload: p = %d, nq = %d, nelmt = %zu (%zu DoFs), ntests = %d\n", nq - 2, nq, nelmt,
                 in.size(), ntests);
@@ -291,11 +293,16 @@ int main(int argc, char** argv)
                 d_out[i] = 0.0f;
             }
             var.fn(nelmt, d_basis, d_D, d_G, d_in, d_out);   // warm-up
-            const double t = bk::time_min(ntests, [&] { var.fn(nelmt, d_basis, d_D, d_G, d_in, d_out); });
-            #pragma omp target update from(d_out[:n_in])
-            const double relerr = bk::rel_maxdiff(out, ref, big);
-            std::printf("%-10s GDoF/s = %7.3f  GB/s = %6.1f  time = %8.3f ms  relerr = %.1e%s\n", var.name,
-                        1e-9 * n_in / t, 1e-9 * bytes / t, 1e3 * t, relerr, bk::fail_mark(relerr));
+            // timed: ntests launches of the kernel, the best wall time
+            const double t = bk::time_min(ntests, [&] {
+                var.fn(nelmt, d_basis, d_D, d_G, d_in, d_out);
+            });
+            const std::string chk = check.text([&]() -> const std::vector<float>& {
+                #pragma omp target update from(d_out[:n_in])
+                return out;
+            });
+            std::printf("%-10s GDoF/s = %7.3f  GB/s = %6.1f  time = %8.3f ms  relerr = %s\n", var.name,
+                        1e-9 * n_in / t, 1e-9 * bytes / t, 1e3 * t, chk.c_str());
         }
     }
     return 0;

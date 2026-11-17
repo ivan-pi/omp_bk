@@ -2,13 +2,15 @@
 """plot_dof_sweep.py -- GDoF/s and GB/s versus DoFs from dof_sweep.sh.
 
 usage:  scripts/plot/plot_dof_sweep.py results.csv out.png [--device] [--p-offset=N] [--title=TEXT]
-                                      [--apis=a,b,...]
+                                      [--apis=a,b,...] [--kernel-labels] [--ntests=N]
 
 The rows are the values of the csv's api column (OpenMP/SYCL, or any other
 labels, e.g. G6/G9 from bk5_sweep.sh); p = nq - N (default N = 2, BK1;
 N = 1 for BK5, collocated); --title replaces the footnote's first part;
 --apis keeps those api values, as rows in that order (e.g. omp6,sycl6 from
-bk5_sweep.sh).
+bk5_sweep.sh); --kernel-labels adds each line's kernel (the csv's kernel
+column) to its end label; --ntests gives the launches per point of the
+footnote (default 20).
 
 A 2 x 2 grid: rows = API (OpenMP top, SYCL bottom), columns = GDoF/s (left)
 and GB/s (right, with the STREAM copy bandwidth from results.csv.stream as a
@@ -39,10 +41,12 @@ API_NAME = {"omp": "OpenMP", "sycl": "SYCL", "G6": "G6 (symmetric half)", "G9": 
             "omp6": "OpenMP, G6", "sycl6": "SYCL, G6", "omp9": "OpenMP, G9", "sycl9": "SYCL, G9"}
 
 
-def load(path, device, p_offset=2):
+def load(path, device, p_offset=2, kernels=None):
     series = {}
     with open(path) as f:
         for row in csv.DictReader(f):
+            if kernels is not None:
+                kernels[(row["api"], int(row["nq"]) - p_offset)] = row["kernel"]
             g, b = row["gdofs"], row["gbs"]
             if device and row["gdofs_dev"]:
                 g, b = row["gdofs_dev"], row["gbs_dev"]
@@ -96,14 +100,19 @@ def main():
     p_offset = 2
     title = "BK1 on Arc A770, icpx 2026.1, float"
     keep = None
+    ntests = 20
     for a in sys.argv[3:]:
         if a.startswith("--p-offset="):
             p_offset = int(a.split("=", 1)[1])
         if a.startswith("--title="):
             title = a.split("=", 1)[1]
+        if a.startswith("--ntests="):
+            ntests = int(a.split("=", 1)[1])
         if a.startswith("--apis="):
             keep = a.split("=", 1)[1].split(",")
-    series = load(path, device, p_offset)
+    kernel_labels = "--kernel-labels" in sys.argv[3:]
+    kernels = {}
+    series = load(path, device, p_offset, kernels)
     if keep is not None:
         series = {k: v for k, v in series.items() if k[0] in keep}
     copy_bw = stream_copy(path)
@@ -133,7 +142,8 @@ def main():
                 ys = [v[1 + c] for v in pts]
                 ax.plot(xs, ys, color=SLOTS[(p - 1) % len(SLOTS)], linewidth=2, marker="o", markersize=5,
                         markeredgecolor=SURFACE, markeredgewidth=1.0, label=f"p = {p} (nq = {p + p_offset})")
-                ends.append((xs[-1], ys[-1], f"p = {p}"))
+                label = f"p = {p}, {kernels[(api, p)]}" if kernel_labels else f"p = {p}"
+                ends.append((xs[-1], ys[-1], label))
             ymax = col_max[c]
             cap = None
             if c == 1 and copy_bw:
@@ -158,7 +168,7 @@ def main():
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=len(degrees), frameon=False, fontsize=8.5,
                labelcolor=TEXT2, bbox_to_anchor=(0.5, 0.03))
-    fig.text(0.5, 0.005, f"{title}, best of 20 launches", ha="center",
+    fig.text(0.5, 0.005, f"{title}, best of {ntests} launches", ha="center",
              va="bottom", fontsize=7.5, color=TEXT2)
     fig.tight_layout(rect=(0, 0.07, 1, 1))
     fig.savefig(out, dpi=150, facecolor=SURFACE)

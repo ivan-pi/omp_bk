@@ -785,9 +785,10 @@ int main(int argc, char** argv)
     std::vector<float> in(nelmt * nq3);
     std::vector<float> G6i(nelmt * 6 * nq3);
     bk::fill_random_test_data(in, G6i);   // in in [-1, 1], G6i = 1.5 + [-1, 1]
-    std::vector<double> ref(in.size());
-    bk::reference_bk5(nq, nelmt, D, G6i, in, ref);
-    const double big = bk::max_abs(ref);
+    // BK_CHECK=0: benchmark only, no reference
+    const bk::reference_check check(in.size(), [&](std::vector<double>& ref) {
+        bk::reference_bk5(nq, nelmt, D, G6i, in, ref);
+    });
     std::vector<float> out(in.size());
     std::printf("BK5 offload: p = %d, nq = %d, nelmt = %zu (%zu DoFs), ntests = %d\n", nq - 1, nq, nelmt,
                 nelmt * nq3, ntests);
@@ -818,13 +819,18 @@ int main(int argc, char** argv)
             #pragma omp target data map(to: d_G[:n_G])
             {
                 v.fn(nelmt, d_D, d_G, d_in, d_out);   // warm-up
-                best = bk::time_min(ntests, [&] { v.fn(nelmt, d_D, d_G, d_in, d_out); });
+                // timed: ntests launches of the kernel, the best wall time
+                best = bk::time_min(ntests, [&] {
+                    v.fn(nelmt, d_D, d_G, d_in, d_out);
+                });
             }
-            #pragma omp target update from(d_out[:n_in])
-            const double relerr = bk::rel_maxdiff(out, ref, big);
+            const std::string chk = check.text([&]() -> const std::vector<float>& {
+                #pragma omp target update from(d_out[:n_in])
+                return out;
+            });
             const double bytes = sizeof(float) * double(nelmt) * nq3 * (2.0 + v.F);
-            std::printf("%-10s GDoF/s = %7.3f  GB/s = %6.1f  time = %8.3f ms  relerr = %.1e%s\n", v.name,
-                        1e-9 * n_in / best, 1e-9 * bytes / best, 1e3 * best, relerr, bk::fail_mark(relerr));
+            std::printf("%-10s GDoF/s = %7.3f  GB/s = %6.1f  time = %8.3f ms  relerr = %s\n", v.name,
+                        1e-9 * n_in / best, 1e-9 * bytes / best, 1e3 * best, chk.c_str());
         }
     }
     return 0;

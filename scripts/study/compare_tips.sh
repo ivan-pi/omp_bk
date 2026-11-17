@@ -16,13 +16,16 @@ echo "api,nq,p,variant,rep,gdofs,gdofs_dev,check" > "$OUT"
 for p in $ORDERS; do
     nq=$((p + 2))
     ne=$(python3 -c "print(max(1, round($DOFS / ($nq - 1) ** 3)))")
-    ref=0
+    # p <= 2: the reference kernel runs (a contender at p = 1) and checks the
+    # others; from p = 3 it is slow, so the OpenMP variants run unchecked
+    # (BK_CHECK=0; scripts/check_gpu.sh checks them)
+    check=0
     omp=$OMP
     if [ "$p" -le 2 ]; then
-        ref=1   # the reference kernel is a contender (p = 1) and the check
+        check=1
     fi
     for rep in $(seq 1 "$REPS"); do
-        BK_REF=$ref BK_KERNEL="$omp" "$SCRIPTS/run.sh" "bk1_offload_$p" "$ne" "$NTESTS" 2>&1 | grep -E "GDoF/s" | \
+        BK_CHECK=$check BK_KERNEL="$omp" "$SCRIPTS/run.sh" "bk1_offload_$p" "$ne" "$NTESTS" 2>&1 | grep -E "GDoF/s" | \
             awk -v nq="$nq" -v rep="$rep" '{chk = ($NF == "(reference)") ? "reference" : $NF;
                  printf "omp,%d,%d,%s,%d,%s,,%s\n", nq, nq - 2, $1, rep, $4, chk}' >> "$OUT"
         BK_KERNEL="$SYCL" "$SCRIPTS/run.sh" "bk1_sycl_$p" "$ne" "$NTESTS" 2>&1 | grep -E "GDoF/s" | sed 's/(device: GDoF\/s =//' | \

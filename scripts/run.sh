@@ -12,6 +12,10 @@
 # (LIBOMPTARGET_PLUGIN_PROFILE=T).  The last line on stderr is the peak memory.
 # The run waits for the GPU to be free of other processes and is repeated
 # when one shows up during it (common.sh: gpu_wait_idle, gpu_others).
+# JIT-compiled kernels go to a persistent cache per build tree,
+# $BUILD_DIR/sycl_cache, so only the first run of a kernel (or of a
+# specialization-constant value) compiles it (SYCL_CACHE_PERSISTENT=0:
+# compile every time; SYCL_CACHE_DIR: another cache).
 
 . "$(dirname "$0")/common.sh"
 name=$1
@@ -25,6 +29,7 @@ extra=()
 case $name in
     BK1_ff*) extra+=(IGC_EnableDPEmulation=1 OverrideDefaultFP64Settings=1) ;;
 esac
+extra+=(SYCL_CACHE_PERSISTENT="${SYCL_CACHE_PERSISTENT:-1}" SYCL_CACHE_DIR="${SYCL_CACHE_DIR:-$BUILD_DIR/sycl_cache}")
 if [ "${PROFILE:-0}" = 1 ]; then
     extra+=(LIBOMPTARGET_PLUGIN_PROFILE=T)
 fi

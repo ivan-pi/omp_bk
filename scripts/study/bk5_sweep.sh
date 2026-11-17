@@ -7,8 +7,9 @@
 # usage:  KERNELS="omp:1:pt6f_b16 sycl:6:sf6c_b1x1 ..." scripts/study/bk5_sweep.sh [out.csv]
 #         (<api>:<p>:<variant>, nq = p + 1; a spec without an API,
 #         "1:pt6f_b16", is OpenMP)
-# env:    DOF_MIN=1e3 DOF_MAX=1e8 PPD=4 NTESTS=20 MEM_MAX (common.sh; 1e8 DoFs at
-#         p = 8 needs ~7.6 GB on the host: G6 + G9 + the double reference)
+# env:    DOF_MIN=1e3 DOF_MAX=1e8 PPD=4 NTESTS=20 MEM_MAX (common.sh)
+# Benchmark only (BK_CHECK=0: no double reference on the host, no check);
+# check the kernels on their own with scripts/check_gpu.sh.
 # CSV (the layout of dof_sweep.sh, plot_dof_sweep.py reads it):
 #   api,nq,kernel,nelmt,dofs,gdofs,gbs,gdofs_dev,gbs_dev
 #   api = <omp|sycl><6|9> (API and tensor factors); the *_dev columns are
@@ -19,6 +20,7 @@ DOF_MIN=${DOF_MIN:-1e3}
 DOF_MAX=${DOF_MAX:-1e8}
 PPD=${PPD:-4}
 NTESTS=${NTESTS:-20}
+export BK_CHECK=0
 echo "api,nq,kernel,nelmt,dofs,gdofs,gbs,gdofs_dev,gbs_dev" > "$OUT"
 for spec in $KERNELS; do
     case $spec in

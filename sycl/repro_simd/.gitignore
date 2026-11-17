@@ -1,0 +1,3 @@
+# build outputs of build.sh: the binaries and IGC dumps stay out of git
+repro_*
+asm_*/
