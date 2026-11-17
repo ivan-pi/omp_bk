@@ -20,6 +20,8 @@
 #     BK_ENABLE_SYCL (ON):    SYCL
 #       bk{1,3,5}_sycl_<p>                     sycl/ (-DNQ=nq; bk1 and bk5 _jit: JIT-compiled,
 #                                              for specialization constants)
+#       bk1_sycl_sc                            sycl/ every order, kernel shape from a
+#                                              specialization constant (JIT)
 #       stream_sycl                            roofline/ bandwidth test
 #     BK_ENABLE_TINYTC (OFF): bk_tinytc        tinytc/ (needs tinytc_sycl, TINYTC_ROOT,
 #                                              and BK_ENABLE_SYCL)
@@ -241,6 +243,11 @@ if(BK_ENABLE_SYCL)
     bk_gpu_orders(bk3_sycl sycl/bk3_sycl.cpp sycl NQ 2 "" ${BK_ORDERS_GPU})
     bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl_jit NQ 2 _jit ${BK_ORDERS_GPU})
     bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl_jit NQ 1 _jit ${BK_ORDERS_GPU})
+    # every order in one binary: the opt kernel shaped by a specialization
+    # constant at run time (JIT, whatever BK_GPU_DEVICE)
+    add_executable(bk1_sycl_sc ${bk_exclude} sycl/bk1_sycl_sc.cpp)
+    bk_gpu_target(bk1_sycl_sc sycl_jit)
+    add_dependencies(all_sycl bk1_sycl_sc)
 
     add_executable(stream_sycl roofline/stream_sycl.cpp)
     bk_gpu_target(stream_sycl sycl)
