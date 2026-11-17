@@ -9,6 +9,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -16,6 +17,11 @@
 #include "bk_common.h"
 
 namespace bk {
+
+// BK_CHECK=0: benchmark only -- no reference, no check (the result lines end
+// in "off"); the correctness check is a run of its own (scripts/check_gpu.sh).
+// Default: check.
+inline bool checking() { return get_env("BK_CHECK").value_or("1") != "0"; }
 
 // BK_KERNEL="a b -c": run the variants named, all if none is named, never
 // those named with a leading "-" (unset or empty: all).
@@ -83,6 +89,53 @@ inline double rel_maxdiff(const std::vector<float>& out, const std::vector<doubl
 }
 
 inline const char* fail_mark(const double relerr) { return (relerr < 1e-5) ? "" : "  FAIL"; }
+
+// The check column of a result line: the relative error, with "  FAIL" above
+// the tolerance, or "off" without the check (BK_CHECK=0, bk::checking).
+inline std::string check_text(const bool check, const double relerr)
+{
+    if (!check) {
+        return "off";
+    }
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.1e%s", relerr, fail_mark(relerr));
+    return text;
+}
+
+// The double-precision reference of a run and the check against it; with
+// BK_CHECK=0 (checking) neither is computed and every check reads "off":
+//   const bk::reference_check check(n, [&](std::vector<double>& ref) { bk::reference_bk3(..., ref); });
+//   ... check.text([&]() -> const std::vector<float>& { copy the output back; return out; })
+// fetch runs only with the check.
+class reference_check {
+public:
+    template <typename Compute>
+    reference_check(const std::size_t n, Compute&& compute) : on_(checking())
+    {
+        if (on_) {
+            ref_.resize(n);
+            compute(ref_);
+            big_ = max_abs(ref_);
+        }
+    }
+
+    bool on() const { return on_; }
+
+    template <typename Fetch>
+    std::string text(Fetch&& fetch) const
+    {
+        if (!on_) {
+            return check_text(false, 0.0);
+        }
+        const std::vector<float>& out = fetch();
+        return check_text(true, rel_maxdiff(out, ref_, big_));
+    }
+
+private:
+    bool on_;
+    std::vector<double> ref_;
+    double big_ = 0.0;
+};
 
 // BK1: JxW(e, p, q, r) -> JxW_t(e, r, q, p), for the kernels that read it
 // transposed.

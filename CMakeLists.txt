@@ -75,7 +75,9 @@ else()
 endif()
 add_compile_options(-Wall -O3)
 # icpx defaults to a fast floating-point model, which breaks the error-free
-# transformations of float_float.h.  Never -ffast-math.
+# transformations of float_float.h.  Never -ffast-math.  Kept for every
+# target, so all builds share IEEE rules: the SYCL kernels gain nothing from
+# the fast model (best variants within +-2% on the A770, 2026-11-17).
 if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     add_compile_options(-fp-model=precise)
 endif()
@@ -244,9 +246,12 @@ if(BK_ENABLE_SYCL)
     bk_gpu_orders(bk1_sycl sycl/bk1_sycl.cpp sycl_jit NQ 2 _jit ${BK_ORDERS_GPU})
     bk_gpu_orders(bk5_sycl sycl/bk5_sycl.cpp sycl_jit NQ 1 _jit ${BK_ORDERS_GPU})
     # every order in one binary: the opt kernel shaped by a specialization
-    # constant at run time (JIT, whatever BK_GPU_DEVICE)
-    add_executable(bk1_sycl_sc ${bk_exclude} sycl/bk1_sycl_sc.cpp)
+    # constant at run time (JIT, whatever BK_GPU_DEVICE); one device image per
+    # kernel, so a new shape JIT-compiles only the kernel it launches
+    add_executable(bk1_sycl_sc sycl/bk1_sycl_sc.cpp)
     bk_gpu_target(bk1_sycl_sc sycl_jit)
+    target_compile_options(bk1_sycl_sc PRIVATE -fsycl-device-code-split=per_kernel)
+    target_link_options(bk1_sycl_sc PRIVATE -fsycl-device-code-split=per_kernel)
     add_dependencies(all_sycl bk1_sycl_sc)
 
     add_executable(stream_sycl roofline/stream_sycl.cpp)

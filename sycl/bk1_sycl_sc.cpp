@@ -1,236 +1,194 @@
 // bk1_sycl_sc.cpp -- BK1 in SYCL, every order and kernel shape in one binary:
-// the opt kernel of sycl/bk1_sycl.cpp (sycl/bk1_sycl_opt.h) with nq, the
-// batch, the work-group size and the SLM layout taken from a
-// specialization constant, so the JIT compiles each shape with them as
-// constants on its first launch.  Built for JIT (spir64) only: ahead of time
-// the constant would be a run-time value.
+// the opt kernel of sycl/bk1_sycl_opt.h with nq, the batch, the work-group
+// size and the SLM layout from a specialization constant.  Each selected
+// shape is JIT-compiled with them as constants before the runs
+// (bk::build_specialized), and its launches use that kernel bundle.
 //
 //   scripts/build.sh bk1_sycl_sc
 //   scripts/run.sh bk1_sycl_sc <p> [nelmt] [ntests]     (nq = p + 2)
 //   BK_KERNEL="scP_b1 scF_f128" ...      run a subset (default: all)
-//   BK_SHAPE="b4w256p1 b1w128"            run these shapes instead: batch b,
-//                                         work-group size w, p1 padded SLM,
-//                                         io1 sub-group block copies
+//   BK_SHAPE="b4w256p1 b1w64io1" ...      run these shapes instead: b batch,
+//                                         w work-group size, p0 dense or p1
+//                                         padded SLM, io1 sub-group block copies
+//   BK_SHAPE_FILE=<file>                  the same from the lines "<p> <shape>..."
+//                                         of a file for this p (# comments)
 //
-// Variant names mirror the compile-time ones of bk1_sycl.cpp (inlP_b1 ->
-// scP_b1, inlF_f128 -> scF_f128, ...); sc_b<B> is the opt kernel with the
-// dense layout at the block of inl_b<B>.  The batch is capped as there
-// (bk1gpu::cap_batch).  "jit" is the host time of the first launch, which
-// compiles the shape; the rates are the best of ntests launches after it.
+// The default shapes are those of bk1_sycl_<p> (bk1opt::opt_variants), named
+// sc* for inl* (inlP_b1 -> scP_b1).  The result lines are those of bk1_sycl,
+// each followed by the shape's line of sycl/README.md (convention 4), and a
+// "JIT:" line before the runs sums up the builds.  Data and check:
+// sycl/bk1_sycl_harness.h.
 
 #include <sycl/sycl.hpp>
 
-#include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <exception>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "bk_common.h"
 #include "bk_harness.h"
-#include "bk1_gpu.h"
+#include "bk_sycl.h"
+#include "bk1_sycl_harness.h"
 #include "bk1_sycl_opt.h"
 
 namespace {
 
 using bk1opt::opt_params;
+using exe_bundle = sycl::kernel_bundle<sycl::bundle_state::executable>;
 
 struct shape {
     std::string name;
     opt_params P;
-    bool pad;
     bool block_io;
 };
 
-constexpr int round16(const int n) { return bk::round_up(n, 16); }
-
-// the shapes of the compile-time opt variants of bk1_sycl.cpp, for nq
-std::vector<shape> default_shapes(const int nq)
+// "b<batch>w<block>p<slm>[io1]"
+std::string shape_word(const opt_params& P, const bool block_io)
 {
-    std::vector<shape> s;
-    const auto by_batch = [&](const char* tag, const int want, const bool pad, const bool io) {
-        const int b = bk1gpu::cap_batch(nq, want);
-        s.push_back({std::string(tag) + "_b" + std::to_string(want),
-                     bk1opt::make_opt_params(nq, b, round16(b * nq * nq), pad), pad, io});
-    };
-    const auto by_fill = [&](const char* tag, const int threads, const bool pad) {
-        const int b = bk1gpu::cap_batch(nq, bk1gpu::fill_batch(nq, threads));
-        s.push_back({std::string(tag) + "_f" + std::to_string(threads), bk1opt::make_opt_params(nq, b, threads, pad),
-                     pad, false});
-    };
-    for (const int b : {1, 4, 8, 16}) {
-        by_batch("sc", b, false, false);
-    }
-    for (const int b : {1, 4, 8, 16}) {
-        by_batch("scP", b, true, false);
-    }
-    for (const int b : {1, 4, 16}) {
-        by_batch("scB", b, false, true);
-        by_batch("scBP", b, true, true);
-    }
-    for (const int t : {128, 256, 512}) {
-        by_fill("scF", t, false);
-        by_fill("scFP", t, true);
-    }
-    return s;
+    return "b" + std::to_string(P.batch) + "w" + std::to_string(P.block) + "p" + std::to_string(P.slm) +
+           (block_io ? "io1" : "");
 }
 
-// BK_SHAPE words "b<batch>w<block>[p<0|1>][io<0|1>]"
-std::vector<shape> env_shapes(const int nq, const std::string& list)
+// the bk1_sycl_<p> variant of the same shape, "-" if none
+const char* aot_twin(const opt_params& P, const bool block_io)
 {
-    std::vector<shape> s;
-    std::istringstream ss(list);
+    for (const bk1opt::opt_variant& v : bk1opt::opt_variants) {
+        if (v.block_io == block_io && bk1opt::same_shape(bk1opt::variant_params(P.nq, v), P)) {
+            return v.aot;
+        }
+    }
+    return "-";
+}
+
+// a shape word b<batch>w<block>[p<0|1>][io<0|1>], in that order
+bool parse_shape(const std::string& w, const int nq, shape& s)
+{
+    const char* c = w.c_str();
+    int batch = 0;
+    int block = 0;
+    int n = 0;
+    int m = 0;
+    int p = 0;
+    int io = 0;
+    if (std::sscanf(c, "b%dw%d%n", &batch, &block, &n) != 2) {
+        return false;
+    }
+    if (std::sscanf(c + n, "p%d%n", &p, &m) == 1) {
+        n += m;
+    }
+    if (std::sscanf(c + n, "io%d%n", &io, &m) == 1) {
+        n += m;
+    }
+    s = {w, bk1opt::make_opt_params(nq, batch, block, p), io != 0};
+    return c[n] == '\0' && (p == bk1opt::dense || p == bk1opt::padded);
+}
+
+// the shapes to run: BK_SHAPE, else the lines of BK_SHAPE_FILE for this p,
+// else bk1opt::opt_variants; false on a word that does not parse
+bool selected_shapes(const int nq, std::vector<shape>& shapes)
+{
+    std::string words = bk::get_env("BK_SHAPE").value_or("");
+    if (words.empty()) {
+        if (const auto file = bk::get_env("BK_SHAPE_FILE")) {
+            std::ifstream in(*file);
+            if (!in) {
+                std::fprintf(stderr, "BK_SHAPE_FILE: cannot read %s\n", file->c_str());
+                return false;
+            }
+            std::string line;
+            while (std::getline(in, line)) {
+                std::istringstream ls(line.substr(0, line.find('#')));
+                int p = -1;
+                if ((ls >> p) && p == nq - 2) {
+                    std::string w;
+                    while (ls >> w) {
+                        words += " " + w;
+                    }
+                }
+            }
+            if (words.empty()) {
+                std::fprintf(stderr, "BK_SHAPE_FILE: no shapes for p = %d in %s\n", nq - 2, file->c_str());
+                return false;
+            }
+        }
+    }
+    if (words.empty()) {
+        for (const bk1opt::opt_variant& v : bk1opt::opt_variants) {
+            shapes.push_back({v.sc, bk1opt::variant_params(nq, v), v.block_io});
+        }
+        return true;
+    }
+    std::istringstream ss(words);
     std::string w;
     while (ss >> w) {
-        int b = 0;
-        int blk = 0;
-        int pad = 0;
-        int io = 0;
-        bool ok = true;
-        for (std::size_t i = 0; i < w.size() && ok;) {
-            const std::string key = (w.compare(i, 2, "io") == 0) ? "io" : w.substr(i, 1);
-            i += key.size();
-            std::size_t used = 0;
-            int value = 0;
-            try {
-                value = std::stoi(w.substr(i), &used);
-            } catch (const std::exception&) {
-                ok = false;
-                break;
-            }
-            i += used;
-            if (key == "b") {
-                b = value;
-            } else if (key == "w") {
-                blk = value;
-            } else if (key == "p") {
-                pad = value;
-            } else if (key == "io") {
-                io = value;
-            } else {
-                ok = false;
-            }
+        shape s;
+        if (!parse_shape(w, nq, s)) {
+            std::fprintf(stderr, "cannot parse shape \"%s\" (b<batch>w<block>[p<0|1>][io<0|1>])\n", w.c_str());
+            return false;
         }
-        if (!ok || b < 1 || blk < 1) {
-            std::fprintf(stderr, "BK_SHAPE: cannot parse \"%s\" (b<batch>w<block>[p<0|1>][io<0|1>])\n", w.c_str());
-            std::exit(2);
-        }
-        s.push_back({w, bk1opt::make_opt_params(nq, b, blk, pad != 0), pad != 0, io != 0});
+        shapes.push_back(s);
     }
-    return s;
+    return true;
 }
 
-// two entries for the same kernel (a batch capped to an earlier one's)
-bool same_shape(const shape& a, const shape& b)
+// the variant of shape s: built for it here, launched with that bundle
+template <bool block_io>
+bk1sycl::variant make_variant(sycl::queue& q, const shape& s, double& build_total)
 {
-    return a.P.batch == b.P.batch && a.P.block == b.P.block && a.pad == b.pad && a.block_io == b.block_io;
+    const bk::specialized_kernel k =
+        bk::build_specialized<bk1opt::sc_kernel<float, block_io>, bk1opt::opt_id>(q, s.P);
+    build_total += k.seconds;
+    char secs[32];
+    std::snprintf(secs, sizeof(secs), " build %.3f s", k.seconds);
+    const opt_params P = s.P;
+    const exe_bundle exe = k.bundle;
+    return {s.name,
+            [P, exe](sycl::queue& q, const bk1sycl::device_data& d) {
+                return bk1opt::launch<float, bk1opt::sc_shape, block_io>(q, P, d, &exe);
+            },
+            "shape " + shape_word(s.P, block_io) + " aot " + aot_twin(s.P, block_io) + secs};
 }
 
 } // namespace
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        std::fprintf(stderr, "usage: bk1_sycl_sc <p> [nelmt] [ntests]\n");
+    const int nq = (argc > 1) ? std::atoi(argv[1]) + 2 : 0;
+    if (nq < 2 || nq > MAXNQ) {
+        std::fprintf(stderr, "usage: bk1_sycl_sc <p> [nelmt] [ntests], p = 0..%d (MAXNQ - 2)\n", MAXNQ - 2);
         return 2;
     }
-    const int nq = std::atoi(argv[1]) + 2;
-    const int nm = nq - 1;
-    if (nq < 3 || nq > MAXNQ) {
-        std::fprintf(stderr, "p = %d: nq = %d outside 3..%d (MAXNQ)\n", nq - 2, nq, MAXNQ);
-        return 2;
-    }
-    const std::size_t nelmt = (argc > 2) ? std::size_t(std::atoll(argv[2])) : std::size_t(1) << 17;
+    const std::size_t nelmt = (argc > 2) ? std::size_t(std::atoll(argv[2])) : bk::default_nelmt;
     const int ntests = (argc > 3) ? std::atoi(argv[3]) : 20;
 
-    sycl::queue q{sycl::gpu_selector_v, sycl::property_list{sycl::property::queue::enable_profiling{}}};
-    std::printf("BK1 SYCL sc: p = %d, nq = %d, nelmt = %zu, ntests = %d, device %s\n", nq - 2, nq, nelmt, ntests,
-                q.get_device().get_info<sycl::info::device::name>().c_str());
-
-    const std::vector<float> basis = bk::make_test_basis<float>(nm, nq);
-    std::vector<float> JxW(nelmt * nq * nq * nq);
-    std::vector<float> in(nelmt * nm * nm * nm);
-    bk::fill_random_test_data(in, JxW);
-    const std::vector<float> JxW_t = bk::transpose_jxw(JxW, nelmt, nq);
-    std::vector<double> ref(in.size());
-    bk::reference_bk1(nq, nelmt, basis, JxW, in, ref);
-    const double big = bk::max_abs(ref);
-
-    float* d_basis = sycl::malloc_device<float>(basis.size(), q);
-    float* d_JxW_t = sycl::malloc_device<float>(JxW_t.size(), q);
-    float* d_in = sycl::malloc_device<float>(in.size(), q);
-    float* d_out = sycl::malloc_device<float>(in.size(), q);
-    q.copy(basis.data(), d_basis, basis.size());
-    q.copy(JxW_t.data(), d_JxW_t, JxW_t.size());
-    q.copy(in.data(), d_in, in.size());
-    q.wait_and_throw();
-
-    const std::string shape_env = bk::get_env("BK_SHAPE").value_or("");
-    const std::vector<shape> shapes = shape_env.empty() ? default_shapes(nq) : env_shapes(nq, shape_env);
-    const std::size_t lmem_max = q.get_device().get_info<sycl::info::device::local_mem_size>();
-    const double bytes = sizeof(float) * (2.0 * in.size() + JxW.size());
-    std::vector<float> out(in.size());
-    for (std::size_t v = 0; v < shapes.size(); ++v) {
-        const shape& s = shapes[v];
+    std::vector<shape> shapes;
+    if (!selected_shapes(nq, shapes)) {
+        return 2;
+    }
+    sycl::queue q = bk::make_queue();
+    std::vector<bk1sycl::variant> run;
+    double build_total = 0;
+    for (const shape& s : shapes) {
         if (!bk::selected(s.name.c_str())) {
             continue;
         }
-        bool dup = false;
-        for (std::size_t u = 0; u < v && !dup; ++u) {
-            if (same_shape(shapes[u], s) && bk::selected(shapes[u].name.c_str())) {
-                std::printf("%-14s = %s\n", s.name.c_str(), shapes[u].name.c_str());
-                dup = true;
-            }
-        }
-        if (dup) {
+        if (!bk1opt::opt_valid(s.P, s.block_io)) {
+            std::printf("%-14s skipped: batch %d, block %d (one work-item per point of the widest step, whole "
+                        "sub-groups of 16 for block copies)\n",
+                        s.name.c_str(), s.P.batch, s.P.block);
             continue;
         }
-        if (!bk1opt::opt_valid(s.P) || (s.block_io && s.P.block % 16 != 0) ||
-            sizeof(float) * bk1opt::opt_lmem(s.P) > lmem_max) {
-            std::printf("%-14s skipped: batch %d, block %d does not fit\n", s.name.c_str(), s.P.batch, s.P.block);
-            continue;
-        }
-        const auto launch = [&]() {
-            if (s.block_io) {
-                return bk1opt::launch_sc<float, true>(q, s.P, d_basis, d_JxW_t, d_in, d_out, int(nelmt));
-            }
-            return bk1opt::launch_sc<float, false>(q, s.P, d_basis, d_JxW_t, d_in, d_out, int(nelmt));
-        };
-        q.memset(d_out, 0, out.size() * sizeof(float)).wait();
-        double t_first = 0;
-        double t_dev = 1e30;
-        double t_host = 1e30;
         try {
-            const auto t0 = std::chrono::steady_clock::now();
-            launch().wait_and_throw();
-            t_first = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            for (int t = 0; t < ntests; ++t) {
-                const auto t1 = std::chrono::steady_clock::now();
-                sycl::event ev = launch();
-                ev.wait_and_throw();
-                const auto t2 = std::chrono::steady_clock::now();
-                t_host = std::min(t_host, std::chrono::duration<double>(t2 - t1).count());
-                const double ns = double(ev.get_profiling_info<sycl::info::event_profiling::command_end>() -
-                                         ev.get_profiling_info<sycl::info::event_profiling::command_start>());
-                t_dev = std::min(t_dev, 1e-9 * ns);
-            }
+            run.push_back(s.block_io ? make_variant<true>(q, s, build_total) : make_variant<false>(q, s, build_total));
         } catch (const sycl::exception& e) {
             std::printf("%-14s skipped: %s\n", s.name.c_str(), e.what());
-            continue;
         }
-        q.copy(d_out, out.data(), out.size()).wait();
-        const double relerr = bk::rel_maxdiff(out, ref, big);
-        std::printf("%-14s GDoF/s = %7.3f  GB/s = %6.1f  (device: GDoF/s = %7.3f  GB/s = %6.1f)  relerr = %.1e%s"
-                    "  [b%d w%d, jit %.2f s]\n",
-                    s.name.c_str(), 1e-9 * in.size() / t_host, 1e-9 * bytes / t_host, 1e-9 * in.size() / t_dev,
-                    1e-9 * bytes / t_dev, relerr, bk::fail_mark(relerr), s.P.batch, s.P.block, t_first);
     }
-    sycl::free(d_basis, q);
-    sycl::free(d_JxW_t, q);
-    sycl::free(d_in, q);
-    sycl::free(d_out, q);
+    std::printf("JIT: %zu shapes built in %.2f s (SYCL_CACHE_PERSISTENT=%s)\n", run.size(), build_total,
+                bk::get_env("SYCL_CACHE_PERSISTENT").value_or("0").c_str());
+    bk1sycl::run(q, "BK1 SYCL sc", nq, nelmt, ntests, run);
     return 0;
 }

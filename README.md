@@ -17,10 +17,10 @@ The tree is organized by approach; the file names say the kernel.
 
 | Directory | Contents |
 |-----------|----------|
-| `include/` | Shared across approaches: `bk_common.h` (test data, command line, order dispatch, timing), `bk_harness.h` (references, layouts and checks of the GPU harnesses), `bk_sycl.h` (SYCL timing), `bk1_gpu.h` and `bk1_gpu_steps.h` (BK1 GPU helpers used by OpenMP offload and SYCL) |
+| `include/` | Shared across approaches: `bk_common.h` (test data, command line, order dispatch, timing), `bk_harness.h` (references, layouts and checks of the GPU harnesses), `bk_sycl.h` (SYCL queue and timing), `bk1_gpu.h` and `bk1_gpu_steps.h` (BK1 GPU helpers used by OpenMP offload and SYCL) |
 | `openmp/` | The portable drivers `BK1.cpp`, `BK3.cpp`, `BK5.cpp`, `BK1_ff.cpp` (host or offload), `bk1_sumfact.h`, `bk3_sumfact.h`, `float_float.h` |
 | `openmp/offload/` | GPU kernel variants for BK1 (`bk1_offload.cpp`, one header per strategy in `bk1_offload/`), BK3 (`bk3_offload.cpp`) and BK5 (`bk5_offload.cpp`) |
-| `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp` |
+| `sycl/` | `bk1_sycl.cpp`, `bk3_sycl.cpp`, `bk5_sycl.cpp`; `bk1_sycl_sc.cpp` (BK1, every order and kernel shape in one JIT binary through a specialization constant), `bk1_sycl_opt.h` (the BK1 opt kernel and its shapes), `bk1_sycl_harness.h` (host side of both BK1 drivers); `README.md` (conventions and status of the specialization-constant kernels) |
 | `tinytc/` | `bk_tinytc.cpp` (driver for BK1, BK3 and BK5), `ir/` (the kernels; `bk1.ir` and `bk5.ir` as received, `bk3_blk.ir` and `bk3_ec.ir` in tinytc's blocked and our layout, `bk3_*_gs.ir` with S in global memory), `repro_slm/` (bug reproducer), `upstream_issues.md` (drafts) |
 | `cm/` | `bk1_cm_genx.cpp`, `bk5_cm_genx.cpp` (BK1 and BK5 in C for Metal), `bk1_cm.cpp`, `bk5_cm.cpp` (SYCL hosts), `cm_common.h`, `cm_sycl.hpp`, `Makefile`, `README.md` |
 | `amx/` | `BK1_amx.cpp`, `amx.h` (AMX instructions, emulated off Apple Silicon), `scripts/` |
@@ -98,7 +98,7 @@ cmake --build build/gpu-openmp                      # plus bk{1,3,5}_offload_<p>
 ```sh
 source /opt/intel/oneapi/setvars.sh
 cmake --preset gpu-sycl -DBK_GPU_DEVICE=acm-g10     # build/gpu-sycl
-cmake --build build/gpu-sycl                        # bk{1,3,5}_sycl_<p>, bk{1,5}_sycl_<p>_jit, stream_sycl: 50 s
+cmake --build build/gpu-sycl                        # bk{1,3,5}_sycl_<p>, bk{1,5}_sycl_<p>_jit, bk1_sycl_sc, stream_sycl: 50 s
 ```
 
 **A few orders, or tinytc**
@@ -279,10 +279,14 @@ scripts/study/sweep.sh gpu_results.csv     # BK1, BK3, BK5 at ORDERS="2 4 6", pl
 Builds with other flags get their own tree, which `run.sh` and the study
 scripts then use too: `BUILD_DIR=build/a770-grf EXTRA_FLAGS=... scripts/build.sh ...`.
 
-`run.sh` shares the GPU with no one: it waits until no other process (other
-than display clients) has held it for `GPU_IDLE_SECS` (10) seconds and
-repeats a run during which another one appeared (`GPU_GUARD=0` turns this
-off).
+`run.sh` shares the GPU with no one: it starts at once when no other
+process (other than display clients and GPU monitors) holds it, otherwise
+waits until none has for `GPU_IDLE_SECS` (10) seconds, and repeats a run
+during which another one appeared (`GPU_GUARD=0` turns this off). It keeps
+JIT-compiled kernels in `$BUILD_DIR/sycl_cache`. The harnesses check their
+results against double-precision references unless `BK_CHECK=0`
+(benchmark only, as the sweeps run); `scripts/check_gpu.sh` checks every
+variant of the BK1, BK3 and BK5 harnesses on its own.
 
 The A770 has no fp64 hardware. BK1_ff is built and run with the driver's
 FP64 emulation (`IGC_EnableDPEmulation=1`, plus
@@ -342,6 +346,17 @@ offload, SYCL, tinytc) with the scripts that produced them; the roofline
 | BK5 (6 factors)  | 14.0 | 13.5 | 13.5 | 12.2 | 12.3 | 11.7 | 13.5 | 11.5 |
 
 All of them are memory-bound, at 71-97% of the STREAM bandwidth roof.
+
+`dof_sweep_a770.csv` (and its two plots) was redrawn on 2026-11-17 for both
+APIs, 1e3 to 1e8 DoFs, best of 5 launches, benchmark only (`BK_CHECK=0`;
+the kernels are checked by `scripts/check_gpu.sh`). The variants are the
+fastest by median walltime in `results/a770/bk1_pick_a770.csv` (3 runs, 5
+launches, 2e7 DoFs): OpenMP `ref`, `gsF_f128`, `plane1`, `gsP_b1`, `gsF_f256`,
+`gsT_b1`, `plane1`, `gsI_b1` and SYCL `elem_sg16`, `inl_b8`, `inl_b4`,
+`inl_b1`, `inlB_b1`, `inlB_b4`, `inlB_b1`, `inl_b1` for p = 1..8. At 1e8
+DoFs: OpenMP 19.8, 23.8, 21.2, 24.7, 24.8, 29.8, 21.7, 25.6 GDoF/s (host
+time); SYCL 20.0, 24.6, 25.0, 26.1, 27.1, 30.4, 29.8, 28.4 GDoF/s (device
+time).
 
 BK3 (`bk3_offload`, `bk3_sycl`; `results/a770/bk3_pick_a770.txt`, median of
 3 runs at ~2e7 DoFs, best of the two APIs) against two roofs measured by

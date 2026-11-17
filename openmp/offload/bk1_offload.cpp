@@ -6,11 +6,13 @@
 //   scripts/build.sh bk1_offload_<p>       (-> build/a770/bk1_offload_<p>)
 //   scripts/run.sh bk1_offload_<p> [nelmt] [ntests]
 //   BK_KERNEL="teams teams1p" ...             run a subset (default: all)
-//   BK_REF=0 ...                              skip the (slow) reference kernel;
-//                                             the first variant is the reference
+//   BK_CHECK=0 ...                            benchmark only: no reference
+//                                             kernel, no check ("maxdiff = off");
+//                                             ref then runs only when selected
 //
-// Data: pseudo-random (bk::fill_random_test_data).  The check prints the
-// largest difference to the reference relative to the largest |reference|.
+// Data: pseudo-random (bk::fill_random_test_data).  The check (default): ref
+// (SumFactorization, slow) runs first, and each variant prints its largest
+// difference to it relative to the largest |reference|.
 
 #include <omp.h>
 
@@ -121,7 +123,7 @@ int main(int argc, char** argv)
     constexpr int nm = nq - 1;
     const std::size_t nelmt = (argc > 1) ? std::size_t(std::atoll(argv[1])) : std::size_t(1) << 19;
     const int ntests = (argc > 2) ? std::atoi(argv[2]) : 10;
-    const bool with_ref = get_env("BK_REF").value_or("1") != "0";
+    const bool check = checking();
     g_grid = env_int("BK_TEAMS", 0);
 
     const std::array<float, nm * nq> basis = make_test_basis<float, nm, nq>();
@@ -134,8 +136,8 @@ int main(int argc, char** argv)
         need_jxw_t = need_jxw_t || (v.jxw_transposed && selected(v.name));
     }
     const std::vector<float> JxW_t = need_jxw_t ? transpose_jxw(JxW, nelmt, nq) : std::vector<float>();
-    std::vector<float> ref(in.size());
-    std::vector<float> out(in.size());
+    std::vector<float> ref(in.size());                // ref's output, or each output without the check
+    std::vector<float> out(check ? in.size() : 0);    // the outputs of the variants checked against ref
     const double bytes = sizeof(float) * (2.0 * in.size() + JxW.size());
 
     std::printf("BK1 offload: p = %d, nq = %d, nelmt = %zu, ntests = %d, team rounding %d\n",
@@ -144,7 +146,7 @@ int main(int argc, char** argv)
     // The arrays stay on the device across the variants: the inputs are
     // uploaded once; each variant's output is zeroed on the device (so an
     // entry a kernel misses shows in maxdiff) and copied back after its runs.
-    // The first kernel run (ref, unless BK_REF=0) is the reference of the others.
+    // With the check, the first kernel run, ref, is the reference of the others.
     const float* d_basis = basis.data();
     const float* d_jxw = JxW.data();
     const float* d_jxw_t = JxW_t.data();
@@ -152,20 +154,18 @@ int main(int argc, char** argv)
     float* d_ref = ref.data();
     float* d_out = out.data();
     const std::size_t n_in = in.size();
+    const std::size_t n_out = out.size();
     const std::size_t n_jxw = JxW.size();
     const std::size_t n_jxw_t = JxW_t.size();
     bool have_ref = false;
     bool invalid = false;   // no early return: the target data block must end normally
     double big = 0.0;
     #pragma omp target data map(to: d_basis[:nm*nq], d_jxw[:n_jxw], d_jxw_t[:n_jxw_t], d_in[:n_in]) \
-        map(alloc: d_ref[:n_in], d_out[:n_in])
+        map(alloc: d_ref[:n_in], d_out[:n_out])
     {
         for (const variant& v : variants) {
             const bool is_ref = std::strcmp(v.name, "ref") == 0;
-            if (is_ref && !with_ref) {
-                continue;
-            }
-            if (!is_ref && !selected(v.name)) {
+            if (!selected(v.name) && !(is_ref && check)) {
                 continue;
             }
             float* dst = have_ref ? d_out : d_ref;
@@ -174,27 +174,36 @@ int main(int argc, char** argv)
                 dst[i] = 0.0f;
             }
             const float* jxw = v.jxw_transposed ? d_jxw_t : d_jxw;
-            const double t = time_min(ntests, [&] { v.kernel(nelmt, d_basis, jxw, d_in, dst); });
-            #pragma omp target update from(dst[:n_in])
+            // timed: ntests launches of the kernel, the best wall time
+            const double t = time_min(ntests, [&] {
+                v.kernel(nelmt, d_basis, jxw, d_in, dst);
+            });
             if (g_short_team != 0) {
                 std::printf("%-10s a team got fewer threads than its work items; result invalid\n", v.name);
                 invalid = true;
                 break;
             }
-            double diff = 0.0;
-            if (have_ref) {
-                for (std::size_t i = 0; i < n_in; ++i) {
-                    diff = std::max(diff, double(std::fabs(out[i] - ref[i])));
+            // the check column: "off", ref's "(reference)", or the largest
+            // difference to ref relative to its largest value, FAIL marked
+            char chk[48] = "off";
+            if (check) {
+                #pragma omp target update from(dst[:n_in])
+                double diff = 0.0;
+                if (have_ref) {
+                    for (std::size_t i = 0; i < n_in; ++i) {
+                        diff = std::max(diff, double(std::fabs(out[i] - ref[i])));
+                    }
+                    std::snprintf(chk, sizeof(chk), "%.2e%s", diff / big, fail_mark(diff / big));
+                } else {
+                    for (const float r : ref) {
+                        big = std::max(big, double(std::fabs(r)));
+                    }
+                    std::snprintf(chk, sizeof(chk), "%.2e (reference)", 0.0);
                 }
-            } else {
-                for (const float r : ref) {
-                    big = std::max(big, double(std::fabs(r)));
-                }
+                have_ref = true;
             }
-            std::printf("%-10s GDoF/s = %8.3f  GB/s = %7.1f  time = %8.3f ms  maxdiff = %.2e%s\n",
-                        v.name, 1e-9 * n_in / t, 1e-9 * bytes / t, 1e3 * t,
-                        have_ref ? diff / big : 0.0, have_ref ? "" : " (reference)");
-            have_ref = true;
+            std::printf("%-10s GDoF/s = %8.3f  GB/s = %7.1f  time = %8.3f ms  maxdiff = %s\n", v.name,
+                        1e-9 * n_in / t, 1e-9 * bytes / t, 1e3 * t, chk);
         }
     }
     return invalid ? 1 : 0;

@@ -43,6 +43,19 @@ they must agree bit for bit, as every output is summed in index order.
   change to `float_float.h` or `bk1_sumfact.h`. Never build with
   `-ffast-math`; the header rejects it, and anything subtler that breaks IEEE
   rounding shows up as `FAIL`.
+- SYCL kernels with a specialization-constant version (one JIT binary for
+  every order, e.g. `bk1_sycl_sc`) follow the conventions of `sycl/README.md`
+  ("Specialization constants"). After adding or changing one, run
+  `scripts/study/spec_compare.sh <aot> <sc> results/<machine>/spec_<kernel>_<machine>.csv`
+  and update that README's status table, so every kernel's cost against
+  its AOT twins and its JIT build times stay on record. Kernel functors
+  keep their pointers as their own members and are launched themselves,
+  never through a wrapper functor: a wrapper changes IGC's code generation
+  unpredictably (`include/bk_sycl.h`, `sycl/repro_simd/`).
+- After any change to a GPU kernel or harness, run `scripts/check_gpu.sh`
+  (every variant of the BK1/BK3/BK5 OpenMP offload and SYCL harnesses,
+  checked against the double-precision references; exit status 1 on
+  failure). The benchmark scripts run with `BK_CHECK=0` and check nothing.
 - `amx/scripts/validate.sh` checks the AMX kernel against the serial
   reference on random data; the emulator also enforces the 128-byte
   alignment of pair/quad loads and stores, so run it after any layout change.
